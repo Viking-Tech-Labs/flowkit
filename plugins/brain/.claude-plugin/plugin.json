@@ -1,0 +1,9 @@
+{
+  "name": "brain",
+  "version": "0.1.0",
+  "description": "A personal knowledge wiki in plain markdown: save fixes and notes, recall them by topic or symptom, lint the vault, drain the inbox",
+  "author": {
+    "name": "flowkit"
+  },
+  "keywords": ["knowledge-base", "notes", "wiki", "runbooks"]
+}
