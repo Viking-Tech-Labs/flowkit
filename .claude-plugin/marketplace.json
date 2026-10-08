@@ -1,0 +1,31 @@
+{
+  "name": "flowkit",
+  "owner": {
+    "name": "flowkit"
+  },
+  "metadata": {
+    "description": "A working flow for Claude Code as versioned plugins: a personal knowledge wiki, session conventions, a prompt audit and a change walkthrough"
+  },
+  "plugins": [
+    {
+      "name": "brain",
+      "source": "./plugins/brain",
+      "description": "A personal knowledge wiki in plain markdown: save fixes and notes, recall them by topic or symptom, lint the vault, drain the inbox"
+    },
+    {
+      "name": "session-discipline",
+      "source": "./plugins/session-discipline",
+      "description": "Working-session conventions you adopt into your own CLAUDE.md, and a decision-interview skill (content arrives in a later release)"
+    },
+    {
+      "name": "prompt-audit",
+      "source": "./plugins/prompt-audit",
+      "description": "Mine your own Claude Code prompt history for what you keep asking by hand, and turn it into rules (content arrives in a later release)"
+    },
+    {
+      "name": "walkthrough",
+      "source": "./plugins/walkthrough",
+      "description": "A guided test walkthrough of a branch, a pull request or a pasted diff (content arrives in a later release)"
+    }
+  ]
+}
