@@ -1,0 +1,9 @@
+{
+  "name": "walkthrough",
+  "version": "0.1.0",
+  "description": "A guided test walkthrough of a branch, a pull request or a pasted diff (content arrives in a later release)",
+  "author": {
+    "name": "flowkit"
+  },
+  "keywords": ["review", "testing", "walkthrough"]
+}
