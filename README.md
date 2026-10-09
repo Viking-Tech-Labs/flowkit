@@ -8,18 +8,19 @@ notes, your `CLAUDE.md`) stays yours, apart from the kit. Nobody clones this rep
 
 Paste this into Claude Code and it does the setup:
 
-> Add the plugin marketplace `OWNER/flowkit` with `claude plugin marketplace add`, install the
-> `brain` plugin from it with `claude plugin install brain@flowkit`, then tell me to type
-> `/reload-plugins` and `/brain:init ~/brain`.
+> Add the plugin marketplace `Viking-Tech-Labs/flowkit` with `claude plugin marketplace add`,
+> install the `brain` plugin from it with `claude plugin install brain@flowkit`, then tell me to
+> type `/reload-plugins` and `/brain:init ~/brain`.
 
 Or by hand:
 
-1. Add the marketplace: `claude plugin marketplace add OWNER/flowkit`
+1. Add the marketplace: `claude plugin marketplace add Viking-Tech-Labs/flowkit`
 2. Install the plugin: `claude plugin install brain@flowkit`
 3. In Claude Code (a new session, or `/reload-plugins` in a running one): `/brain:init ~/brain`
 
-`OWNER/flowkit` stands for this repository's address on GitHub; it is filled in with the first
-release. Step 3 creates your vault at `~/brain` (any path works) from the template inside the
+While this repository is private, step 1 needs access to the Viking-Tech-Labs organisation on
+GitHub plus a logged-in `gh` or an SSH key; the marketplace add then uses those credentials, with
+no prompt. Step 3 creates your vault at `~/brain` (any path works) from the template inside the
 plugin, starts git there on `main`, and writes the vault's `.claude/settings.json`, which enables
 the plugin for every session opened in the vault. Then fill in `_me.md` in the vault by hand:
 every session there reads it first.

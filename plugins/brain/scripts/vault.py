@@ -20,10 +20,9 @@ import shutil
 import subprocess
 import sys
 
-# Where a vault's .claude/settings.json finds the marketplace. None until the first release
-# fills in the published address, e.g. {"source": "github", "repo": "OWNER/flowkit"}; until
-# then a marketplace added from a directory is registered by that directory's path.
-MARKETPLACE_SOURCE = None
+# Where a vault's .claude/settings.json finds the marketplace: the published address. With
+# None here, a marketplace added from a directory is registered by that directory's path.
+MARKETPLACE_SOURCE = {"source": "github", "repo": "Viking-Tech-Labs/flowkit"}
 MARKETPLACE = "flowkit"
 PLUGIN = "brain"
 
