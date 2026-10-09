@@ -1,13 +1,14 @@
 # brain
 
 A personal knowledge wiki in plain markdown, driven by five skills. The vault is a directory
-you own (a copy of the kit's `template/`); this plugin carries the protocol for working in it.
+you own, created by `/brain:init` from the `template/` in this plugin; the plugin carries the
+protocol for working in it.
 
 Install, after adding the flowkit marketplace (see the root README): `claude plugin install brain@flowkit`.
 
 | Skill | What it does |
 |---|---|
-| `/brain:init [path]` | Registers your vault once per machine. |
+| `/brain:init [path]` | Creates your vault at the path from the plugin's template (git on `main`, a `.claude/settings.json` that enables this plugin there), or registers a vault that already exists. Once per machine. Refuses a non-empty directory that is not a vault. |
 | `/brain:save <thing>` | Saves a fix, concept, person or raw dump: searches first, writes the page in the vault's format, updates `index.md`, `log.md`, `hot.md`, commits. |
 | `/brain:recall <query>` | Looks up by topic or symptom: `hot.md`, then `index.md`, then the one to three best pages. Records misses in `inbox.md`. |
 | `/brain:lint` | Runs `brain-lint.py` (index drift, dangling links, orphans, frontmatter, log order, runbook trust stamps, stale pages) and reports; fixes nothing. |
