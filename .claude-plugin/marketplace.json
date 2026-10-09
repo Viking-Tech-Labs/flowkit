@@ -15,7 +15,7 @@
     {
       "name": "session-discipline",
       "source": "./plugins/session-discipline",
-      "description": "Working-session conventions you adopt into your own CLAUDE.md, and a decision-interview skill (content arrives in a later release)"
+      "description": "Working-session conventions you adopt into your own CLAUDE.md as a managed block, and a decision-interview skill"
     },
     {
       "name": "prompt-audit",

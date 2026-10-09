@@ -33,7 +33,7 @@ one repository without touching your user settings, add the marketplace and inst
 | Plugin | What it gives you | State |
 |---|---|---|
 | `brain` | A personal knowledge wiki in plain markdown: `/brain:init`, `/brain:save`, `/brain:recall`, `/brain:lint`, `/brain:inbox`. Symptom-first lookups, a trust stamp on every runbook. | 0.1.0, usable |
-| `session-discipline` | Session conventions you adopt into your own `CLAUDE.md`, and a decision-interview skill. | 0.1.0, name reserved, content coming |
+| `session-discipline` | Session conventions you adopt into your own `CLAUDE.md` as one block between markers (`/session-discipline:adopt`, with `status` and `update`): each rule says what it replaces, you delete the ones you do not want. Plus a decision-interview skill. | 0.1.0, usable |
 | `prompt-audit` | Mines your own prompt history for what you keep asking by hand and turns it into rules. | 0.1.0, name reserved, content coming |
 | `walkthrough` | A guided test walkthrough of a branch, a pull request or a pasted diff. | 0.1.0, name reserved, content coming |
 
@@ -74,4 +74,5 @@ without a bump reaches nobody. A marketplace added from a local directory
 plugins/<name>/                   one directory per plugin, each with .claude-plugin/plugin.json
 plugins/brain/skills/             the five skills; scripts/ holds brain-lint.py and vault.py
 plugins/brain/template/           the vault /brain:init creates
+plugins/session-discipline/       block/conventions.md, the adopt and decision-interview skills, scripts/adopt.py
 ```
