@@ -20,7 +20,7 @@
     {
       "name": "prompt-audit",
       "source": "./plugins/prompt-audit",
-      "description": "Mine your own Claude Code prompt history for what you keep asking by hand, and turn it into rules (content arrives in a later release)"
+      "description": "Mine your own Claude Code prompt history for what you keep asking by hand, and turn the repeats into rules in your own CLAUDE.md"
     },
     {
       "name": "walkthrough",

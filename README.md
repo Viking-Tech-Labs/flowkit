@@ -34,7 +34,7 @@ one repository without touching your user settings, add the marketplace and inst
 |---|---|---|
 | `brain` | A personal knowledge wiki in plain markdown: `/brain:init`, `/brain:save`, `/brain:recall`, `/brain:lint`, `/brain:inbox`. Symptom-first lookups, a trust stamp on every runbook. | 0.1.0, usable |
 | `session-discipline` | Session conventions you adopt into your own `CLAUDE.md` as one block between markers (`/session-discipline:adopt`, with `status` and `update`): each rule says what it replaces, you delete the ones you do not want. Plus a decision-interview skill. | 0.1.0, usable |
-| `prompt-audit` | Mines your own prompt history for what you keep asking by hand and turns it into rules. | 0.1.0, name reserved, content coming |
+| `prompt-audit` | Reads the prompts you typed since the last audit, finds what you keep asking for by hand (`/prompt-audit:audit`), interviews you on the fixes and writes the accepted rules into your own section of `CLAUDE.md`. Your prompts never leave a scratch directory. | 0.1.0, usable |
 | `walkthrough` | A guided test walkthrough of a branch, a pull request or a pasted diff. | 0.1.0, name reserved, content coming |
 
 Each plugin is its own decision: install only the ones you want, with
@@ -75,4 +75,5 @@ plugins/<name>/                   one directory per plugin, each with .claude-pl
 plugins/brain/skills/             the five skills; scripts/ holds brain-lint.py and vault.py
 plugins/brain/template/           the vault /brain:init creates
 plugins/session-discipline/       block/conventions.md, the adopt and decision-interview skills, scripts/adopt.py
+plugins/prompt-audit/             the audit skill and its analyst brief, scripts/extract.py and rules.py
 ```
