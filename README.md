@@ -35,7 +35,7 @@ one repository without touching your user settings, add the marketplace and inst
 | `brain` | A personal knowledge wiki in plain markdown: `/brain:init`, `/brain:save`, `/brain:recall`, `/brain:lint`, `/brain:inbox`. Symptom-first lookups, a trust stamp on every runbook. | 0.1.0, usable |
 | `session-discipline` | Session conventions you adopt into your own `CLAUDE.md` as one block between markers (`/session-discipline:adopt`, with `status` and `update`): each rule says what it replaces, you delete the ones you do not want. Plus a decision-interview skill. | 0.1.0, usable |
 | `prompt-audit` | Reads the prompts you typed since the last audit, finds what you keep asking for by hand (`/prompt-audit:audit`), interviews you on the fixes and writes the accepted rules into your own section of `CLAUDE.md`. Your prompts never leave a scratch directory. | 0.1.0, usable |
-| `walkthrough` | A guided test walkthrough of a branch, a pull request or a pasted diff. | 0.1.0, name reserved, content coming |
+| `walkthrough` | Makes you understand a branch, a pull request or a pasted diff by predicting it first (`/walkthrough:start`): a summary, then questions on what happens underneath, graded against the code. Where your sound expectation and the code differ is a finding, written up as a small change you can reject. Unattended, it gives the steps to try by hand. | 0.1.0, usable |
 
 Each plugin is its own decision: install only the ones you want, with
 `claude plugin install <plugin>@flowkit`. Each says in its own README what it needs.
@@ -76,4 +76,5 @@ plugins/brain/skills/             the five skills; scripts/ holds brain-lint.py 
 plugins/brain/template/           the vault /brain:init creates
 plugins/session-discipline/       block/conventions.md, the adopt and decision-interview skills, scripts/adopt.py
 plugins/prompt-audit/             the audit skill and its analyst brief, scripts/extract.py and rules.py
+plugins/walkthrough/              the start skill and its question guide, scripts/history.py
 ```
