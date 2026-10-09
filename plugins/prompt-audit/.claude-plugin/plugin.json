@@ -1,7 +1,7 @@
 {
   "name": "prompt-audit",
   "version": "0.1.0",
-  "description": "Mine your own Claude Code prompt history for what you keep asking by hand, and turn it into rules (content arrives in a later release)",
+  "description": "Mine your own Claude Code prompt history for what you keep asking by hand, and turn the repeats into rules in your own CLAUDE.md",
   "author": {
     "name": "flowkit"
   },
