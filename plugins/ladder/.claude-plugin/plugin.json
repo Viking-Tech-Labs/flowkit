@@ -1,0 +1,9 @@
+{
+  "name": "ladder",
+  "version": "0.1.0",
+  "description": "A fixed model ladder for handoff closes: a kind -> model/effort table you edit, defaults from your plan, and an effort gate that asks before a max launch once you turn max on",
+  "author": {
+    "name": "flowkit"
+  },
+  "keywords": ["ladder", "model", "effort", "handoff"]
+}

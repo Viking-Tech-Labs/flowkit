@@ -4,7 +4,7 @@
     "name": "flowkit"
   },
   "metadata": {
-    "description": "A working flow for Claude Code as versioned plugins: a personal knowledge wiki, session conventions, a prompt audit, a change walkthrough, session handoffs and a live board of your story chains"
+    "description": "A working flow for Claude Code as versioned plugins: a personal knowledge wiki, session conventions, a prompt audit, a change walkthrough, session handoffs, a live board of your story chains and a fixed model ladder"
   },
   "plugins": [
     {
@@ -36,6 +36,11 @@
       "name": "board",
       "source": "./plugins/board",
       "description": "A live board of your story chains: a card per story (running, needs you, stalled, done), its FOR ME steps with ticks that persist, its MR links; /where and /forme in text"
+    },
+    {
+      "name": "ladder",
+      "source": "./plugins/ladder",
+      "description": "A fixed model ladder for handoff closes: a kind -> model/effort table you edit, defaults from your plan, and an effort gate that asks before a max launch once you turn max on"
     }
   ]
 }
