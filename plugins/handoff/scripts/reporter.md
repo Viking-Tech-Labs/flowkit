@@ -24,8 +24,10 @@ messages can go missing, so always read the file, never answer from the message 
 **The final report.** Write it when both hold: every name in a `Next: started …` line has its own
 section, and no session of the story is busy or waiting (`claude agents --json` lists each
 session's `name` and `status`; the story's sessions are the names in the file). The session that
-sent the doorbell is still busy for a few seconds after it: when it is the only one, wait 30
-seconds (`sleep 30`) and look again, up to three times, before you decide. The report is a
+sent the doorbell is still busy for a few seconds after it: when it is the only one, look again
+30 seconds apart, up to three times, before you decide. Wait with the Monitor tool (a command that
+checks `claude agents --json` every 30 seconds and exits once that session is no longer busy, or
+after three looks), since a plain `sleep` in the foreground is refused. The report is a
 close in the same four blocks:
 
 - DONE: per repo, branch, commits, pushed yes/no and links, as the sections give them.

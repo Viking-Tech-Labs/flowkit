@@ -5,8 +5,9 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py state <data-dir> <repo>             what a close needs to know, one line each
   handoff.py pickup-doc <data-dir> <repo> <doc>  remember the repo's pick-up doc
   handoff.py save-prompt <name>                  stdin -> ~/.claude/spawned/<name>.md
-  handoff.py record <slug>                       stdin appended to ~/.claude/stories/<slug>.md, then
-                                                 the story's reporter is told `closed <name>`
+  handoff.py record <story>                      stdin appended to ~/.claude/stories/<slug>.md (the
+                                                 story slugified as flowkit-spawn does), then the
+                                                 story's reporter is told `closed <name>`
   handoff.py conf <key> <value>                  set a key of ~/.config/flowkit/handoff.conf
   handoff.py settings diff|install <key=json>…   values for the user's settings.json (a.b nests)
   handoff.py away | back | away-status           the ~/.claude/away flag (12 hours)
@@ -56,6 +57,11 @@ def safe(name, what):
     if not SAFE.match(name):
         fail(f"{what} must be letters, digits, '.', '_' or '-': {name!r}")
     return name
+
+
+def slugify(text):
+    """A story's slug, as flowkit-spawn makes it for the tab and `<slug>-report`."""
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).lstrip("-")[:32].rstrip("-")
 
 
 def repo_root(repo):
@@ -217,6 +223,8 @@ def ring(slug, name):
         return
     try:
         agents = agents_json("--all")
+        if not isinstance(agents, list):
+            return
         bg = [a for a in agents if a.get("kind") == "background" and a.get("name") == f"{slug}-report"]
         if bg:
             wake(max(bg, key=lambda a: a.get("startedAt") or 0), name)
@@ -235,11 +243,12 @@ def ring(slug, name):
         tmux("send-keys", "-t", found[0], "C-u")
         tmux("send-keys", "-t", found[0], "-l", f"closed {name}")
         tmux("send-keys", "-t", found[0], "Enter")
-    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+    except Exception:  # the record is already written; a doorbell never fails the close
         return
 
 
-def record(slug):
+def record(story):
+    slug = slugify(story)
     STORIES.mkdir(parents=True, exist_ok=True)
     path = STORIES / f"{safe(slug, 'the story slug')}.md"
     text = sys.stdin.read().strip("\n")
@@ -250,7 +259,7 @@ def record(slug):
         f.write(f"{head}\n{text}\n")
     print(path)
     section = re.match(r"## (.+?) · \d{4}-\d{2}-\d{2} \d{2}:\d{2}\s*$", text.splitlines()[0])
-    if section:
+    if section and section.group(1) != "Final report":
         ring(slug, section.group(1))
 
 
