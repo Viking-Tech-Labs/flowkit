@@ -132,10 +132,16 @@ fi
 
 # Refusal 2: a live session of that name, as `claude agents` lists it or as a pane title
 # (Claude shows its --name there behind a status glyph, e.g. "✳ billing-s3").
-agents="$(claude agents --json 2>/dev/null || true)"
+# `claude agents --json` as one "<pid> <name> <cwd>" line per live session (python3, no jq).
+sessions() {
+  claude agents --json 2>/dev/null | python3 -c 'import json, sys
+for r in json.load(sys.stdin):
+    print(r.get("pid") or "-", r.get("name") or "-", r.get("cwd") or "-")' 2>/dev/null || true
+}
+agents="$(sessions)"
 running() {
   local pid pcmd ptitle
-  if printf '%s' "$agents" | jq -e --arg n "$1" 'type == "array" and any(.[]; .name == $n)' >/dev/null 2>&1; then
+  if printf '%s\n' "$agents" | awk -v n="$1" '$2 == n { f = 1 } END { exit !f }'; then
     echo "claude agents"; return 0
   fi
   while IFS=' ' read -r pid pcmd ptitle; do
@@ -203,7 +209,8 @@ fi
 # prompt says so.
 shared_arg=""; shared_file=""
 if [ "$single" -eq 1 ]; then
-  others="$(printf '%s' "$agents" | jq -r --arg r "$repo" '[.[]? | select(.cwd == $r or (.cwd | startswith($r + "/"))) | .name] | join(", ")' 2>/dev/null || true)"
+  others="$(printf '%s\n' "$agents" | awk -v r="$repo" '{ c = substr($0, length($1 $2) + 3) }
+    c == r || index(c, r "/") == 1 { printf "%s%s", (n++ ? ", " : ""), $2 }')"
   if [ -n "$others" ]; then
     shared_file="$store/${name}-${stamp}-shared.md"
     printf '%s\n' "Shared working tree: another Claude session is working in $repo right now ($others)." \
@@ -248,18 +255,16 @@ fi
 # link alone. Prints the link, or "pending". Never types /remote-control: with the flag passed
 # that opens the Remote Control panel, which holds back background-task results while open.
 start() { # pane command session-name
-  local up=0 rcurl="" screen list shell_pid pid
+  local up=0 rcurl="" screen shell_pid pid
   shell_pid="$(tm display-message -p -t "$1" '#{pane_pid}')"
   tm send-keys -t "$1" C-u # anything half-typed would prefix the command
   tm send-keys -t "$1" "cd '$repo' && $2" Enter
   for _ in $(seq 1 15); do
     sleep 1
     screen="$(tm capture-pane -p -J -S -80 -t "$1" 2>/dev/null || true)"
-    if list="$(claude agents --json 2>/dev/null)" && printf '%s' "$list" | jq -e 'type == "array"' >/dev/null 2>&1; then
-      for pid in $(printf '%s' "$list" | jq -r --arg n "$3" '.[] | select(.name == $n and .pid != null) | .pid' 2>/dev/null); do
-        [ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$shell_pid" ] && up=1
-      done
-    fi
+    for pid in $(sessions | awk -v n="$3" '$2 == n && $1 != "-" { print $1 }'); do
+      [ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$shell_pid" ] && up=1
+    done
     rcurl="$(printf '%s' "$screen" | grep -o 'https://claude.ai/code/session_[A-Za-z0-9]*' | head -1 || true)"
     [ "$up" -eq 1 ] && { [ "$rc" -eq 0 ] || [ -n "$rcurl" ]; } && break
   done
@@ -271,7 +276,7 @@ start() { # pane command session-name
     done
   fi
   [ "$up" -eq 1 ] || echo "warning: no session '$3' came up in $1 within 15s; check the pane (a folder trust prompt?)" >&2
-  printf '%s' "${rcurl:-pending}"
+  if [ "$rc" -eq 0 ]; then printf off; else printf %s "${rcurl:-pending}"; fi
 }
 
 # The reporter collects the story's closes from its story file and answers "what is going on".

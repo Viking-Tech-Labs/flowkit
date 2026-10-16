@@ -8,7 +8,8 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py record <slug>                       stdin appended to ~/.claude/stories/<slug>.md
   handoff.py away | back | away-status           the ~/.claude/away flag (12 hours)
   handoff.py statusline diff|install <root>      the status line that records context and cost
-  handoff.py refresh <root>                      update an installed status line (SessionStart)
+  handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
+  handoff.py refresh <root>                      update an installed status line and tmux kit (SessionStart)
 """
 import difflib
 import json
@@ -32,6 +33,12 @@ LADDER = CONFIG / "ladder.md"
 SETTINGS_FILE = CONFIG / "handoff.conf"
 STATUSLINE = CONFIG / "statusline.py"
 SETTINGS = CLAUDE / "settings.json"
+KIT = {  # the tmux kit: where each file of the plugin is copied, so a tmux.conf never points at a version
+    "tmux/tmux.conf": CONFIG / "tmux.conf",
+    "tmux/cheatsheet.md": CONFIG / "tmux-cheatsheet.md",
+    "bin/flowkit-tmux": HOME / ".local" / "bin" / "flowkit-tmux",
+}
+KIT_CONF = KIT["tmux/tmux.conf"]
 HEADING = "WHERE TO PICK UP"
 NAMES = ("PLAN.md", "BUILD-PLAN.md", "HANDOFF.md", "ROADMAP.md", "docs/PLAN.md", "docs/plan.md", "docs/HANDOFF.md")
 SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -199,12 +206,72 @@ def statusline(action, root):
     print(f"statusline: installed; {SETTINGS} now runs {STATUSLINE} (applies to the next session)")
 
 
+def user_tmux_conf():
+    for path in (HOME / ".tmux.conf", CONFIG.parent / "tmux" / "tmux.conf"):
+        if path.is_file():
+            return path
+    return HOME / ".tmux.conf"
+
+
+def home_short(path):
+    return "~/" + str(path.relative_to(HOME)) if path.is_relative_to(HOME) else str(path)
+
+
+def copy_kit(root):
+    for rel, dest in KIT.items():
+        source = Path(root) / rel
+        if not dest.is_file() or dest.read_bytes() != source.read_bytes():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, dest)
+        if rel.startswith("bin/"):
+            dest.chmod(0o755)
+
+
+def tmux_kit(action, root):
+    conf = user_tmux_conf()
+    line = f"source-file {home_short(KIT_CONF)}"
+    text = conf.read_text() if conf.is_file() else ""
+    sourced = str(KIT_CONF) in text or home_short(KIT_CONF) in text
+    if sourced and KIT_CONF.is_file():
+        print(f"tmux-kit: installed ({conf} sources {KIT_CONF})")
+        return
+    new = text if sourced else text + ("\n" if text and not text.endswith("\n") else "") + \
+        f"\n# flowkit tmux kit (handoff plugin); your own settings go below this line\n{line}\n"
+    if action == "diff":
+        print("tmux-kit: not installed; install copies " + ", ".join(home_short(d) for d in KIT.values()))
+        if sourced:
+            print(f"{conf} already sources the kit")
+        else:
+            print(f"and adds this to {conf}:")
+            sys.stdout.writelines(difflib.unified_diff(
+                text.splitlines(True), new.splitlines(True), str(conf), f"{conf} (after)"))
+        return
+    copy_kit(root)
+    for dest in KIT.values():
+        print(f"copied: {dest}")
+    if not sourced:
+        if text:
+            backup = conf.with_name(conf.name + ".flowkit-bak")
+            backup.write_text(text)
+            print(f"backup: {backup}")
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text(new)
+        print(f"added to {conf}: {line}")
+    print(f"tmux-kit: installed; a running tmux picks it up with: tmux source-file {home_short(conf)}")
+
+
 def refresh(root):
-    """Keep an installed status line at the plugin's version. Silent: its output reaches context."""
+    """Keep an installed status line and tmux kit at the plugin's version. Silent: its output
+    reaches context."""
     source = Path(root) / "scripts" / "statusline.py"
     try:
         if STATUSLINE.is_file() and STATUSLINE.read_bytes() != source.read_bytes():
             shutil.copyfile(source, STATUSLINE)
+    except OSError:
+        pass
+    try:
+        if KIT_CONF.is_file():
+            copy_kit(root)
     except OSError:
         pass
 
@@ -228,6 +295,8 @@ def main(argv):
         print("away: off")
     elif cmd == "statusline" and len(args) == 2 and args[0] in ("diff", "install"):
         statusline(*args)
+    elif cmd == "tmux" and len(args) == 2 and args[0] in ("diff", "install"):
+        tmux_kit(*args)
     elif cmd == "refresh" and len(args) == 1:
         sys.stdin.read()
         refresh(*args)

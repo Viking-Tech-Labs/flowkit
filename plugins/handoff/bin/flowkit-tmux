@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""flowkit-tmux: the Claude Code sessions in tmux at a glance, for the flowkit tmux kit.
+
+  flowkit-tmux waiting        status-bar job: marks each Claude pane with its state
+                              (@flowkit_state: working, waiting, idle), each tab with how many
+                              of its sessions wait on you (@flowkit_wait), prints the total
+  flowkit-tmux list [client]  numbered list of every session, waiting first; a number jumps there
+  flowkit-tmux help           the cheat sheet
+
+The kit's conf calls the copy at ~/.local/bin/flowkit-tmux, which the handoff plugin keeps at
+its own version at every session start. A session is mapped to its pane through its parent
+processes, up to the pane's shell; background sessions have no pane and are listed apart.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+os.environ["PATH"] = os.pathsep.join(
+    [str(Path.home() / ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", os.environ.get("PATH", "")])
+SEP = "\x1f"
+VERSION = re.compile(r"^\d+\.\d+\.\d+$")  # a pane running claude shows its version as the command
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "flowkit"
+
+
+def run(*cmd):
+    out = subprocess.run(cmd, capture_output=True, text=True)
+    return out.stdout if out.returncode == 0 else None
+
+
+def tmux(*args):
+    return run("tmux", *args) or ""
+
+
+def agents():
+    out = run("claude", "agents", "--json")
+    try:
+        rows = json.loads(out) if out else None
+    except ValueError:
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def panes():
+    fmt = SEP.join(["#{pane_pid}", "#{pane_id}", "#{session_name}", "#{window_id}", "#{window_index}",
+                    "#{window_name}", "#{pane_index}", "#{pane_current_command}", "#{@flowkit_state}"])
+    return [dict(zip(("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "state"), line.split(SEP)))
+            for line in tmux("list-panes", "-a", "-F", fmt).splitlines() if line]
+
+
+def placed(rows, pane_list):
+    """(pane, agent row) for every interactive session that runs inside a tmux pane."""
+    parent = {}
+    for line in (run("ps", "-axo", "pid=,ppid=") or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            parent[parts[0]] = parts[1]
+    by_pid = {p["pid"]: p for p in pane_list}
+    found = []
+    for row in rows:
+        if row.get("kind") != "interactive" or row.get("pid") is None:
+            continue
+        pid = str(row["pid"])
+        for _ in range(4):
+            if pid in by_pid:
+                found.append((by_pid[pid], row))
+                break
+            pid = parent.get(pid, "")
+    return found
+
+
+def state(row):
+    return {"busy": "working", "waiting": "waiting", "idle": "idle"}.get(row.get("status"), row.get("status") or "")
+
+
+def waiting():
+    pane_list = panes()
+    found = []
+    if any(VERSION.match(p["cmd"]) for p in pane_list):
+        rows = agents()
+        if rows is None:
+            return  # claude agents failed: leave the marks as they are
+        found = placed(rows, pane_list)
+    want = {p["id"]: state(r) for p, r in found}
+    count = {}
+    for p, r in found:
+        if r.get("status") == "waiting":
+            count[p["wid"]] = count.get(p["wid"], 0) + 1
+    cmds = []
+    for p in pane_list:
+        if p["id"] in want and want[p["id"]] != p["state"]:
+            cmds += [";", "set-option", "-p", "-t", p["id"], "@flowkit_state", want[p["id"]]]
+        elif p["id"] not in want and p["state"]:
+            cmds += [";", "set-option", "-p", "-u", "-t", p["id"], "@flowkit_state"]
+    for line in tmux("list-windows", "-a", "-F", f"#{{window_id}}{SEP}#{{@flowkit_wait}}").splitlines():
+        wid, _, have = line.partition(SEP)
+        n = count.get(wid, 0)
+        if n and have != str(n):
+            cmds += [";", "set-option", "-w", "-t", wid, "@flowkit_wait", str(n)]
+        elif not n and have:
+            cmds += [";", "set-option", "-w", "-u", "-t", wid, "@flowkit_wait"]
+    if cmds:
+        tmux(*cmds[1:])
+    total = sum(count.values())
+    if total:
+        print(f"#[reverse] ⚑ {total} need{'s' if total == 1 else ''} you #[noreverse] ", end="")
+
+
+def age(started_ms):
+    s = int(time.time() - (started_ms or 0) / 1000)
+    return f"{s // 60}m" if s < 3600 else f"{s // 3600}h" if s < 172800 else f"{s // 86400}d"
+
+
+def pause():
+    try:
+        input("  Enter to close ")
+    except EOFError:
+        pass
+
+
+def list_sessions(client=""):
+    if "#{" in client:
+        client = ""
+    rows = agents()
+    if rows is None:
+        print("\n  claude agents --json failed.")
+        pause()
+        return
+    here = tmux("display-message", "-p", "#{session_name}").strip()
+    order = {"waiting": 0, "busy": 1}
+    found = sorted(placed(rows, panes()),
+                   key=lambda pr: (order.get(pr[1].get("status"), 2), int(pr[0]["widx"] or 0), int(pr[0]["pidx"] or 0)))
+    print(f"\n  {'#':<3} {'where':<22} {'session':<40} {'state':<22} up")
+    for i, (p, r) in enumerate(found, 1):
+        where = f"{p['wname']}.{p['pidx']}" if p["sess"] == here else f"{p['sess']}:{p['wname']}.{p['pidx']}"
+        label = "NEEDS YOU" if r.get("status") == "waiting" else state(r)
+        if r.get("waitingFor"):
+            label += f" ({r['waitingFor']})"
+        print(f"  {i:<3} {where[:22]:<22} {(r.get('name') or '?')[:40]:<40} {label[:22]:<22} {age(r.get('startedAt'))}")
+    if not found:
+        print("  no Claude session runs in tmux")
+    bg = [f"{r.get('name') or '?'} ({r.get('state') or r.get('status') or '?'})" for r in rows if r.get("kind") == "background"]
+    if bg:
+        print("\n  background, see `claude agents`: " + ", ".join(bg))
+    try:
+        choice = input("\n  number = jump there · Enter = close  ").strip()
+    except EOFError:
+        return
+    if choice.isdigit() and 1 <= int(choice) <= len(found):
+        tmux("switch-client", *(["-c", client] if client else []), "-t", found[int(choice) - 1][0]["id"])
+
+
+def help_text():
+    for path in (CONFIG / "tmux-cheatsheet.md", Path(__file__).resolve().parent.parent / "tmux" / "cheatsheet.md"):
+        if path.is_file():
+            print(path.read_text())
+            break
+    else:
+        print("cheat sheet not found; run /handoff:setup-tmux in Claude Code")
+    if sys.stdin.isatty():
+        pause()
+
+
+def main(argv):
+    cmd = argv[0] if argv else ""
+    if cmd == "waiting":
+        waiting()
+    elif cmd == "list":
+        list_sessions(argv[1] if len(argv) > 1 else "")
+    elif cmd == "help":
+        help_text()
+    else:
+        print(__doc__, file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
