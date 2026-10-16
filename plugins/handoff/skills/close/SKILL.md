@@ -25,8 +25,9 @@ session should do and goes into its Today section verbatim.
 - `overnight`: unattended. Run `handoff.py away` first, so every session down the chain knows the
   user is off, then follow "Unattended" below.
 - `spawn`: after the close, start the next session without the user (step 9): save its prompt
-  and launch it through `flowkit-spawn`, in the story's tmux tab with Remote Control on. Where it
-  cannot launch, the saved prompt and its launch line go to the user instead.
+  and launch it through `flowkit-spawn` with Remote Control on: in the story's tmux tab, or in
+  the background with `driver=background`. Where it cannot launch, the saved prompt and its launch
+  line go to the user instead.
 
 **Unattended** applies with `overnight`, when `handoff.py state` reports `away: since …`, or when
 the AskUserQuestion tool is not available to you (a headless run). Decide by those three facts,
@@ -115,8 +116,14 @@ other session still uses them, and ends with what is ready for the user to try i
         `Next: started <name>`. A `warning: no session … came up` before it means the command
         was typed but the session did not confirm within 15 s, most often a folder-trust prompt
         waiting for a yes: still `started`, plus a FOR ME step to look at that tab and slot.
-      - exit 3 (not inside tmux), 4 (a session of that name runs), 6 (uncommitted changes) or
-        7 (driver not available): nothing launched. Say why under OPEN, put the launch line
+      - `SPAWNED driver=background id=<id> … rc=<url|pending>`: started in the background.
+        DONE gets one line: the session's name, `claude attach <name>` to open it, its Remote
+        Control link. A `REPORTER driver=background` line before it means the story's reporter
+        was started too. Step 10 writes `Next: started <name>`.
+      - exit 3 (not inside tmux), 4 (a session of that name runs), 6 (uncommitted changes),
+        7 (driver not available), 8 (the folder was never trusted: FOR ME is to run `claude` in
+        the repo once and accept the prompt, then the launch line) or 9 (`claude --bg` failed,
+        its output printed): nothing launched. Say why under OPEN, put the launch line
         under FOR ME as the step that starts the next session, and step 10 writes
         `Next: pending <name>`. Never retry with `--force`: a running namesake or a dirty tree
         means two sessions would share one working tree.

@@ -39,7 +39,8 @@ To undo it, the user deletes the `source-file` line (or restores the backup).
 
 `/handoff:close spawn` reads `~/.config/flowkit/handoff.conf`, plain `key=value` lines:
 
-- `driver=tmux`: how the next session starts. `tmux` is the only driver so far.
+- `driver=tmux`: how the next session starts; `background` starts it with `claude --bg`
+  instead (`/handoff:setup` offers that choice).
 - `reporter=off`: `on` starts a reporter session in slot 1 of each new story tab, which collects
   the story's closes and writes one final report when the story is done.
 - `permission_mode=`: the `--permission-mode` of spawned sessions; empty leaves the user's own

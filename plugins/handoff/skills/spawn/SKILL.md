@@ -1,6 +1,6 @@
 ---
 name: spawn
-description: Start a Claude Code session with a prompt through flowkit-spawn - in its story's tmux tab, or with `single` as a one-off in the shared adhoc tab - with Remote Control on. Use when the user types /handoff:spawn, or says "spawn it", "spawn a new session for X", "open a fresh session in <repo>", "a new session with Remote Control on named X". A close with `spawn` launches its own next session; this skill is for any other launch.
+description: Start a Claude Code session with a prompt through flowkit-spawn - in its story's tmux tab (or in the background with driver=background), or with `single` as a one-off in the shared adhoc tab - with Remote Control on. Use when the user types /handoff:spawn, or says "spawn it", "spawn a new session for X", "open a fresh session in <repo>", "a new session with Remote Control on named X". A close with `spawn` launches its own next session; this skill is for any other launch.
 argument-hint: [single] [name=<x>] [story=<x>] [repo=<path>] [model=<x>] [effort=<x>] <prompt file or text>
 ---
 
@@ -33,10 +33,13 @@ file:
      [--story <slug>] [--model <model>] [--effort <effort>] [<saved path>]
    ```
 3. **Relay its last line** in plain words: `SPAWNED …` gives the tab, the slot and the Remote
-   Control link (a `REPORTER` line before it means a new story tab with its reporter in slot 1).
+   Control link (a `REPORTER` line before it means a new story tab with its reporter in slot 1);
+   `SPAWNED driver=background …` gives its id and link, and `claude attach <name>` opens it.
    A `warning: no session … came up` means it most likely waits at a folder-trust prompt: tell the
    user which tab and slot to look at. Exit 3 (not inside tmux): give the user the printed launch
-   line. Exit 4 (that name runs) or 6 (uncommitted changes): say so and stop; never add `--force`
+   line. Exit 8 (background, a folder never trusted): the user runs `claude` there once and
+   accepts the prompt, then you launch again. Exit 4 (that name runs) or 6 (uncommitted changes):
+   say so and stop; never add `--force`
    on your own, since two sessions on one working tree overwrite each other's work.
 
 A story session launched here owns its repo from then on: this session makes no more edits or

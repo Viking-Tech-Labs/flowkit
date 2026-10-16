@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them. Shows the change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, or asks how a close knows the context or cost of a session.
+description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, and choose how spawned sessions start (tmux or Claude's background sessions). Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
 disable-model-invocation: true
 ---
 
@@ -31,3 +31,38 @@ session) on every refresh, and shows a short line: model, effort, context used, 
    status line applies from the next session. On a no, write nothing.
 
 To undo it, the user restores the backup or removes `statusLine` from their settings.
+
+## The launch driver
+
+How `/handoff:close spawn` and `/handoff:spawn` start the next session, the `driver` key of
+`~/.config/flowkit/handoff.conf` (`handoff.py state` prints it as `spawn-driver`):
+
+- `tmux`: each story gets a tab and its sessions are tiled panes. For people who live in tmux;
+  `/handoff:setup-tmux` adds the kit.
+- `background`: `claude --bg`, Claude's own background sessions. No tmux needed: the sessions
+  show in `claude agents`, the board (`/board`) and the Claude app on the phone (Remote Control),
+  and `claude attach <name>` opens one in a terminal. A background session that sits idle at
+  its prompt for about an hour is stopped by Claude (its conversation is kept); the story's
+  reporter is woken again by the next close. A folder never opened in Claude refuses a launch
+  until the user runs `claude` there once and accepts the trust prompt.
+
+1. Ask with AskUserQuestion which driver, the current one marked; recommend `tmux` when `$TMUX`
+   is set, else `background`. Without the AskUserQuestion tool, change nothing: print the current
+   driver and the command below, and stop.
+2. Write the answer: `handoff.py conf driver <tmux|background>`. Other keys of the file stay.
+3. With `background`, offer two settings of the user's own, each only with consent, as one
+   AskUserQuestion with both options (multiSelect, both recommended):
+   - `remoteControlAtStartup=true`: every session starts with Remote Control on, also the ones
+     the user starts from agent view or by hand, so the phone reaches them all. Spawned sessions
+     get it anyway (`--remote-control`). Where an organisation turns Remote Control off, the
+     sessions still run and `claude attach <name>` is the way in.
+   - `worktree.bgIsolation="none"`: a session dispatched from agent view (`claude agents`)
+     otherwise gets its own git worktree and commits, pushes and opens a draft pull request on
+     its own; `none` keeps it in the repo like any other session. Sessions `flowkit-spawn` starts
+     are not isolated either way.
+   Show `handoff.py settings diff <chosen key=json pairs>` as it prints, then write with
+   `handoff.py settings install <the same pairs>` (a backup is kept as
+   `settings.json.flowkit-bak`). Values are JSON: `remoteControlAtStartup=true`,
+   `'worktree.bgIsolation="none"'`. Nothing chosen: write nothing.
+4. Say what is left to the user: push notifications for sessions that need them are the
+   `/config` toggles plus the Claude app signed in on the phone.

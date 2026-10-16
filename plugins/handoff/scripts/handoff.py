@@ -7,6 +7,8 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py save-prompt <name>                  stdin -> ~/.claude/spawned/<name>.md
   handoff.py record <slug>                       stdin appended to ~/.claude/stories/<slug>.md, then
                                                  the story's reporter is told `closed <name>`
+  handoff.py conf <key> <value>                  set a key of ~/.config/flowkit/handoff.conf
+  handoff.py settings diff|install <key=json>…   values for the user's settings.json (a.b nests)
   handoff.py away | back | away-status           the ~/.claude/away flag (12 hours)
   handoff.py statusline diff|install <root>      the status line that records context and cost
   handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
@@ -172,15 +174,55 @@ def reporter_pane(agents, panes, parents, name):
     return None
 
 
+def agents_json(*args):
+    return json.loads(
+        subprocess.run(["claude", "agents", "--json", *args], capture_output=True, text=True, timeout=15).stdout
+    )
+
+
+def wake(reporter, name):
+    """Ring a background reporter. `claude --bg --resume` hands a stopped session the prompt under
+    its own id; a live one would get a copy instead, so a live one is stopped first, once it is
+    neither mid-turn (given 30 s) nor waiting on a prompt."""
+    def current():
+        return next((a for a in agents_json("--all") if a.get("id") == reporter.get("id")), {})
+    for _ in range(6):
+        if reporter.get("status") != "busy" and reporter.get("state") != "working":
+            break
+        time.sleep(5)
+        reporter = current()
+    else:
+        return
+    if reporter.get("status") == "waiting" or reporter.get("state") == "blocked":
+        return
+    if reporter.get("pid"):
+        subprocess.run(["claude", "stop", reporter["id"]], capture_output=True, text=True, timeout=30)
+        for _ in range(20):  # `stop` returns before the process is gone
+            time.sleep(0.5)
+            if not current().get("pid"):
+                break
+        else:
+            return
+    subprocess.run(
+        ["claude", "--bg", "--resume", reporter["sessionId"], f"closed {name}"],
+        cwd=reporter.get("cwd") or None, capture_output=True, text=True, timeout=60,
+    )
+
+
 def ring(slug, name):
-    """Type `closed <name>` into the pane of the story's reporter, when one is live and not waiting
-    on a prompt. The file is the record; this is only the doorbell, so a miss is silent."""
-    if not shutil.which("tmux") or not shutil.which("claude"):
+    """Tell the story's reporter `closed <name>`: a background one is woken with it as its prompt,
+    a tmux one gets it typed into its pane when it is live and not waiting on a prompt. The file is
+    the record; this is only the doorbell, so a miss is silent."""
+    if not shutil.which("claude"):
         return
     try:
-        agents = json.loads(
-            subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=15).stdout
-        )
+        agents = agents_json("--all")
+        bg = [a for a in agents if a.get("kind") == "background" and a.get("name") == f"{slug}-report"]
+        if bg:
+            wake(max(bg, key=lambda a: a.get("startedAt") or 0), name)
+            return
+        if not shutil.which("tmux"):
+            return
         panes = {}
         for line in tmux("list-panes", "-a", "-F", "#{pane_pid} #{pane_id}").stdout.splitlines():
             pid, pane = line.split()
@@ -193,7 +235,7 @@ def ring(slug, name):
         tmux("send-keys", "-t", found[0], "C-u")
         tmux("send-keys", "-t", found[0], "-l", f"closed {name}")
         tmux("send-keys", "-t", found[0], "Enter")
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         return
 
 
@@ -210,6 +252,55 @@ def record(slug):
     section = re.match(r"## (.+?) · \d{4}-\d{2}-\d{2} \d{2}:\d{2}\s*$", text.splitlines()[0])
     if section:
         ring(slug, section.group(1))
+
+
+def conf(key, value):
+    """Set one key=value line of handoff.conf, keeping every other line as it is."""
+    if not re.fullmatch(r"[a-z_]+", key) or "\n" in value:
+        fail(f"not a handoff.conf setting: {key}={value}")
+    lines = SETTINGS_FILE.read_text().splitlines() if SETTINGS_FILE.is_file() else []
+    lines = [l for l in lines if l.partition("=")[0].strip() != key] + [f"{key}={value}"]
+    CONFIG.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text("\n".join(lines) + "\n")
+    print(f"{SETTINGS_FILE}: {key}={value}")
+
+
+def user_settings(action, pairs):
+    """Show, or write with a backup, values in the user's settings.json: `key=<json>`, a dotted key
+    nesting (`worktree.bgIsolation="none"`)."""
+    text = settings_text()
+    before = json.loads(text) if text.strip() else {}
+    settings = json.loads(text) if text.strip() else {}
+    for pair in pairs:
+        key, sep, raw = pair.partition("=")
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            fail(f"not key=<json>: {pair}")
+        if not sep or not key:
+            fail(f"not key=<json>: {pair}")
+        *parents, leaf = key.split(".")
+        node = settings
+        for part in parents:
+            node = node.setdefault(part, {})
+            if not isinstance(node, dict):
+                fail(f"{part} in {SETTINGS} is not an object")
+        node[leaf] = value
+    if settings == before:
+        print(f"settings: already set in {SETTINGS}")
+        return
+    new = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+    if action == "diff":
+        sys.stdout.writelines(difflib.unified_diff(
+            text.splitlines(True), new.splitlines(True), str(SETTINGS), f"{SETTINGS} (after)"))
+        return
+    if text:
+        backup = SETTINGS.with_name(SETTINGS.name + ".flowkit-bak")
+        backup.write_text(text)
+        print(f"backup: {backup}")
+    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS.write_text(new)
+    print(f"settings: written to {SETTINGS} (applies to the next session)")
 
 
 def settings_text():
@@ -344,6 +435,10 @@ def main(argv):
     elif cmd == "back" and not args:
         AWAY.unlink(missing_ok=True)
         print("away: off")
+    elif cmd == "conf" and len(args) == 2:
+        conf(*args)
+    elif cmd == "settings" and len(args) >= 2 and args[0] in ("diff", "install"):
+        user_settings(args[0], args[1:])
     elif cmd == "statusline" and len(args) == 2 and args[0] in ("diff", "install"):
         statusline(*args)
     elif cmd == "tmux" and len(args) == 2 and args[0] in ("diff", "install"):

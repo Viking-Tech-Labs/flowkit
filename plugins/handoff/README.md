@@ -16,19 +16,19 @@ called `handoff` keeps working beside this one.
 | `/handoff:away` | Marks you away (`~/.claude/away`, cleared by `/handoff:back` or after 12 hours): closes and sessions stop asking and take the recommended option, marked "(auto)". |
 | `/handoff:back` | Clears the flag; sessions ask you again. |
 | `/handoff:spawn [single] <prompt>` | Starts any session with a prompt the way a close's `spawn` does: in its story's tab, or with `single` as a one-off in a shared `adhoc` tab ("open a fresh session in that repo"). |
-| `/handoff:setup` | Offers the status line below, as a diff of your settings, and writes it only on your yes. |
+| `/handoff:setup` | Offers the status line below, as a diff of your settings, and writes it only on your yes; asks which launch driver spawned sessions use, and for background sessions offers two settings of yours. |
 | `/handoff:setup-tmux` | Offers the tmux kit below and the one line that loads it from your tmux.conf, and writes only on your yes; explains the launch settings. |
 
 Modes, combined freely: `quick` skips the docs sweep; `prompt-only` prints only the next prompt
 (or the one line saying what remains); `overnight` runs unattended and sets the away flag; `spawn`
-saves the prompt and starts the next session in the story's tmux tab (below). Any other text is what the next
+saves the prompt and starts the next session in the story's tmux tab, or in the background (below). Any other text is what the next
 session should do, passed into its prompt as written.
 
 ## Starting the next session: spawn
 
 `/handoff:close spawn` saves the next prompt and starts that session through `flowkit-spawn`
 (`bin/`, on the PATH of Claude's Bash tool), with Remote Control on so you can follow it from
-your phone. The tmux driver, the only one so far:
+your phone. Two drivers, set once with `/handoff:setup`. The tmux driver:
 
 - each story gets its own tab, named after the story; its sessions are tiled in launch order, up
   to 9, then a second tab `<story>-2`;
@@ -40,13 +40,29 @@ your phone. The tmux driver, the only one so far:
 Outside tmux nothing launches: the close prints the launch line under FOR ME and records the
 prompt as pending. After a launch the closing session leaves the repo alone.
 
+The background driver (`driver=background`) starts the session with `claude --bg`, Claude's own
+background sessions, so no tmux is needed:
+
+- the session shows in `claude agents`, in the board and on your phone (Remote Control);
+  `claude attach <name>` opens it in a terminal;
+- the same refusals as tmux (a running namesake, uncommitted changes), plus one of its own: a
+  folder you never opened in Claude refuses to start until you run `claude` there once and
+  accept the trust prompt;
+- with `reporter=on` the story's first launch also starts `<story>-report` in the background.
+  Each close rings it: `handoff.py record` wakes it with `closed <session>` as its prompt
+  (stopping it first when it sits idle, since a running background session cannot be typed into);
+- a background session idle at its prompt for about an hour is stopped by Claude, its
+  conversation kept: the next ring wakes a stopped reporter, and `claude attach` reopens any;
+- `claude --bg` does not pass on your shell's environment; the next session gets
+  `XDG_CONFIG_HOME` from the one that started it, so both read the same settings.
+
 The settings are plain `key=value` lines in `~/.config/flowkit/handoff.conf`, outside the plugin
 so an update or an uninstall keeps them, and readable by the scripts that run outside Claude:
 
 | Key | Default | Means |
 |---|---|---|
-| `driver` | `tmux` | How the next session starts; `tmux` is the only driver so far. |
-| `reporter` | `off` | `on` starts a `<story>-report` session in slot 1 of each new story tab: it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done. Each close rings it: `handoff.py record` types `closed <session>` into its pane. |
+| `driver` | `tmux` | How the next session starts: `tmux` (a tab per story) or `background` (`claude --bg`). |
+| `reporter` | `off` | `on` starts a `<story>-report` session in slot 1 of each new story tab (in the background with that driver): it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done. Each close rings it: `handoff.py record` types `closed <session>` into its pane, or wakes the background one with it. |
 | `permission_mode` | empty | The `--permission-mode` of spawned sessions; empty keeps your default. A chain that runs while you are away needs a mode that does not stop to ask. |
 
 The model and effort of the next session come from its prompt (see "Your own ladder"), passed as
