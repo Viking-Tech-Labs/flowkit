@@ -38,6 +38,7 @@ one repository without touching your user settings, add the marketplace and inst
 | `prompt-audit` | Reads the prompts you typed since the last audit, finds what you keep asking for by hand (`/prompt-audit:audit`), interviews you on the fixes and writes the accepted rules into your own section of `CLAUDE.md`. Your prompts never leave a scratch directory. | 0.1.0, usable |
 | `walkthrough` | Makes you understand a branch, a pull request or a pasted diff by predicting it first (`/walkthrough:start`): a summary, then questions on what happens underneath, graded against the code. Where your sound expectation and the code differ is a finding, written up as a small change you can reject. Unattended, it gives the steps to try by hand. | 0.1.0, usable |
 | `handoff` | Closes a session so the next one starts cold (`/handoff:close`): commits green work, writes the pick-up block into the repo's plan doc, drafts the next session's prompt when repo work is left, records the close in the story's file; `spawn` starts that session in the story's tmux tab (`/handoff:spawn` starts any other), and `/handoff:setup-tmux` offers a beginner-friendly tmux kit. | 0.1.0, usable |
+| `board` | A live board of your story chains (`/board`): a card per story that is running, needs you, has stalled or is done, its FOR ME steps with ticks that persist, its merge-request links; `/where` and `/forme` print the same as text. Reads what `handoff` writes. | 0.1.0, built, not yet released |
 
 Each plugin is its own decision: install only the ones you want, with
 `claude plugin install <plugin>@flowkit`. Each says in its own README what it needs.
@@ -72,7 +73,7 @@ without a bump reaches nobody. A marketplace added from a local directory
 `version`, which is convenient while developing and misleading when testing an update.
 
 ```
-.claude-plugin/marketplace.json   the catalog: the five plugins, by relative path
+.claude-plugin/marketplace.json   the catalog: the six plugins, by relative path
 plugins/<name>/                   one directory per plugin, each with .claude-plugin/plugin.json
 plugins/brain/skills/             the five skills; scripts/ holds brain-lint.py and vault.py
 plugins/brain/template/           the vault /brain:init creates
@@ -80,4 +81,5 @@ plugins/session-discipline/       block/conventions.md, the adopt and decision-i
 plugins/prompt-audit/             the audit skill and its analyst brief, scripts/extract.py and rules.py
 plugins/walkthrough/              the start skill and its question guide, scripts/history.py
 plugins/handoff/                  the close, spawn, away, back, setup and setup-tmux skills, hooks/hooks.json, scripts/, bin/flowkit-spawn and flowkit-tmux, tmux/ (the kit)
+plugins/board/                    the hooks module (hooks/register.tsx draws the Pane, hooks/model.ts reads the stories), types/, tests/
 ```
