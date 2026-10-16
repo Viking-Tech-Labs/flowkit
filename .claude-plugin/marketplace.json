@@ -4,7 +4,7 @@
     "name": "flowkit"
   },
   "metadata": {
-    "description": "A working flow for Claude Code as versioned plugins: a personal knowledge wiki, session conventions, a prompt audit, a change walkthrough, session handoffs, a live board of your story chains and a fixed model ladder"
+    "description": "A working flow for Claude Code as versioned plugins: a personal knowledge wiki, session conventions, a prompt audit, a change walkthrough, session handoffs, a live board of your story chains, a fixed model ladder and a coordinator for stories across repos"
   },
   "plugins": [
     {
@@ -41,6 +41,11 @@
       "name": "ladder",
       "source": "./plugins/ladder",
       "description": "A fixed model ladder for handoff closes: a kind -> model/effort table you edit, defaults from your plan, and an effort gate that asks before a max launch once you turn max on"
+    },
+    {
+      "name": "coordinate",
+      "source": "./plugins/coordinate",
+      "description": "Turn a session into the coordinator of a story across repos or branches: plan worker sessions from a mission doc, start them through handoff, route their reports, keep one status board"
     }
   ]
 }
