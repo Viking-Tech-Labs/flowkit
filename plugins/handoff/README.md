@@ -37,3 +37,39 @@ session should do, passed into its prompt as written.
 
 Unattended (`overnight`, the away flag set, or a headless run without the question tool) the close
 never asks: it takes the recommended option at every fork and marks it "(auto)".
+
+## Your own ladder
+
+A close can choose the next session's model and effort, and run a step of yours, from one file:
+`~/.config/flowkit/ladder.md` (`$XDG_CONFIG_HOME/flowkit/ladder.md` when that is set). It lives
+outside the plugin so an uninstall or an update never touches it. Without the file the close skips
+this step and the next prompt carries no model or effort: the next session runs at your defaults.
+
+The file is plain instructions in two sections, which the close reads and follows:
+
+- `## Rung`: how to pick Model, Effort and a one-line Why for the next session from its kind
+  (planning, investigation, implementation, review, docs or config).
+- `## Close step`: what to do at every close, before the story record. It may run your own
+  scripts; give them by absolute path.
+
+A model or effort you name in the session wins over the file. A worked example, a fixed table
+plus a log line:
+
+```markdown
+## Rung
+
+| Kind | Model | Effort |
+|---|---|---|
+| planning | opus | high |
+| investigation | opus | medium |
+| implementation | sonnet | high |
+| review | opus | medium |
+| docs or config | sonnet | medium |
+
+Why line: "<kind> from the fixed table".
+
+## Close step
+
+Append one line to `~/notes/sessions.log`:
+`<date> <this session's name> <kind> <model>/<effort> next=<next session's name or none>`.
+```
