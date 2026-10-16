@@ -40,6 +40,16 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py\" refresh \"${CLAUDE_PLUGIN_ROOT}\""
+          }
+        ]
+      }
     ]
   }
 }

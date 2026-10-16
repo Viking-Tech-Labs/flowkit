@@ -15,6 +15,7 @@ called `handoff` keeps working beside this one.
 | `/handoff:close [modes] [what next]` | Closes the session: commits green work (never pushes), fixes docs it made stale, writes the pick-up block, drafts the next session's prompt when repo work is left, closes with `DONE` / `FOR ME` / `OPEN` / `LEFT` and records the close in the story file. |
 | `/handoff:away` | Marks you away (`~/.claude/away`, cleared by `/handoff:back` or after 12 hours): closes and sessions stop asking and take the recommended option, marked "(auto)". |
 | `/handoff:back` | Clears the flag; sessions ask you again. |
+| `/handoff:setup` | Offers the status line below, as a diff of your settings, and writes it only on your yes. |
 
 Modes, combined freely: `quick` skips the docs sweep; `prompt-only` prints only the next prompt
 (or the one line saying what remains); `overnight` runs unattended and sets the away flag; `spawn`
@@ -28,6 +29,17 @@ is attached or you are away, so a chain of sessions keeps going overnight. Each 
 Claude process and ends with it. The display still sleeps, and **a closed laptop lid still sleeps
 the computer and pauses the chain**: leave the lid open and the power connected. Where `caffeinate`
 does not exist (anything but macOS) the hooks do nothing.
+
+## The status line
+
+Claude Code hands a session's context use and cost only to the status line, so a close cannot see
+them unless one records them. `/handoff:setup` offers one that does: on every refresh it writes
+`~/.claude/session-stats/<session id>.json` (and `by-name/<name>.json` for a named session) with
+the model, effort, cost, API time, context used and lines changed, and shows `Opus high · ctx 34% ·
+$1.23`. If you already have a status line, yours keeps showing: the new command records the
+numbers, then runs yours. The script is copied to `~/.config/flowkit/statusline.py` and kept at the
+plugin's version by a session-start hook, which does nothing when you have not installed it. Your
+previous settings are kept as `settings.json.flowkit-bak`.
 
 ## What a close writes
 

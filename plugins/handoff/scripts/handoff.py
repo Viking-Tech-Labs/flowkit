@@ -7,10 +7,15 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py save-prompt <name>                  stdin -> ~/.claude/spawned/<name>.md
   handoff.py record <slug>                       stdin appended to ~/.claude/stories/<slug>.md
   handoff.py away | back | away-status           the ~/.claude/away flag (12 hours)
+  handoff.py statusline diff|install <root>      the status line that records context and cost
+  handoff.py refresh <root>                      update an installed status line (SessionStart)
 """
+import difflib
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -24,6 +29,8 @@ SPAWNED = CLAUDE / "spawned"
 STORIES = CLAUDE / "stories"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "flowkit"
 LADDER = CONFIG / "ladder.md"
+STATUSLINE = CONFIG / "statusline.py"
+SETTINGS = CLAUDE / "settings.json"
 HEADING = "WHERE TO PICK UP"
 NAMES = ("PLAN.md", "BUILD-PLAN.md", "HANDOFF.md", "ROADMAP.md", "docs/PLAN.md", "docs/plan.md", "docs/HANDOFF.md")
 SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -133,6 +140,61 @@ def record(slug):
     print(path)
 
 
+def settings_text():
+    try:
+        return SETTINGS.read_text()
+    except FileNotFoundError:
+        return ""
+
+
+def proposed(text):
+    """The settings text with the status line installed, or None when it already is."""
+    settings = json.loads(text) if text.strip() else {}
+    ours = f'python3 "{STATUSLINE}"'
+    current = settings.get("statusLine") or {}
+    command = current.get("command", "")
+    if str(STATUSLINE) in command:
+        return None
+    if current.get("type") == "command" and command:
+        line = dict(current, command=f"{ours} --then {shlex.quote(command)}")
+    else:
+        line = {"type": "command", "command": ours}
+    settings["statusLine"] = line
+    return json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+
+
+def statusline(action, root):
+    text = settings_text()
+    new = proposed(text)
+    if new is None:
+        print(f"statusline: installed ({STATUSLINE} is in {SETTINGS})")
+        return
+    if action == "diff":
+        print(f"statusline: not installed; install copies statusline.py to {STATUSLINE} and changes {SETTINGS}:")
+        sys.stdout.writelines(difflib.unified_diff(
+            text.splitlines(True), new.splitlines(True), str(SETTINGS), f"{SETTINGS} (after)"))
+        return
+    CONFIG.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(Path(root) / "scripts" / "statusline.py", STATUSLINE)
+    if text:
+        backup = SETTINGS.with_name(SETTINGS.name + ".flowkit-bak")
+        backup.write_text(text)
+        print(f"backup: {backup}")
+    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS.write_text(new)
+    print(f"statusline: installed; {SETTINGS} now runs {STATUSLINE} (applies to the next session)")
+
+
+def refresh(root):
+    """Keep an installed status line at the plugin's version. Silent: its output reaches context."""
+    source = Path(root) / "scripts" / "statusline.py"
+    try:
+        if STATUSLINE.is_file() and STATUSLINE.read_bytes() != source.read_bytes():
+            shutil.copyfile(source, STATUSLINE)
+    except OSError:
+        pass
+
+
 def main(argv):
     cmd, args = (argv[0], argv[1:]) if argv else ("", [])
     if cmd == "state" and len(args) == 2:
@@ -150,6 +212,11 @@ def main(argv):
     elif cmd == "back" and not args:
         AWAY.unlink(missing_ok=True)
         print("away: off")
+    elif cmd == "statusline" and len(args) == 2 and args[0] in ("diff", "install"):
+        statusline(*args)
+    elif cmd == "refresh" and len(args) == 1:
+        sys.stdin.read()
+        refresh(*args)
     elif cmd == "away-status" and not args:
         since = away_since()
         print(f"away: since {since}" if since else "away: off")
