@@ -29,6 +29,7 @@ SPAWNED = CLAUDE / "spawned"
 STORIES = CLAUDE / "stories"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "flowkit"
 LADDER = CONFIG / "ladder.md"
+SETTINGS_FILE = CONFIG / "handoff.conf"
 STATUSLINE = CONFIG / "statusline.py"
 SETTINGS = CLAUDE / "settings.json"
 HEADING = "WHERE TO PICK UP"
@@ -80,6 +81,18 @@ def candidates(root):
     return found
 
 
+def setting(key, default):
+    """A key=value line of ~/.config/flowkit/handoff.conf, the plugin's own settings."""
+    try:
+        for line in SETTINGS_FILE.read_text().splitlines():
+            k, sep, v = line.partition("=")
+            if sep and k.strip() == key:
+                default = v.strip()
+    except OSError:
+        pass
+    return default
+
+
 def away_since():
     """The stamp in the away flag when it is younger than AWAY_HOURS, else None."""
     try:
@@ -105,6 +118,7 @@ def state(data, repo):
     print(f"ladder: {LADDER if LADDER.is_file() else 'none'}")
     since = away_since()
     print(f"away: since {since}" if since else "away: off")
+    print(f"spawn-driver: {setting('driver', 'tmux')}")
     print(f"spawned-dir: {SPAWNED}")
     print(f"stories-dir: {STORIES}")
 

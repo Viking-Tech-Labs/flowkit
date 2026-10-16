@@ -98,7 +98,8 @@ if [ -z "$socket" ] && [ -z "${TMUX:-}" ]; then
   echo "not inside tmux; start the session by hand: cd '$repo' && claude ${flags}--name '$name'${prompt:+ \"\$(cat $prompt)\"}" >&2
   exit 3
 fi
-[ -n "$socket" ] && [ -n "$here" ] && [ "$(tm display-message -p -t "$here" '#{pane_id}' 2>/dev/null)" != "$here" ] && here=""
+# A pane of another server is not "here": pane ids repeat across servers.
+[ -n "$socket" ] && [ "$(basename "${TMUX:-x}" | cut -d, -f1)" != "$socket" ] && here=""
 if [ -z "$sess" ]; then
   if [ -n "$here" ]; then sess="$(tm display-message -p -t "$here" '#{session_name}')"
   else sess="$(tm list-sessions -F '#{session_name}' 2>/dev/null | head -1 || true)"; fi

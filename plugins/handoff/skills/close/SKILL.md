@@ -24,9 +24,9 @@ session should do and goes into its Today section verbatim.
   line saying what remains. Every other step still runs.
 - `overnight`: unattended. Run `handoff.py away` first, so every session down the chain knows the
   user is off, then follow "Unattended" below.
-- `spawn`: after the close, hand the next session its prompt without the user: save it
-  (`handoff.py save-prompt <next name>`, the prompt on stdin) and print the launch line of
-  step 9. This version prints the line; it does not start the session yet.
+- `spawn`: after the close, start the next session without the user (step 9): save its prompt
+  and launch it through `flowkit-spawn`, in the story's tmux tab with Remote Control on. Where it
+  cannot launch, the saved prompt and its launch line go to the user instead.
 
 **Unattended** applies with `overnight`, when `handoff.py state` reports `away: since …`, or when
 the AskUserQuestion tool is not available to you (a headless run). Decide by those three facts,
@@ -93,12 +93,35 @@ other session still uses them, and ends with what is ready for the user to try i
    `prompt-only`, print only that block or that line.
 8. **Peers.** If another session needs to know (one waiting on a contract, a coordinator), put
    the message to send under OPEN. Do not send it unless asked.
-9. **With `spawn`**, when step 5 drafted a prompt: save it with `handoff.py save-prompt <next
-   name>` and print the launch line,
-   `cd <repo> && claude -n <next name> [--model <model>] [--effort <effort>] "$(cat <saved path>)"`,
-   under FOR ME as the step that starts the next session. Spawn needs a clean tree (step 2
-   committed everything green); a dirty tree goes under OPEN instead. Never save two prompts for
-   one slice. After the spawn this session touches the repo no more.
+9. **With `spawn`**, when step 5 drafted a prompt. Spawn needs a clean tree (step 2 committed
+   everything green); a dirty tree goes under OPEN and nothing launches. Never save two prompts
+   for one slice.
+   1. Save the prompt: `handoff.py save-prompt <next name>`, the prompt on stdin. It prints the
+      saved path. The launch line, for the user and the story record, is
+      `cd <repo> && claude -n <next name> [--model <model>] [--effort <effort>] "$(cat <saved path>)"`.
+   2. Launch it, absolute paths, no `cd`:
+      ```sh
+      "${CLAUDE_PLUGIN_ROOT}/bin/flowkit-spawn" --repo <repo> --name <next name> \
+        [--story <slug>] [--model <model>] [--effort <effort>] <saved path>
+      ```
+      `--story` is this session's `Story:` slug (step 10); leave it out when there is none. Pass
+      the model and effort of the prompt as they are, `max` included; leave out what the prompt
+      leaves out. The launch driver is `spawn-driver` in `state` (set in
+      `~/.config/flowkit/handoff.conf`); `flowkit-spawn` reads it itself.
+   3. Read its last line and exit code:
+      - `SPAWNED pane=<n> … tab=<tab> … rc=<url|pending>`: started. DONE gets one line: the
+        session's name, its tab and slot, its Remote Control link. A `REPORTER` line before it
+        means the story's tab is new and its reporter sits in slot 1. Step 10 writes
+        `Next: started <name>`. A `warning: no session … came up` before it means the command
+        was typed but the session did not confirm within 15 s, most often a folder-trust prompt
+        waiting for a yes: still `started`, plus a FOR ME step to look at that tab and slot.
+      - exit 3 (not inside tmux), 4 (a session of that name runs), 6 (uncommitted changes) or
+        7 (driver not available): nothing launched. Say why under OPEN, put the launch line
+        under FOR ME as the step that starts the next session, and step 10 writes
+        `Next: pending <name>`. Never retry with `--force`: a running namesake or a dirty tree
+        means two sessions would share one working tree.
+   After a successful spawn this session touches the repo no more: no edits, no commits; the
+   next session owns the working tree.
 10. **Record the close in the story file**, as the last tool call before the reply. The story's
     slug is the `Story:` of the prompt this session started from; with none, skip this step. Pipe
     the record into `handoff.py record <slug>`:
@@ -115,7 +138,7 @@ other session still uses them, and ends with what is ready for the user to try i
     - `started <name>` when a session was launched;
     - `pending <name>` when step 5 drafted a prompt and nothing launched it. The prompt must be
       saved: if step 9 did not save it, run `handoff.py save-prompt <name>` now, and add the
-      `Prompt:` line with the path it printed and the launch line of step 9;
+      `Prompt:` line with the path it printed and the launch line of step 9.1;
     - `none` only when step 5 drafted nothing: no repo work is left on the story. `Next: none` on the last close, with none of the story's sessions still live,
     is what marks the story done. If a session named `<slug>-report` is live (ListAgents), send
     it `closed <this session's name>` once; without one, the file is the record.
