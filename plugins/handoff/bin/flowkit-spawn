@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+# flowkit-spawn — start the next Claude Code session of a story with its prompt file, through
+# the launch driver set in ~/.config/flowkit/handoff.conf (driver=tmux, the only one so far).
+#
+# tmux driver: one tab per story, up to 9 sessions tiled in launch order (1 top left, 2 to its
+# right, …), a 10th opens <story>-2. With reporter=on, the launch that opens a story's first tab
+# starts the story's reporter in slot 1 first (reporter.md next to this script's scripts/).
+#
+# Usage: flowkit-spawn [options] <prompt-file>
+#   --repo <path>          working directory of the new session (default: the current one)
+#   --name <name>          session name (default: the prompt file's name without .md)
+#   --story <slug>         the story; names the tab (default: the story tab this pane is in,
+#                          else the session name)
+#   --model <id>           passed to claude as --model (default: none, the user's default)
+#   --effort <level>       passed as --effort, as given (default: none)
+#   --subagent-model <id>  the model for this session's subagents that name none
+#   --permission <mode>    --permission-mode (default: permission_mode= in the conf, else none)
+#   --no-rc                do not turn Remote Control on
+#   --single               a one-off outside any story, in the shared adhoc tab: no reporter,
+#                          no dirty-tree refusal, a taken name gets -2, the prompt is optional
+#   --pane <%id>           use this pane (an idle shell) instead of the story's tab
+#   --new                  always split a new pane instead of reusing an idle shell
+#   --force                spawn even when a session of that name runs or the tree is dirty
+#   --dry-run              print the pick and the command, launch nothing
+#   --tmux-socket <name>   the tmux server (tmux -L); needed when not run inside tmux
+#   --tmux-session <name>  the tmux session there (default: the current one, else the first)
+#
+# Exit: 2 bad arguments · 3 no tmux to launch in (prints the command to run by hand) ·
+#       4 a session of that name runs · 5 --pane is busy · 6 the repo has uncommitted changes ·
+#       7 the driver is not available
+# Last lines, machine-readable:
+#   REPORTER pane=<n> id=<%id> tab=<tab> name=<slug>-report rc=<url|pending>   (reporter only)
+#   SPAWNED pane=<n> id=<%id> tab=<tab> story=<slug> name=<name> rc=<url|pending> prompt=<file> created=<0|1>
+set -euo pipefail
+
+conf="${XDG_CONFIG_HOME:-$HOME/.config}/flowkit/handoff.conf"
+setting() { [ -f "$conf" ] && sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$conf" | tail -1 | sed 's/[[:space:]]*$//'; }
+driver="$(setting driver || true)"; driver="${driver:-tmux}"
+reporter_on="$(setting reporter || true)"
+perm="$(setting permission_mode || true)"
+
+repo="$PWD"; name=""; story=""; model=""; effort=""; submodel=""
+rc=1; single=0; pane=""; force_new=0; force=0; dry=0; prompt=""
+socket="${FLOWKIT_TMUX_SOCKET:-}"; sess="${FLOWKIT_TMUX_SESSION:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo) repo="$2"; shift 2 ;;
+    --name) name="$2"; shift 2 ;;
+    --story) story="$2"; shift 2 ;;
+    --model) model="$2"; shift 2 ;;
+    --effort) effort="$2"; shift 2 ;;
+    --subagent-model) submodel="$2"; shift 2 ;;
+    --permission) perm="$2"; shift 2 ;;
+    --no-rc) rc=0; shift ;;
+    --single) single=1; shift ;;
+    --pane) pane="$2"; shift 2 ;;
+    --new) force_new=1; shift ;;
+    --force) force=1; shift ;;
+    --dry-run) dry=1; shift ;;
+    --tmux-socket) socket="$2"; shift 2 ;;
+    --tmux-session) sess="$2"; shift 2 ;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    -*) echo "unknown option: $1" >&2; exit 2 ;;
+    *) prompt="$1"; shift ;;
+  esac
+done
+
+case "$driver" in
+  tmux) ;;
+  *) echo "launch driver '$driver' (set in $conf) is not available in this version; use driver=tmux" >&2; exit 7 ;;
+esac
+
+for v in "$model" "$effort" "$submodel" "$perm"; do
+  case "$v" in *[!A-Za-z0-9._\[\]-]*) echo "not a model, effort or mode: '$v'" >&2; exit 2 ;; esac
+done
+if [ -n "$prompt" ] || [ "$single" -eq 0 ]; then
+  [ -n "$prompt" ] && [ -s "$prompt" ] || { echo "prompt file missing or empty: '$prompt'" >&2; exit 2; }
+fi
+[ -d "$repo" ] || { echo "repo path does not exist: $repo" >&2; exit 2; }
+[ -z "$prompt" ] || prompt="$(cd "$(dirname "$prompt")" && pwd -P)/$(basename "$prompt")"
+repo="$(cd "$repo" && pwd -P)"
+[ -n "$name" ] || { name="$(basename "${prompt:-$repo}")"; name="${name%.md}"; }
+case "$name" in [A-Za-z0-9]*) ;; *) echo "session name must start with a letter or digit: '$name'" >&2; exit 2 ;; esac
+case "$name" in *[!A-Za-z0-9._-]*) echo "session name takes letters, digits, '.', '_', '-': '$name'" >&2; exit 2 ;; esac
+
+base="" # what the reporter shares with the session: Remote Control and the permission mode
+[ "$rc" -eq 1 ] && base+="--remote-control "
+[ -n "$perm" ] && base+="--permission-mode $perm "
+flags="$base"
+[ -n "$model" ] && flags+="--model $model "
+[ -n "$effort" ] && flags+="--effort $effort "
+[ -n "$submodel" ] && flags+="--settings '{\"env\":{\"CLAUDE_CODE_SUBAGENT_MODEL\":\"$submodel\"}}' "
+
+# Which tmux: an explicit server, else the one this runs inside, else none (print the command).
+tm() { if [ -n "$socket" ]; then tmux -L "$socket" "$@"; else tmux "$@"; fi; }
+here="${TMUX_PANE:-}"
+if [ -z "$socket" ] && [ -z "${TMUX:-}" ]; then
+  echo "not inside tmux; start the session by hand: cd '$repo' && claude ${flags}--name '$name'${prompt:+ \"\$(cat $prompt)\"}" >&2
+  exit 3
+fi
+[ -n "$socket" ] && [ -n "$here" ] && [ "$(tm display-message -p -t "$here" '#{pane_id}' 2>/dev/null)" != "$here" ] && here=""
+if [ -z "$sess" ]; then
+  if [ -n "$here" ]; then sess="$(tm display-message -p -t "$here" '#{session_name}')"
+  else sess="$(tm list-sessions -F '#{session_name}' 2>/dev/null | head -1 || true)"; fi
+fi
+[ -n "$sess" ] || { echo "no tmux session to launch in${socket:+ on server '$socket'}" >&2; exit 3; }
+
+is_shell() { case "$1" in zsh|bash|fish|sh|-zsh|-bash|-fish|-sh) return 0 ;; *) return 1 ;; esac; }
+slugify() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9][^a-z0-9]*/-/g' -e 's/^-//' | cut -c1-32 | sed -e 's/-$//'; }
+
+# The story: given, else the story tab this pane is in, else the session name. A single session
+# has none: its tabs are marked @flowkit_adhoc instead of @flowkit_story.
+key="@flowkit_story"; reporter=0
+if [ "$single" -eq 1 ]; then slug="adhoc"; key="@flowkit_adhoc"
+elif [ -n "$story" ]; then slug="$(slugify "$story")"; [ "$reporter_on" = "on" ] && reporter=1
+else
+  slug="$([ -n "$here" ] && tm show-options -wqv -t "$here" @flowkit_story || true)"
+  [ -n "$slug" ] || slug="$(slugify "$name")"
+fi
+[ -n "$slug" ] || { echo "story '$story' has no letters or digits" >&2; exit 2; }
+
+# Refusal 1: the new session shares this working tree; uncommitted changes mean the session
+# spawning it has not landed its work.
+if [ "$force" -eq 0 ] && [ "$single" -eq 0 ] && git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  dirty="$(git -C "$repo" status --porcelain 2>/dev/null | head -5)"
+  if [ -n "$dirty" ]; then
+    printf 'repo has uncommitted changes; commit them first (or --force):\n%s\n' "$dirty" >&2
+    exit 6
+  fi
+fi
+
+# Refusal 2: a live session of that name, as `claude agents` lists it or as a pane title
+# (Claude shows its --name there behind a status glyph, e.g. "✳ billing-s3").
+agents="$(claude agents --json 2>/dev/null || true)"
+running() {
+  local pid pcmd ptitle
+  if printf '%s' "$agents" | jq -e --arg n "$1" 'type == "array" and any(.[]; .name == $n)' >/dev/null 2>&1; then
+    echo "claude agents"; return 0
+  fi
+  while IFS=' ' read -r pid pcmd ptitle; do
+    ptitle="${ptitle#"${ptitle%%[[:alnum:]]*}"}"
+    if [ "$pid" != "$here" ] && ! is_shell "$pcmd" && [ "$ptitle" = "$1" ]; then echo "$pid"; return 0; fi
+  done < <(tm list-panes -a -F '#{pane_id} #{pane_current_command} #{pane_title}')
+  return 1
+}
+if [ "$single" -eq 1 ]; then
+  base="$name"; n=2
+  while running "$name" >/dev/null; do name="$base-$n"; n=$((n + 1)); done
+elif [ "$force" -eq 0 ] && found="$(running "$name")"; then
+  echo "a session named '$name' is already running ($found); pass --force to spawn another" >&2
+  exit 4
+fi
+
+idle_pane() { # first idle shell pane of a window that is not this pane
+  local pid pcmd pdead pmode
+  while IFS=' ' read -r pid pcmd pdead pmode; do
+    if [ "$pid" != "$here" ] && [ "$pdead" = "0" ] && [ "$pmode" = "0" ] && is_shell "$pcmd"; then
+      echo "$pid"; return 0
+    fi
+  done < <(tm list-panes -t "$1" -F '#{pane_id} #{pane_current_command} #{pane_dead} #{pane_in_mode}')
+  return 1
+}
+split_after_last() { # a new pane after the window's last one, so tiling keeps launch order
+  local last; last="$(tm list-panes -t "$1" -F '#{pane_id}' | tail -1)"
+  tm split-window -d -t "$last" -c "$repo" -P -F '#{pane_id}'
+  tm select-layout -t "$1" tiled >/dev/null
+}
+
+# The pane: given; else an idle shell or a free slot in the story's tabs (part order); else a
+# new tab <slug>[-<part>] after the last tab.
+created=0; win=""; new_tab=""; rpane=""; part=1
+if [ -n "$pane" ]; then
+  pcmd="$(tm display-message -p -t "$pane" '#{pane_current_command}')"
+  is_shell "$pcmd" || { echo "pane $pane is running '$pcmd', not an idle shell" >&2; exit 5; }
+else
+  parts=0
+  while IFS=' ' read -r p wid npanes; do
+    parts="$p"
+    [ -z "$pane" ] || continue
+    if [ "$force_new" -eq 0 ] && ip="$(idle_pane "$wid")"; then pane="$ip"; win="$wid"
+    elif [ "$npanes" -lt 9 ]; then win="$wid"; pane="new"; fi
+  done < <(tm list-windows -t "$sess" -F "#{${key}_part} #{window_id} #{window_panes} #{${key}}" \
+    | awk -v s="$slug" '$4 == s { print $1, $2, $3 }' | sort -n)
+  if [ -z "$pane" ]; then
+    part=$((parts + 1)); new_tab="$slug"; [ "$part" -gt 1 ] && new_tab="$slug-$part"
+    pane="new"
+    [ "$part" -eq 1 ] && [ "$reporter" -eq 1 ] && ! running "$slug-report" >/dev/null && rpane="new"
+  fi
+fi
+
+# A copy of the prompt under a space-free path: safe to quote, and a record of what each pane
+# was started with.
+store="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/spawned"; mkdir -p "$store"
+stamp="$(date +%Y%m%d-%H%M%S)"
+prompt_copy=""; prompt_arg=""
+if [ -n "$prompt" ]; then
+  prompt_copy="$store/${name}-${stamp}.md"; cp "$prompt" "$prompt_copy"
+  prompt_arg=" \"\$(cat $prompt_copy)\""
+fi
+
+# A single session shares the tree with any Claude already running in the repo: its system
+# prompt says so.
+shared_arg=""; shared_file=""
+if [ "$single" -eq 1 ]; then
+  others="$(printf '%s' "$agents" | jq -r --arg r "$repo" '[.[]? | select(.cwd == $r or (.cwd | startswith($r + "/"))) | .name] | join(", ")' 2>/dev/null || true)"
+  if [ -n "$others" ]; then
+    shared_file="$store/${name}-${stamp}-shared.md"
+    printf '%s\n' "Shared working tree: another Claude session is working in $repo right now ($others)." \
+      "Do not switch branches, commit, stash, reset, rebase, pull or otherwise rewrite the working tree unless the user says so in this session. Reading, investigating and running tests are fine." > "$shared_file"
+    shared_arg=" --append-system-prompt \"\$(cat $shared_file)\""
+  fi
+fi
+
+launch="clear; claude ${flags}--name '$name'${shared_arg}${prompt_arg}"
+
+if [ "$dry" -eq 1 ]; then
+  echo "story:  $slug${rpane:+ (starts $slug-report in slot 1)}"
+  echo "tab:    ${new_tab:+new tab $new_tab after the last one}${win:+$(tm display-message -p -t "$win" '#{window_name}')}"
+  echo "pane:   ${pane/#new/<new, tiled after the last pane>}"
+  echo "repo:   $repo"
+  echo "prompt: ${prompt_copy:-none}"
+  [ -n "$shared_file" ] && echo "shared: $others"
+  echo "send:   cd '$repo' && $launch"
+  rm -f "$prompt_copy" "$shared_file"
+  exit 0
+fi
+
+if [ -n "$new_tab" ]; then
+  idx=$(( $(tm list-windows -t "$sess" -F '#{window_index}' | sort -n | tail -1) + 1 ))
+  win="$(tm new-window -d -t "$sess:$idx" -n "$new_tab" -c "$repo" -P -F '#{window_id}')"
+  # Each pane's top border names its slot, its session and the state `flowkit-tmux waiting` sets.
+  tm set-option -w -t "$win" "$key" "$slug" \; set-option -w -t "$win" "${key}_part" "$part" \
+    \; set-option -w -t "$win" pane-border-status top \
+    \; set-option -w -t "$win" pane-border-format \
+    ' #{pane_index} #{s/^[^a-zA-Z0-9]+//:pane_title}#{?#{@flowkit_state}, · #{?#{==:#{@flowkit_state},waiting},#[reverse] NEEDS YOU #[noreverse],#{@flowkit_state}},} '
+  first="$(tm list-panes -t "$win" -F '#{pane_id}' | head -1)"
+  if [ "$rpane" = "new" ]; then rpane="$first"; pane="$(split_after_last "$win")"
+  else pane="$first"; fi
+  created=1
+elif [ "$pane" = "new" ]; then
+  pane="$(split_after_last "$win")"
+  created=1
+fi
+
+# Types the launch into a pane, then waits up to 15 s until `claude agents` lists a session of
+# that name under the pane's shell and Remote Control has printed its link, 30 s more for the
+# link alone. Prints the link, or "pending". Never types /remote-control: with the flag passed
+# that opens the Remote Control panel, which holds back background-task results while open.
+start() { # pane command session-name
+  local up=0 rcurl="" screen list shell_pid pid
+  shell_pid="$(tm display-message -p -t "$1" '#{pane_pid}')"
+  tm send-keys -t "$1" C-u # anything half-typed would prefix the command
+  tm send-keys -t "$1" "cd '$repo' && $2" Enter
+  for _ in $(seq 1 15); do
+    sleep 1
+    screen="$(tm capture-pane -p -J -S -80 -t "$1" 2>/dev/null || true)"
+    if list="$(claude agents --json 2>/dev/null)" && printf '%s' "$list" | jq -e 'type == "array"' >/dev/null 2>&1; then
+      for pid in $(printf '%s' "$list" | jq -r --arg n "$3" '.[] | select(.name == $n and .pid != null) | .pid' 2>/dev/null); do
+        [ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$shell_pid" ] && up=1
+      done
+    fi
+    rcurl="$(printf '%s' "$screen" | grep -o 'https://claude.ai/code/session_[A-Za-z0-9]*' | head -1 || true)"
+    [ "$up" -eq 1 ] && { [ "$rc" -eq 0 ] || [ -n "$rcurl" ]; } && break
+  done
+  if [ "$up" -eq 1 ] && [ "$rc" -eq 1 ] && [ -z "$rcurl" ]; then
+    for _ in $(seq 1 30); do
+      sleep 1
+      rcurl="$(tm capture-pane -p -J -S -80 -t "$1" 2>/dev/null | grep -o 'https://claude.ai/code/session_[A-Za-z0-9]*' | head -1 || true)"
+      [ -n "$rcurl" ] && break
+    done
+  fi
+  [ "$up" -eq 1 ] || echo "warning: no session '$3' came up in $1 within 15s; check the pane (a folder trust prompt?)" >&2
+  printf '%s' "${rcurl:-pending}"
+}
+
+# The reporter collects the story's closes from its story file and answers "what is going on".
+if [ -n "$rpane" ]; then
+  stories="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/stories"; mkdir -p "$stories"
+  [ -f "$stories/$slug.md" ] || printf '# %s\n' "$slug" > "$stories/$slug.md"
+  rprompt="$store/${slug}-report-${stamp}.md"
+  sed -e "s/<slug>/$slug/g" "$(dirname "$0")/../scripts/reporter.md" > "$rprompt"
+  rurl="$(start "$rpane" "clear; claude ${base}--model sonnet --name '$slug-report' \"\$(cat $rprompt)\"" "$slug-report")"
+fi
+rcurl="$(start "$pane" "$launch" "$name")"
+
+tab="$(tm display-message -p -t "$pane" '#{window_name}')"
+[ -n "$rpane" ] && echo "REPORTER pane=$(tm display-message -p -t "$rpane" '#{pane_index}') id=$rpane tab=$tab name=$slug-report rc=$rurl"
+echo "SPAWNED pane=$(tm display-message -p -t "$pane" '#{pane_index}') id=$pane tab=$tab story=$slug name=$name rc=$rcurl prompt=${prompt_copy:--} created=$created"
