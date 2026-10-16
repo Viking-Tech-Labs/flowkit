@@ -16,11 +16,52 @@ called `handoff` keeps working beside this one.
 | `/handoff:away` | Marks you away (`~/.claude/away`, cleared by `/handoff:back` or after 12 hours): closes and sessions stop asking and take the recommended option, marked "(auto)". |
 | `/handoff:back` | Clears the flag; sessions ask you again. |
 | `/handoff:setup` | Offers the status line below, as a diff of your settings, and writes it only on your yes. |
+| `/handoff:setup-tmux` | Offers the tmux kit below and the one line that loads it from your tmux.conf, and writes only on your yes; explains the launch settings. |
 
 Modes, combined freely: `quick` skips the docs sweep; `prompt-only` prints only the next prompt
 (or the one line saying what remains); `overnight` runs unattended and sets the away flag; `spawn`
-saves the prompt and prints the line that starts the next session. Any other text is what the next
+saves the prompt and starts the next session in the story's tmux tab (below). Any other text is what the next
 session should do, passed into its prompt as written.
+
+## Starting the next session: spawn
+
+`/handoff:close spawn` saves the next prompt and starts that session through `flowkit-spawn`
+(`bin/`, on the PATH of Claude's Bash tool), with Remote Control on so you can follow it from
+your phone. The tmux driver, the only one so far:
+
+- each story gets its own tab, named after the story; its sessions are tiled in launch order, up
+  to 9, then a second tab `<story>-2`;
+- it refuses when a session of that name already runs or the repo has uncommitted changes, since
+  two sessions on one working tree overwrite each other's work;
+- it waits until `claude agents` lists the new session and prints its Remote Control link; a
+  session that does not come up in 15 seconds is most often waiting at a folder-trust prompt.
+
+Outside tmux nothing launches: the close prints the launch line under FOR ME and records the
+prompt as pending. After a launch the closing session leaves the repo alone.
+
+The settings are plain `key=value` lines in `~/.config/flowkit/handoff.conf`, outside the plugin
+so an update or an uninstall keeps them, and readable by the scripts that run outside Claude:
+
+| Key | Default | Means |
+|---|---|---|
+| `driver` | `tmux` | How the next session starts; `tmux` is the only driver so far. |
+| `reporter` | `off` | `on` starts a `<story>-report` session in slot 1 of each new story tab: it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done. |
+| `permission_mode` | empty | The `--permission-mode` of spawned sessions; empty keeps your default. A chain that runs while you are away needs a mode that does not stop to ask. |
+
+The model and effort of the next session come from its prompt (see "Your own ladder"), passed as
+they are.
+
+## The tmux kit
+
+`/handoff:setup-tmux` copies a small tmux setup to `~/.config/flowkit/tmux.conf` and adds one
+line to your tmux.conf: `source-file ~/.config/flowkit/tmux.conf`. It keeps tmux's Ctrl-b prefix
+and adds: mouse on, tabs and panes counted from 1, **⚑ n need you** in the status bar with ⚑n on
+each tab that has sessions waiting on you, `prefix a` to list every Claude session and jump to
+one, and `prefix H` for the one-page cheat sheet (`tmux/cheatsheet.md`). The conf calls the
+helper at `~/.local/bin/flowkit-tmux`, a copy kept at the plugin's version by a session-start
+hook, because the plugin's own directory moves with every version; the hook does nothing until
+you install the kit. Put your own changes below the `source-file` line: a setting there wins.
+Sessions started in the background have no pane and are not counted; `prefix a` lists them.
 
 ## Keeping the computer awake
 
