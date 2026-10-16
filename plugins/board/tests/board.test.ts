@@ -182,7 +182,42 @@ test('quiet stories fold away, a done story with an open step stays, ticks prune
   const key = old.steps[0]?.key ?? ''
   expect(isShown(old, { [key]: true }, NOW)).toBe(false)
   expect(openSteps(old, { [key]: true })).toEqual([])
-  expect(pruneTicks({ [key]: true, 'gone-story|x|y': true }, stories())).toEqual({ [key]: true })
+  expect(pruneTicks({ [key]: true, 'gone-story|x|y': true }, stories().map(s => s.name))).toEqual({ [key]: true })
+  // A file that is there but parsed to nothing (caught half-written) keeps its ticks.
+  expect(pruneTicks({ 'half|x|y': true }, ['half'])).toEqual({ 'half|x|y': true })
+})
+
+test('a close is read to its own end: other headings, one-line blocks, names with a note, real steps', () => {
+  const text = [
+    '## a-s1 (re-pointed to main) · 2026-10-16 10:00',
+    'Next: started a-s2 (opus/xhigh), a-review (fable/xhigh)',
+    'FOR ME',
+    '1. Nothing now. At S3: your word on the merge.',
+    '2. Nothing.',
+    `3. ${'x'.repeat(80)} first`,
+    `4. ${'x'.repeat(80)} second`,
+    'OPEN: nothing blocked',
+    '- not a step',
+    '## a-s1 · 2026-10-16 10:00 (addendum)',
+    'Next: none',
+    'FOR ME',
+    '- not a step either',
+  ].join('\n')
+  const [sec, ...rest] = parseStory('a', text, 0)?.sections ?? []
+  expect(rest).toEqual([])
+  expect(sec?.name).toBe('a-s1')
+  expect(sec?.next).toMatchObject({ kind: 'started', names: ['a-s2', 'a-review'] })
+  expect(sec?.forMe).toEqual(['Nothing now. At S3: your word on the merge.', `${'x'.repeat(80)} first`, `${'x'.repeat(80)} second`])
+  expect(stepsOf(parseStory('a', text, 0) as Story)).toHaveLength(3)
+})
+
+test('a session named in two stories belongs to the one whose newest section names it', () => {
+  const older = parseStory('older', close('shared-s1', 5 * HOUR, 'none'), NOW - 5 * HOUR)
+  const newer = parseStory('newer', close('n-s1', HOUR, 'started shared-s1'), NOW - HOUR)
+  const agents: Agent[] = [{ kind: 'interactive', status: 'busy', name: 'shared-s1', sessionId: 'x' }]
+  const s = buildSnapshot([older, newer].filter((x): x is Story => x !== undefined), agents, new Map(), NOW)
+  expect(s.cards.find(c => c.story === 'newer')?.chips.map(c => c.name)).toEqual(['shared-s1'])
+  expect(s.cards.find(c => c.story === 'older')?.chips).toEqual([])
 })
 
 test('the session that needs a person leads, with what it waits for, and no line passes the width', () => {
@@ -337,12 +372,26 @@ test('a section that cannot be read says so and the rest of the board still prin
   on('process.run', () => ({
     value: { exitCode: 127, stdout: '', stderr: 'claude: not found', isStdoutTruncated: false, isStderrTruncated: false },
   }))
-  on('fs.list', () => ({ deny: 'ENOENT' }))
+  on('fs.list', (_, e) => ({ deny: e.path.endsWith('/.claude/stories') ? 'EACCES' : 'ENOENT' }))
 
   const board = (await $.command.run({ ...run, command: 'where' })).text ?? ''
   expect(board).toContain('SESSIONS  `claude agents --json` did not answer')
   expect(board).toContain('no reading yet')
   expect(board).toContain('STORIES  ~/.claude/stories could not be read')
+})
+
+test('no stories directory yet is no story, not an error', async ($, on) => {
+  mock.env(on, { HOME: '/home/n' })
+  mock.clock(on, { now: NOW })
+  on('store.get', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 's3' }))
+  on('session.usage', () => ({ deny: 'no ledger' }))
+  on('process.run', () => ({
+    value: { exitCode: 0, stdout: '[]', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('fs.list', () => ({ deny: 'ENOENT' }))
+  const board = (await $.command.run({ ...run, command: 'where' })).text ?? ''
+  expect(board).toContain('STORIES  0 need you, 0 stalled, 0 running, 0 done')
 })
 
 test('an answer that is not a list of sessions costs only the sessions block', async ($, on) => {

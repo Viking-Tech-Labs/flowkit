@@ -41,13 +41,22 @@ const soft = <T,>(work: Promise<T>): Promise<T | undefined> => work.catch(() => 
 
 const widthOf = (e: CommandRunInput): number => Math.min(100, Math.max(60, e.presentation.columns - 6))
 
-const loadStories = async ($: EngineInterface, home: string): Promise<Story[]> => {
-  const dir = `${home}/.claude/stories`
-  const files = (await $.fs.list(dir)).filter(f => f.kind === 'file' && f.name.endsWith('.md'))
+// The story files, and the names of all of them: a file that cannot be read is left out of the
+// first and kept in the second. No stories directory yet is no story, not an error.
+const loadStories = async ($: EngineInterface, root: string): Promise<{ stories: Story[]; files: string[] }> => {
+  const dir = `${root}/stories`
+  const listed = await $.fs.list(dir).catch((e: unknown) => {
+    if (/ENOENT|no such file|not found/i.test(String(e instanceof Error ? e.message : e))) return []
+    throw e
+  })
+  const files = listed.filter(f => f.kind === 'file' && f.name.endsWith('.md'))
   const rows = await Promise.all(
-    files.map(async f => parseStory(f.name.slice(0, -3), await $.fs.read(`${dir}/${f.name}`), f.mtimeMs)),
+    files.map(async f => {
+      const text = await soft($.fs.read(`${dir}/${f.name}`))
+      return text === undefined ? undefined : parseStory(f.name.slice(0, -3), text, f.mtimeMs)
+    }),
   )
-  return rows.filter((r): r is Story => r !== undefined)
+  return { stories: rows.filter((r): r is Story => r !== undefined), files: files.map(f => f.name.slice(0, -3)) }
 }
 
 const loadTicks = async ($: EngineInterface): Promise<Ticks> => {
@@ -55,17 +64,16 @@ const loadTicks = async ($: EngineInterface): Promise<Ticks> => {
   return typeof stored === 'object' && stored !== null ? (stored as Ticks) : {}
 }
 
-type World = { snap: Snapshot; stories: Story[] | undefined; marks: Ticks }
+type World = { snap: Snapshot; files: string[] | undefined; marks: Ticks }
 
 // Everything the board and the text commands draw from: the sessions, the story files, the stats the
 // status line writes, the ticks. A part that cannot be read leaves the rest.
 const gather = async ($: EngineInterface): Promise<World> => {
-  const home = (await $.env.get('HOME')) ?? ''
-  const [now, ran, stories, marks] = await Promise.all([
+  const root = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${(await $.env.get('HOME')) ?? ''}/.claude`
+  const [now, ran, loaded] = await Promise.all([
     $.clock.now(),
     soft($.process.run(AGENTS, { timeoutMs: 5000 })),
-    soft(loadStories($, home)),
-    loadTicks($),
+    soft(loadStories($, root)),
   ])
   let agents: Agent[] | undefined
   try {
@@ -79,7 +87,7 @@ const gather = async ($: EngineInterface): Promise<World> => {
     (agents ?? [])
       .filter(a => a.sessionId !== undefined)
       .map(async a => {
-        const text = await soft($.fs.read(`${home}/.claude/session-stats/${a.sessionId}.json`))
+        const text = await soft($.fs.read(`${root}/session-stats/${a.sessionId}.json`))
         if (text === undefined) return
         try {
           stats.set(a.sessionId ?? '', JSON.parse(text) as Stats)
@@ -88,13 +96,15 @@ const gather = async ($: EngineInterface): Promise<World> => {
         }
       }),
   )
-  return { snap: buildSnapshot(stories, agents, stats, now), stories, marks }
+  // Read last: a tick made while the slow reads ran is not overwritten.
+  const marks = await loadTicks($)
+  return { snap: buildSnapshot(loaded?.stories, agents, stats, now), files: loaded?.files, marks }
 }
 
 const refresh = async ($: EngineInterface): Promise<void> => {
-  const { snap, stories, marks } = await gather($)
+  const { snap, files, marks } = await gather($)
   await update($, snapshot, () => snap)
-  const kept = stories === undefined ? marks : pruneTicks(marks, stories)
+  const kept = files === undefined ? marks : pruneTicks(marks, files)
   if (Object.keys(kept).length !== Object.keys(marks).length) await $.store.set('ticks', kept)
   await update($, ticks, () => kept)
 }

@@ -14,7 +14,7 @@ useful with that plugin; a file in the same format from anywhere else works too.
 | Card | Meant when |
 |---|---|
 | **NEEDS YOU** | a session of the story waits on you (a question, a permission), or the last close left a launch pending (`Next: pending <name>`) or a free-text `Next:` |
-| **STALLED** | no session of the story is working or waiting, and a session the last close promised never wrote its own close: it never came up, ended, or sits idle at its prompt. A new session gets 10 minutes to come up first |
+| **STALLED** | no session of the story is working or waiting, and a session any close promised (`Next: started …`) never wrote its own close: it never came up, ended, or sits idle at its prompt. A new session gets 10 minutes to come up first; a stalled story nobody touches for seven days folds into the "more" line |
 | **running** | a session of the story is working, or the promised one is still starting |
 | **done** | a `## Final report` newer than the last close, or the last close says `Next: none` with nothing working |
 

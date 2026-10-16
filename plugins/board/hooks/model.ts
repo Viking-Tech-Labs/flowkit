@@ -36,9 +36,10 @@ export type Story = { name: string; mtimeMs: number; sections: Section[] }
 // The sections of a story file: "## <name> · <YYYY-MM-DD HH:MM>", as the handoff close writes them.
 const HEADING = /^## (.+?) · (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})\s*$/
 const FORME = /^(?:\*\*)?FOR ME(?:\*\*)?\s*(?:[:—–-]\s*(.*))?$/
-const BLOCK_END = /^(?:\*\*)?(?:DONE|OPEN|LEFT)(?:\*\*)?:?\s*$|^## |^Next:/
+const BLOCK_END = /^(?:\*\*)?(?:DONE|OPEN|LEFT)(?:\*\*)?(?:\s*$|\s*:|\s+[—–(-])|^## |^Next:/
 const ITEM = /^(?: {0,3}\d+[.)]|[-*])\s+(.*)$/
-const NOTHING = /^(?:nothing|none|n\/a|no steps)\b/i
+// Only a marker on its own: "Nothing now. At S3: your word" is a step.
+const NOTHING = /^(?:nothing|none|n\/a|no steps)\b[^.;:]*[.;:]?\s*$/i
 const NEXT = /^Next:\s*(.*)$/
 const LINK = /https?:\/\/[^\s)>\]]+\/(?:merge_requests|pull)\/\d+/g
 
@@ -49,6 +50,7 @@ const parseNext = (rest: string): Next => {
   const named = /^(started|spawned|pending)\s+(.+)$/i.exec(text)
   if (named !== null) {
     const names = (named[2] ?? '')
+      .replace(/\([^)]*\)/g, '')
       .replace(/\s*\(.*$/, '')
       .split(/\s*,\s*/)
       .map(n => n.trim())
@@ -74,7 +76,8 @@ export const parseStory = (name: string, text: string, mtimeMs: number): Story |
       if (!/ — findings$/.test(title)) {
         const [, , y, mo, d, h, mi] = head
         cur = {
-          name: title,
+          // "## s3 (re-pointed …) · stamp" is the close of s3.
+          name: title.replace(/\s*\(.*\)\s*$/, ''),
           at: new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi)).getTime(),
           isFinal: title === 'Final report',
           next: { kind: 'none', names: [], text: '' },
@@ -84,6 +87,12 @@ export const parseStory = (name: string, text: string, mtimeMs: number): Story |
         sections.push(cur)
         steps = cur.forMe
       }
+      continue
+    }
+    if (line.startsWith('## ')) {
+      // Any other heading (an addendum, a note) ends the section: its lines are not the close's.
+      cur = undefined
+      steps = undefined
       continue
     }
     if (cur === undefined || steps === undefined) continue
@@ -113,7 +122,7 @@ export const parseStory = (name: string, text: string, mtimeMs: number): Story |
   return { name, mtimeMs, sections }
 }
 
-const normal = (text: string): string => text.toLowerCase().replace(/\s+/g, ' ').slice(0, 80)
+const normal = (text: string): string => text.toLowerCase().replace(/\s+/g, ' ')
 
 // The steps of a story, newest first: the final report's own list when it is the newest section
 // (the reporter merged and pruned it), else every close's steps, a repeat folded into its newest
@@ -240,16 +249,20 @@ export const buildSnapshot = (
   stats: ReadonlyMap<string, Stats>,
   now: number,
 ): Snapshot => {
-  const owner = new Map<string, string>()
+  // A session named in several stories belongs to the one whose newest section names it.
+  const owner = new Map<string, { story: string; at: number }>()
+  const claim = (name: string, story: string, at: number): void => {
+    const held = owner.get(name)
+    if (held === undefined || at > held.at) owner.set(name, { story, at })
+  }
   for (const s of stories ?? []) {
-    const names = [`${s.name}-report`]
-    for (const sec of s.sections) names.push(...(sec.isFinal ? [] : [sec.name]), ...sec.next.names)
-    for (const n of names) if (!owner.has(n)) owner.set(n, s.name)
+    claim(`${s.name}-report`, s.name, s.mtimeMs)
+    for (const sec of s.sections) for (const n of [...(sec.isFinal ? [] : [sec.name]), ...sec.next.names]) claim(n, s.name, sec.at)
   }
   const byStory = new Map<string, Chip[]>()
   const loose: Chip[] = []
   for (const a of agents ?? []) {
-    const story = owner.get(a.name ?? '')
+    const story = owner.get(a.name ?? '')?.story
     const chip = chipOf(a, stats, `${story ?? ''}-report`)
     if (story === undefined) {
       if (chip.state !== 'ended') loose.push(chip)
@@ -272,8 +285,9 @@ export const isShown = (card: Card, ticks: Ticks, now: number): boolean => {
   return isLive || age < QUIET_DAYS * DAY
 }
 
-export const pruneTicks = (ticks: Ticks, stories: readonly Story[]): Record<string, true> => {
-  const names = new Set(stories.map(s => s.name))
+// Ticks of a story whose file is gone. By file name, so a file caught half-written keeps its ticks.
+export const pruneTicks = (ticks: Ticks, files: readonly string[]): Record<string, true> => {
+  const names = new Set(files)
   return Object.fromEntries(Object.entries(ticks).filter(([key]) => names.has(key.split('|')[0] ?? '')))
 }
 
