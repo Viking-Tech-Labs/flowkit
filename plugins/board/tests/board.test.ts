@@ -155,6 +155,16 @@ test('cards sort by what needs a person first, and a session outside every story
   expect(card('chain')?.links).toEqual(['https://gitlab.com/g/p/-/merge_requests/93'])
 })
 
+test('a background session reads its status while its process runs, else its state', () => {
+  const bg = (state: string, status?: string, waitingFor?: string): Agent => ({ kind: 'background', state, status, waitingFor, name: 'k-s2', sessionId: 'k' })
+  const stuck = (a: Agent) => snap([a]).cards.find(c => c.story === 'stuck')
+  expect(stuck(bg('working'))?.state).toBe('running')
+  expect(stuck(bg('working', 'busy'))?.state).toBe('running')
+  expect(stuck(bg('blocked', 'waiting', 'permission prompt'))?.why).toBe('k-s2 waits (permission prompt)')
+  expect(stuck(bg('done', 'idle'))?.why).toBe('k-s2 sits idle, no close')
+  expect(stuck(bg('stopped'))?.why).toBe('k-s2 stopped, no close')
+})
+
 test('a story whose promised session is working is running, not stalled, even long after its close', () => {
   const agents: Agent[] = [{ kind: 'interactive', status: 'busy', name: 'k-s2', sessionId: 'k' }]
   expect(snap(agents).cards.find(c => c.story === 'stuck')?.state).toBe('running')

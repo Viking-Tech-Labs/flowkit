@@ -139,10 +139,11 @@ const linksOf = (story: Story): string[] => {
   return links.slice(0, MAX_LINKS)
 }
 
+// A background session carries `state` (working, blocked, done, stopped, failed) and, while its
+// process runs, the `status` an interactive one has: `done` with a status sits idle at its prompt.
 const stateOf = (a: Agent): Chip['state'] => {
-  if (a.kind === 'background') {
-    const state = (a.state ?? '').toLowerCase()
-    return /wait|need|block|input/.test(state) ? 'needs-you' : /run|work|busy|active|start/.test(state) ? 'working' : 'ended'
+  if (a.kind === 'background' && a.status === undefined) {
+    return a.state === 'blocked' ? 'needs-you' : a.state === 'working' ? 'working' : 'ended'
   }
   return a.status === 'waiting' ? 'needs-you' : a.status === 'busy' ? 'working' : 'idle'
 }

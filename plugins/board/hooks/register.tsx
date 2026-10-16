@@ -25,7 +25,7 @@ const PANE = 'board'
 const CAP = 5
 const REFRESH_MS = 8000
 // The sessions come from `claude agents --json --all`: interactive ones carry `status`, background
-// ones `state`.
+// ones `state`, and `status` too while their process runs.
 const AGENTS = [
   '/bin/sh',
   '-c',
@@ -77,7 +77,7 @@ const gather = async ($: EngineInterface): Promise<World> => {
   const stats = new Map<string, Stats>()
   await Promise.all(
     (agents ?? [])
-      .filter(a => a.kind === 'interactive' && a.sessionId !== undefined)
+      .filter(a => a.sessionId !== undefined)
       .map(async a => {
         const text = await soft($.fs.read(`${home}/.claude/session-stats/${a.sessionId}.json`))
         if (text === undefined) return
