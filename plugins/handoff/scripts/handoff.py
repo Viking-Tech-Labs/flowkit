@@ -8,6 +8,7 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py record <story>                      stdin appended to ~/.claude/stories/<slug>.md (the
                                                  story slugified as flowkit-spawn does), then the
                                                  story's reporter is told `closed <name>`
+  handoff.py wake <slug> <name>                  ring a busy background reporter once it is idle (5 min)
   handoff.py conf <key> <value>                  set a key of ~/.config/flowkit/handoff.conf
   handoff.py settings diff|install <key=json>…   values for the user's settings.json (a.b nests)
   handoff.py away | back | away-status           the ~/.claude/away flag (12 hours)
@@ -186,26 +187,43 @@ def agents_json(*args):
     )
 
 
-def wake(reporter, name):
+def bg_reporter(slug):
+    rows = [a for a in agents_json("--all") if isinstance(a, dict)
+            and a.get("kind") == "background" and a.get("name") == f"{slug}-report"]
+    return max(rows, key=lambda a: a.get("startedAt") or 0) if rows else None
+
+
+def mode(agent):
+    """busy, waiting or idle. A background entry's `status` is there while its process runs and
+    wins over `state`, which can still say working after the turn ended."""
+    status = agent.get("status")
+    if status is None:
+        status = {"working": "busy", "blocked": "waiting"}.get(agent.get("state"), "idle")
+    return status
+
+
+def wake(slug, name, patience=0):
     """Ring a background reporter. `claude --bg --resume` hands a stopped session the prompt under
-    its own id; a live one would get a copy instead, so a live one is stopped first, once it is
-    neither mid-turn (given 30 s) nor waiting on a prompt."""
-    def current():
-        return next((a for a in agents_json("--all") if a.get("id") == reporter.get("id")), {})
-    for _ in range(6):
-        if reporter.get("status") != "busy" and reporter.get("state") != "working":
-            break
-        time.sleep(5)
-        reporter = current()
-    else:
-        return
-    if reporter.get("status") == "waiting" or reporter.get("state") == "blocked":
+    its own id; a live one would get a copy instead, so a live one is stopped first. Never while it
+    waits on a prompt; while it is mid-turn, a process of its own waits up to five minutes, so the
+    close does not."""
+    reporter = bg_reporter(slug)
+    deadline = time.time() + patience
+    while reporter is not None and mode(reporter) == "busy":
+        if time.time() >= deadline:
+            if patience == 0:
+                subprocess.Popen([sys.executable, __file__, "wake", slug, name], start_new_session=True,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        time.sleep(10)
+        reporter = bg_reporter(slug)
+    if reporter is None or mode(reporter) == "waiting":
         return
     if reporter.get("pid"):
         subprocess.run(["claude", "stop", reporter["id"]], capture_output=True, text=True, timeout=30)
         for _ in range(20):  # `stop` returns before the process is gone
             time.sleep(0.5)
-            if not current().get("pid"):
+            if not (bg_reporter(slug) or {}).get("pid"):
                 break
         else:
             return
@@ -225,9 +243,9 @@ def ring(slug, name):
         agents = agents_json("--all")
         if not isinstance(agents, list):
             return
-        bg = [a for a in agents if a.get("kind") == "background" and a.get("name") == f"{slug}-report"]
-        if bg:
-            wake(max(bg, key=lambda a: a.get("startedAt") or 0), name)
+        if any(isinstance(a, dict) and a.get("kind") == "background" and a.get("name") == f"{slug}-report"
+               for a in agents):
+            wake(slug, name)
             return
         if not shutil.which("tmux"):
             return
@@ -444,6 +462,11 @@ def main(argv):
     elif cmd == "back" and not args:
         AWAY.unlink(missing_ok=True)
         print("away: off")
+    elif cmd == "wake" and len(args) == 2:
+        try:
+            wake(*args, patience=300)
+        except Exception:
+            pass
     elif cmd == "conf" and len(args) == 2:
         conf(*args)
     elif cmd == "settings" and len(args) >= 2 and args[0] in ("diff", "install"):
