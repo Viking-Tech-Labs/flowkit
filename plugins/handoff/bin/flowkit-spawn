@@ -101,10 +101,17 @@ env_json=""
 [ -n "$submodel" ] && env_json+="\"CLAUDE_CODE_SUBAGENT_MODEL\":\"$submodel\","
 # `claude --bg` drops the caller's environment: carry the flowkit config dir, so the next session
 # reads the same handoff.conf and ladder.md.
+# It also works in place: with Claude's default worktree.bgIsolation a background session must
+# move into a worktree branch of its own before its first edit, and pushes and opens a draft PR
+# from there.
+iso=""
 if [ "$driver" = background ]; then
   case "${XDG_CONFIG_HOME:-}" in /*[!A-Za-z0-9._/-]*|"") ;; /*) env_json+="\"XDG_CONFIG_HOME\":\"$XDG_CONFIG_HOME\"," ;; esac
+  iso='"worktree":{"bgIsolation":"none"}'
 fi
-[ -n "$env_json" ] && flags+="--settings '{\"env\":{${env_json%,}}}' "
+settings="${env_json:+\"env\":{${env_json%,}\}}"
+settings="$settings${settings:+${iso:+,}}$iso"
+[ -n "$settings" ] && flags+="--settings '{$settings}' "
 
 # Which tmux: an explicit server, else the one this runs inside, else none (print the command).
 tm() { if [ -n "$socket" ]; then tmux -L "$socket" "$@"; else tmux "$@"; fi; }
@@ -293,7 +300,7 @@ sys.exit(0 if any(a.get(sys.argv[1]) == sys.argv[2] for a in json.load(sys.stdin
     [ -f "$stories/$slug.md" ] || printf '# %s\n' "$slug" > "$stories/$slug.md"
     rprompt="$store/${slug}-report-${stamp}.md"
     sed -e "s/<slug>/$slug/g" "$(dirname "$0")/../scripts/reporter.md" > "$rprompt"
-    bg_start "${base}--model sonnet --name '$slug-report' \"\$(cat $rprompt)\"" "$slug-report"
+    bg_start "${base}--settings '{$iso}' --model sonnet --name '$slug-report' \"\$(cat $rprompt)\"" "$slug-report"
     echo "REPORTER driver=background id=$bg_id name=$slug-report rc=$bg_rc"
   fi
   bg_start "${flags}--name '$name'${shared_arg}${prompt_arg}" "$name"
