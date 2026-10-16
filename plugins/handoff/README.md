@@ -46,7 +46,7 @@ so an update or an uninstall keeps them, and readable by the scripts that run ou
 | Key | Default | Means |
 |---|---|---|
 | `driver` | `tmux` | How the next session starts; `tmux` is the only driver so far. |
-| `reporter` | `off` | `on` starts a `<story>-report` session in slot 1 of each new story tab: it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done. |
+| `reporter` | `off` | `on` starts a `<story>-report` session in slot 1 of each new story tab: it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done. Each close rings it: `handoff.py record` types `closed <session>` into its pane. |
 | `permission_mode` | empty | The `--permission-mode` of spawned sessions; empty keeps your default. A chain that runs while you are away needs a mode that does not stop to ask. |
 
 The model and effort of the next session come from its prompt (see "Your own ladder"), passed as

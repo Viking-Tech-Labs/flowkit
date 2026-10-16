@@ -5,7 +5,8 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py state <data-dir> <repo>             what a close needs to know, one line each
   handoff.py pickup-doc <data-dir> <repo> <doc>  remember the repo's pick-up doc
   handoff.py save-prompt <name>                  stdin -> ~/.claude/spawned/<name>.md
-  handoff.py record <slug>                       stdin appended to ~/.claude/stories/<slug>.md
+  handoff.py record <slug>                       stdin appended to ~/.claude/stories/<slug>.md, then
+                                                 the story's reporter is told `closed <name>`
   handoff.py away | back | away-status           the ~/.claude/away flag (12 hours)
   handoff.py statusline diff|install <root>      the status line that records context and cost
   handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
@@ -149,6 +150,53 @@ def save_prompt(name):
     print(path)
 
 
+def tmux(*args):
+    sock = os.environ.get("FLOWKIT_TMUX_SOCKET")
+    return subprocess.run(
+        ["tmux", *(["-L", sock] if sock else []), *args], capture_output=True, text=True, timeout=10
+    )
+
+
+def reporter_pane(agents, panes, parents, name):
+    """The tmux pane id and status of the live interactive session called `name`, found through
+    its parent processes (a pane's pid is the shell that started it)."""
+    for a in agents:
+        if a.get("kind") == "interactive" and a.get("name") == name and a.get("pid"):
+            pid = a["pid"]
+            for _ in range(4):
+                if pid in panes:
+                    return panes[pid], a.get("status")
+                pid = parents.get(pid)
+                if pid is None:
+                    break
+    return None
+
+
+def ring(slug, name):
+    """Type `closed <name>` into the pane of the story's reporter, when one is live and not waiting
+    on a prompt. The file is the record; this is only the doorbell, so a miss is silent."""
+    if not shutil.which("tmux") or not shutil.which("claude"):
+        return
+    try:
+        agents = json.loads(
+            subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=15).stdout
+        )
+        panes = {}
+        for line in tmux("list-panes", "-a", "-F", "#{pane_pid} #{pane_id}").stdout.splitlines():
+            pid, pane = line.split()
+            panes[int(pid)] = pane
+        ps = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+        parents = {int(a): int(b) for a, b in (row.split() for row in ps.splitlines() if row.strip())}
+        found = reporter_pane(agents, panes, parents, f"{slug}-report")
+        if found is None or found[1] == "waiting":
+            return
+        tmux("send-keys", "-t", found[0], "C-u")
+        tmux("send-keys", "-t", found[0], "-l", f"closed {name}")
+        tmux("send-keys", "-t", found[0], "Enter")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return
+
+
 def record(slug):
     STORIES.mkdir(parents=True, exist_ok=True)
     path = STORIES / f"{safe(slug, 'the story slug')}.md"
@@ -159,6 +207,9 @@ def record(slug):
     with path.open("a") as f:
         f.write(f"{head}\n{text}\n")
     print(path)
+    section = re.match(r"## (.+?) · \d{4}-\d{2}-\d{2} \d{2}:\d{2}\s*$", text.splitlines()[0])
+    if section:
+        ring(slug, section.group(1))
 
 
 def settings_text():

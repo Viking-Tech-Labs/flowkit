@@ -140,5 +140,6 @@ other session still uses them, and ends with what is ready for the user to try i
       saved: if step 9 did not save it, run `handoff.py save-prompt <name>` now, and add the
       `Prompt:` line with the path it printed and the launch line of step 9.1;
     - `none` only when step 5 drafted nothing: no repo work is left on the story. `Next: none` on the last close, with none of the story's sessions still live,
-    is what marks the story done. If a session named `<slug>-report` is live (ListAgents), send
-    it `closed <this session's name>` once; without one, the file is the record.
+    is what marks the story done. `handoff.py record` also types `closed <this session's name>`
+    into the pane of the story's live `<slug>-report` session, so do not message it yourself;
+    without a reporter, the file is the record.
