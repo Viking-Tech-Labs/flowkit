@@ -13,11 +13,21 @@ called `handoff` keeps working beside this one.
 | Skill | What it does |
 |---|---|
 | `/handoff:close [modes] [what next]` | Closes the session: commits green work (never pushes), fixes docs it made stale, writes the pick-up block, drafts the next session's prompt when repo work is left, closes with `DONE` / `FOR ME` / `OPEN` / `LEFT` and records the close in the story file. |
+| `/handoff:away` | Marks you away (`~/.claude/away`, cleared by `/handoff:back` or after 12 hours): closes and sessions stop asking and take the recommended option, marked "(auto)". |
+| `/handoff:back` | Clears the flag; sessions ask you again. |
 
 Modes, combined freely: `quick` skips the docs sweep; `prompt-only` prints only the next prompt
 (or the one line saying what remains); `overnight` runs unattended and sets the away flag; `spawn`
 saves the prompt and prints the line that starts the next session. Any other text is what the next
 session should do, passed into its prompt as written.
+
+## Keeping the computer awake
+
+The plugin's hooks hold a `caffeinate -i` while a turn runs, and between turns while Remote Control
+is attached or you are away, so a chain of sessions keeps going overnight. Each hold is bound to its
+Claude process and ends with it. The display still sleeps, and **a closed laptop lid still sleeps
+the computer and pauses the chain**: leave the lid open and the power connected. Where `caffeinate`
+does not exist (anything but macOS) the hooks do nothing.
 
 ## What a close writes
 

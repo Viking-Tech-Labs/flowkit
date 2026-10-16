@@ -79,5 +79,5 @@ plugins/brain/template/           the vault /brain:init creates
 plugins/session-discipline/       block/conventions.md, the adopt and decision-interview skills, scripts/adopt.py
 plugins/prompt-audit/             the audit skill and its analyst brief, scripts/extract.py and rules.py
 plugins/walkthrough/              the start skill and its question guide, scripts/history.py
-plugins/handoff/                  the close, away and back skills, hooks/hooks.json, scripts/
+plugins/handoff/                  the close, away and back skills, hooks/hooks.json (keep-awake), scripts/handoff.py
 ```
