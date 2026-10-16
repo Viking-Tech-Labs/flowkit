@@ -37,7 +37,7 @@ one repository without touching your user settings, add the marketplace and inst
 | `session-discipline` | Session conventions you adopt into your own `CLAUDE.md` as one block between markers (`/session-discipline:adopt`, with `status` and `update`): each rule says what it replaces, you delete the ones you do not want. Plus a decision-interview skill. | 0.1.0, usable |
 | `prompt-audit` | Reads the prompts you typed since the last audit, finds what you keep asking for by hand (`/prompt-audit:audit`), interviews you on the fixes and writes the accepted rules into your own section of `CLAUDE.md`. Your prompts never leave a scratch directory. | 0.1.0, usable |
 | `walkthrough` | Makes you understand a branch, a pull request or a pasted diff by predicting it first (`/walkthrough:start`): a summary, then questions on what happens underneath, graded against the code. Where your sound expectation and the code differ is a finding, written up as a small change you can reject. Unattended, it gives the steps to try by hand. | 0.1.0, usable |
-| `handoff` | Closes a session so the next one starts cold (`/handoff:close`): commits green work, writes the pick-up block into the repo's plan doc, drafts the next session's prompt when repo work is left, records the close in the story's file; `spawn` starts that session in the story's tmux tab, and `/handoff:setup-tmux` offers a beginner-friendly tmux kit. | 0.1.0, in progress |
+| `handoff` | Closes a session so the next one starts cold (`/handoff:close`): commits green work, writes the pick-up block into the repo's plan doc, drafts the next session's prompt when repo work is left, records the close in the story's file; `spawn` starts that session in the story's tmux tab (`/handoff:spawn` starts any other), and `/handoff:setup-tmux` offers a beginner-friendly tmux kit. | 0.1.0, in progress |
 
 Each plugin is its own decision: install only the ones you want, with
 `claude plugin install <plugin>@flowkit`. Each says in its own README what it needs.
@@ -79,5 +79,5 @@ plugins/brain/template/           the vault /brain:init creates
 plugins/session-discipline/       block/conventions.md, the adopt and decision-interview skills, scripts/adopt.py
 plugins/prompt-audit/             the audit skill and its analyst brief, scripts/extract.py and rules.py
 plugins/walkthrough/              the start skill and its question guide, scripts/history.py
-plugins/handoff/                  the close, away, back, setup and setup-tmux skills, hooks/hooks.json, scripts/, bin/flowkit-spawn and flowkit-tmux, tmux/ (the kit)
+plugins/handoff/                  the close, spawn, away, back, setup and setup-tmux skills, hooks/hooks.json, scripts/, bin/flowkit-spawn and flowkit-tmux, tmux/ (the kit)
 ```
