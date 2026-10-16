@@ -4,7 +4,7 @@
     "name": "flowkit"
   },
   "metadata": {
-    "description": "A working flow for Claude Code as versioned plugins: a personal knowledge wiki, session conventions, a prompt audit and a change walkthrough"
+    "description": "A working flow for Claude Code as versioned plugins: a personal knowledge wiki, session conventions, a prompt audit, a change walkthrough and session handoffs"
   },
   "plugins": [
     {
@@ -26,6 +26,11 @@
       "name": "walkthrough",
       "source": "./plugins/walkthrough",
       "description": "Understand a branch, a pull request or a pasted diff by predicting it before reading it: a quiz graded against the code, findings where the code deviates, and the checks to run by hand"
+    },
+    {
+      "name": "handoff",
+      "source": "./plugins/handoff",
+      "description": "Close a session so the next one starts cold: land green work, write the pick-up block, draft the next session's prompt, record the close in the story file; plus away and back"
     }
   ]
 }

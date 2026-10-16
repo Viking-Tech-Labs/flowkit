@@ -1,0 +1,9 @@
+{
+  "name": "handoff",
+  "version": "0.1.0",
+  "description": "Close a session so the next one starts cold: land green work, write the pick-up block, draft the next session's prompt, record the close in the story file; plus away and back",
+  "author": {
+    "name": "flowkit"
+  },
+  "keywords": ["handoff", "session", "close", "story"]
+}
