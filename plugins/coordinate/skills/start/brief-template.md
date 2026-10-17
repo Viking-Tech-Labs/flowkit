@@ -1,5 +1,9 @@
-You are the worker for <workstream> of <story>, coordinated by the session "<coordinator>".
-Your repo: <path> (branch or worktree: <branch>).
+Repo: <path>   Session: <worker>   Story: <slug>
+[Model: <model>   Effort: <effort>]
+[Why this model: <the reason the ladder gave>]
+
+You are the worker for <workstream> of <slug>, coordinated by the session "<coordinator>".
+Branch or worktree: <branch>.
 
 READ FIRST, your real brief is in the repo: <exact paths: the repo's CLAUDE.md, the story's plan
 or design doc, each with a few words on why it matters>

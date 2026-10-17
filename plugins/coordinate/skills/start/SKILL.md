@@ -94,7 +94,9 @@ Start each worker, in plan order:
   [--model <model>] [--effort <effort>] <coordination dir>/<slug>/<worker>.md
 ```
 
-The brief is the worker's first prompt. The script takes the launch driver and permission
+The brief is the worker's first prompt; its first line (`Repo: … Session: … Story: <slug>`, the
+header of a handoff prompt) is what makes the worker's `/handoff:close` record in the story file
+and the board show the story. The script takes the launch driver and permission
 mode from handoff's settings, refuses a repo with uncommitted changes (exit 6: give the worker a
 worktree, or `--force` only on the user's word) or a running namesake (exit 4), and prints
 `SPAWNED … name=<worker> rc=<link>`. Exit 3 means the tmux driver and no tmux here: say so (run
