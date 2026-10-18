@@ -36,8 +36,10 @@ included, with a board to watch them. Update Claude Code first (`claude update`;
 2.1.302) and have `python3`. For the terminal layout install tmux (`brew install tmux`) and run
 Claude inside it; for a UI, skip tmux and choose `background` in step 3.
 
-1. In a terminal: `claude plugin install handoff@flowkit`, then the same for `board@flowkit` and
-   `ladder@flowkit` (and `coordinate@flowkit` if your stories span several repositories).
+1. In a terminal: `claude plugin marketplace update flowkit` (a marketplace added before these
+   plugins existed does not list them until it is updated), then `claude plugin install
+   handoff@flowkit` and the same for `board@flowkit` and `ladder@flowkit` (and
+   `coordinate@flowkit` if your stories span several repositories).
 2. Open a new Claude Code session, or type `/reload-plugins`.
 3. `/handoff:setup`: offers the status line (closes read its context and cost numbers) and asks
    how new sessions start, tmux or background sessions you watch on the board and your phone.
