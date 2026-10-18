@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""flowkit-away: reach the Claude Code sessions already running when the user goes away.
+
+  flowkit-away nudge [--dry-run] [--only <name>]...  every session parked on a question gets the
+                                                     away line; the others waiting are listed
+  flowkit-away waiting                               one line per session waiting on the user
+
+A session parked on a question (`claude agents --json`: status waiting, waitingFor "input
+needed") is told the user is away: in a tmux pane Escape ends the question's turn and the away
+line is typed as its next prompt; a background session is stopped and resumed with the line as
+its prompt. A permission prompt is never answered: a script cannot approve, and must not.
+Reporters (`<story>-report`) never ask and are skipped. Idle and busy sessions are left alone:
+the handoff plugin's hook denies their next question while the away flag is set. The session
+running this is busy, so it is never nudged.
+
+The plugin runs its own copy (`handoff.py away`); `/handoff:setup-tmux` copies this file to
+~/.local/bin, kept at the plugin's version at every session start, so a shell function of your
+own can call `flowkit-away nudge` too.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+AWAY = CLAUDE / "away"
+QUESTION = "input needed"
+PERMISSION = "permission prompt"
+SETTLE = 10  # seconds a session may take to leave `waiting` after Escape or `claude stop`
+
+
+def run(*cmd, timeout=15, **kw):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def agents():
+    out = run("claude", "agents", "--json")
+    try:
+        rows = json.loads(out.stdout) if out and out.returncode == 0 else None
+    except ValueError:
+        return None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+
+
+def line():
+    try:
+        since = AWAY.read_text().split("\n", 1)[0].strip()
+    except OSError:
+        since = ""
+    return (f"away{' since ' + since if since else ''}: I am off. Answer the question you asked with the "
+            'recommended option, mark it "(auto)" in the decision log and in your close, carry on, and never '
+            "end a turn on a question; until I am back every question is denied the same way.")
+
+
+def panes():
+    """{shell pid: pane id} for every tmux pane, {} without tmux."""
+    out = run("tmux", "list-panes", "-a", "-F", "#{pane_pid} #{pane_id}")
+    found = {}
+    for row in (out.stdout if out and out.returncode == 0 else "").splitlines():
+        pid, _, pane = row.partition(" ")
+        if pid.isdigit():
+            found[int(pid)] = pane
+    return found
+
+
+def parents():
+    out = run("ps", "-axo", "pid=,ppid=")
+    found = {}
+    for row in (out.stdout if out else "").splitlines():
+        parts = row.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            found[int(parts[0])] = int(parts[1])
+    return found
+
+
+def pane_of(row, pane_map, parent_map):
+    """The pane a session runs in, found through its parent processes (a pane's pid is its shell)."""
+    pid = row.get("pid")
+    for _ in range(4):
+        if pid in pane_map:
+            return pane_map[pid]
+        pid = parent_map.get(pid)
+        if pid is None:
+            return None
+    return None
+
+
+def status_of(name):
+    rows = agents() or []
+    for r in rows:
+        if r.get("name") == name:
+            return r.get("status") or r.get("state")
+    return None
+
+
+def settled(name, pid_gone=False):
+    """Wait until the session called `name` is no longer waiting (or, with pid_gone, until its
+    process is gone). True when it happened within SETTLE seconds."""
+    deadline = time.time() + SETTLE
+    while time.time() < deadline:
+        rows = agents() or []
+        row = next((r for r in rows if r.get("name") == name), None)
+        if pid_gone:
+            if row is None or not row.get("pid"):
+                return True
+        elif row is None or row.get("status") != "waiting":
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def tmux(*args):
+    return run("tmux", *args)
+
+
+def nudge_pane(row, pane):
+    """Escape ends the question's turn; the away line is typed once the session has left waiting."""
+    tmux("send-keys", "-t", pane, "Escape")
+    if not settled(row.get("name")):
+        return False
+    time.sleep(0.5)
+    tmux("send-keys", "-t", pane, "C-u")
+    tmux("send-keys", "-t", pane, "-l", line())
+    tmux("send-keys", "-t", pane, "Enter")
+    return True
+
+
+def nudge_background(row):
+    """A background session is stopped, then resumed under its own id with the line as its
+    prompt (a live one would get a copy instead, so the resume waits until the process is gone)."""
+    run("claude", "stop", row["id"], timeout=30)
+    if not settled(row.get("name"), pid_gone=True):
+        return False
+    out = run("claude", "--bg", "--resume", row["sessionId"], line(), timeout=60, cwd=row.get("cwd") or None)
+    return bool(out) and out.returncode == 0
+
+
+def classify(row):
+    """What `nudge` does with a session, as (verb, where): nudge, permission, unreachable,
+    skipped, waiting, or None when it is not waiting at all."""
+    if row.get("status") != "waiting":
+        return None
+    name = row.get("name") or "?"
+    if name.endswith("-report"):
+        return "skipped", "a reporter never asks"
+    what = row.get("waitingFor") or "a prompt"
+    if what == PERMISSION:
+        return "permission", "waits on a permission prompt; answer it from the phone"
+    if what != QUESTION:
+        return "waiting", f"waits on {what}"
+    if row.get("kind") == "background":
+        return "nudge", "background"
+    return "nudge", "tmux"
+
+
+def nudge(dry, only):
+    rows = agents()
+    if rows is None:
+        print("cannot read `claude agents --json`: no session nudged")
+        return 3
+    pane_map, parent_map = panes(), parents()
+    shown = 0
+    for row in rows:
+        name = row.get("name") or "?"
+        if only and name not in only:
+            continue
+        kind = classify(row)
+        if kind is None:
+            if only:
+                print(f"{name}: not waiting ({row.get('status') or row.get('state') or '?'})")
+                shown += 1
+            continue
+        verb, where = kind
+        shown += 1
+        if verb != "nudge":
+            print(f"{verb} {name}: {where}")
+            continue
+        pane = None
+        if where == "tmux":
+            pane = pane_of(row, pane_map, parent_map)
+            if pane is None:
+                print(f"unreachable {name}: waits on a question outside tmux; answer it from the phone")
+                continue
+            where = f"tmux {pane}"
+        if dry:
+            print(f"would nudge {name} ({where})")
+            continue
+        ok = nudge_background(row) if pane is None else nudge_pane(row, pane)
+        print(f"{'nudged' if ok else 'not nudged'} {name} ({where}){'' if ok else ': it did not leave the question in time'}")
+    if not shown:
+        print("no session waits on you")
+    return 0
+
+
+def waiting():
+    rows = agents()
+    if rows is None:
+        print("cannot read `claude agents --json`")
+        return 3
+    found = [r for r in rows if r.get("status") == "waiting"]
+    for r in found:
+        print(f"{r.get('name') or '?'}: waits on {r.get('waitingFor') or 'a prompt'}")
+    if not found:
+        print("nobody waits on you")
+    return 0
+
+
+def main(argv):
+    cmd, args = (argv[0], argv[1:]) if argv else ("", [])
+    if cmd == "nudge":
+        dry, only = False, []
+        while args:
+            if args[0] == "--dry-run":
+                dry = True
+                args = args[1:]
+            elif args[0] == "--only" and len(args) > 1:
+                only.append(args[1])
+                args = args[2:]
+            else:
+                break
+        if args:
+            print(__doc__, file=sys.stderr)
+            return 2
+        return nudge(dry, only)
+    if cmd == "waiting" and not args:
+        return waiting()
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

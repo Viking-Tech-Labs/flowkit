@@ -13,8 +13,8 @@ called `handoff` keeps working beside this one.
 | Skill | What it does |
 |---|---|
 | `/handoff:close [modes] [what next]` | Closes the session: commits green work (never pushes), fixes docs it made stale, writes the pick-up block, drafts the next session's prompt when repo work is left, closes with `DONE` / `FOR ME` / `OPEN` / `LEFT` and records the close in the story file. |
-| `/handoff:away` | Marks you away (`~/.claude/away`, cleared by `/handoff:back` or after 12 hours): closes and sessions stop asking and take the recommended option, marked "(auto)". |
-| `/handoff:back` | Clears the flag; sessions ask you again. |
+| `/handoff:away` | Marks you away (`~/.claude/away`, cleared by `/handoff:back` or after 12 hours): every session, running already or started later, stops asking and takes the recommended option, marked "(auto)"; a session already sitting on a question is told so at once (below). |
+| `/handoff:back` | Clears the flag, so sessions ask you again, and lists the sessions waiting on you right now. |
 | `/handoff:spawn [single] <prompt>` | Starts any session with a prompt the way a close's `spawn` does: in its story's tab, or with `single` as a one-off in a shared `adhoc` tab ("open a fresh session in that repo"). |
 | `/handoff:setup` | Offers the status line below, as a diff of your settings, and writes it only on your yes; asks which launch driver spawned sessions use, and for background sessions offers two settings of yours. |
 | `/handoff:setup-tmux` | Offers the tmux kit below and the one line that loads it from your tmux.conf, and writes only on your yes; explains the launch settings. |
@@ -70,8 +70,9 @@ they are.
 
 ## The tmux kit
 
-`/handoff:setup-tmux` copies a small tmux setup to `~/.config/flowkit/tmux.conf` and adds one
-line to your tmux.conf: `source-file ~/.config/flowkit/tmux.conf`. It keeps tmux's Ctrl-b prefix
+`/handoff:setup-tmux` copies a small tmux setup to `~/.config/flowkit/tmux.conf` (and
+`flowkit-away`, see "Being away") and adds one line to your tmux.conf: `source-file
+~/.config/flowkit/tmux.conf`. It keeps tmux's Ctrl-b prefix
 and adds: mouse on, tabs and panes counted from 1, **⚑ n need you** in the status bar with ⚑n on
 each tab that has sessions waiting on you, `prefix a` to list every Claude session and jump to
 one, and `prefix H` for the one-page cheat sheet (`tmux/cheatsheet.md`). The conf calls the
@@ -79,6 +80,34 @@ helper at `~/.local/bin/flowkit-tmux`, a copy kept at the plugin's version by a 
 hook, because the plugin's own directory moves with every version; the hook does nothing until
 you install the kit. Put your own changes below the `source-file` line: a setting there wins.
 Sessions started in the background have no pane and are not counted; `prefix a` lists them.
+
+## Being away
+
+`/handoff:away` writes `~/.claude/away` (the stamp of when; it counts for 12 hours) and makes it
+reach every session, in two ways:
+
+- **No session asks you anything.** A PreToolUse hook on AskUserQuestion (`hooks/hooks.json`)
+  denies the question while the flag is set, with a reason the session acts on: take the
+  recommended option, mark it "(auto)" in its decision log and its close, carry on, never end a
+  turn on a question. The harness enforces it in every session that loads the plugin, hand-started
+  or spawned, in a pane or in the background, so nothing depends on a session remembering to read
+  the flag, and `/handoff:back` has nothing to announce: once the flag is gone, questions go
+  through again.
+- **A session already sitting on a question is nudged.** `bin/flowkit-away nudge` reads `claude
+  agents --json`; each session with `status: waiting` on `input needed` gets the away line: in a
+  tmux pane, Escape ends the question's turn and the line is typed as its next prompt (as the
+  reporter doorbell types); a background session is stopped and resumed with the line as its
+  prompt. One line per session comes back: `nudged`, `permission` (a permission prompt is never
+  answered, since nothing here approves on your behalf: answer it from the phone), `unreachable`
+  (a question in a plain terminal outside tmux), `skipped` (a `<story>-report`, which never asks).
+  Idle and busy sessions are left alone, since the hook catches their next question; a session
+  that ended its turn on a question in prose stays as it is.
+
+`/handoff:setup-tmux` copies `flowkit-away` to `~/.local/bin` beside `flowkit-tmux`, kept at the
+plugin's version at every session start, so a shell function of your own that writes the flag can
+call `flowkit-away nudge` and `flowkit-away waiting` too (`--dry-run` shows what `nudge` would do,
+`--only <name>` limits it to one session). The flag is the record and the nudge a courtesy: a
+session the nudge could not reach still reads the flag at its next question.
 
 ## Keeping the computer awake
 

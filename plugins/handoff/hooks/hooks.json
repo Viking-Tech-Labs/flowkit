@@ -19,6 +19,16 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/keep-awake.sh\" hold"
           }
         ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py\" question-gate",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [

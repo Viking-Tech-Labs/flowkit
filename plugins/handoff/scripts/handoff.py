@@ -11,7 +11,10 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py wake <slug> <name>                  ring a busy background reporter once it is idle (5 min)
   handoff.py conf <key> <value>                  set a key of ~/.config/flowkit/handoff.conf
   handoff.py settings diff|install <key=json>…   values for the user's settings.json (a.b nests)
-  handoff.py away | back | away-status           the ~/.claude/away flag (12 hours)
+  handoff.py away | back | away-status           the ~/.claude/away flag (12 hours); `away` then nudges
+                                                 the sessions parked on a question (bin/flowkit-away),
+                                                 `back` lists the sessions waiting on the user
+  handoff.py question-gate                       PreToolUse hook on AskUserQuestion: denied while away
   handoff.py statusline diff|install <root>      the status line that records context and cost
   handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
   handoff.py refresh <root>                      update an installed status line and tmux kit (SessionStart)
@@ -42,8 +45,10 @@ KIT = {  # the tmux kit: where each file of the plugin is copied, so a tmux.conf
     "tmux/tmux.conf": CONFIG / "tmux.conf",
     "tmux/cheatsheet.md": CONFIG / "tmux-cheatsheet.md",
     "bin/flowkit-tmux": HOME / ".local" / "bin" / "flowkit-tmux",
+    "bin/flowkit-away": HOME / ".local" / "bin" / "flowkit-away",
 }
 KIT_CONF = KIT["tmux/tmux.conf"]
+AWAY_BIN = Path(__file__).resolve().parent.parent / "bin" / "flowkit-away"
 HEADING = "WHERE TO PICK UP"
 NAMES = ("PLAN.md", "BUILD-PLAN.md", "HANDOFF.md", "ROADMAP.md", "docs/PLAN.md", "docs/plan.md", "docs/HANDOFF.md")
 SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -118,6 +123,32 @@ def away_since():
         return AWAY.read_text().strip() or "set"
     except OSError:
         return None
+
+
+def reach(*args):
+    """Run bin/flowkit-away with its output going straight to the skill; a miss never fails
+    the flag (the sessions are reached as a courtesy, the flag is the record)."""
+    try:
+        subprocess.run([sys.executable, str(AWAY_BIN), *args], timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"flowkit-away: {e}")
+
+
+def question_gate():
+    """PreToolUse on AskUserQuestion. While the away flag is set the question is denied, with the
+    reason the session acts on; otherwise silent, and the question goes to the user."""
+    try:
+        json.load(sys.stdin)
+    except ValueError:
+        return
+    since = away_since()
+    if not since:
+        return
+    reason = (f"The user is away (since {since}, {AWAY}): questions are not asked. Take the recommended "
+              'option, mark it "(auto)" in the decision log and in the close, carry on, and never end the turn '
+              'on a question. A brief that forbids "(auto)" decisions stops here and lists its questions instead.')
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
 
 
 def state(data, repo):
@@ -459,9 +490,15 @@ def main(argv):
         CLAUDE.mkdir(parents=True, exist_ok=True)
         AWAY.write_text(time.strftime("%Y-%m-%d %H:%M") + "\n")
         print(f"away: since {AWAY.read_text().strip()} (clears with back or after {AWAY_HOURS} hours)")
+        sys.stdout.flush()
+        reach("nudge")
     elif cmd == "back" and not args:
         AWAY.unlink(missing_ok=True)
         print("away: off")
+        sys.stdout.flush()
+        reach("waiting")
+    elif cmd == "question-gate" and not args:
+        question_gate()
     elif cmd == "wake" and len(args) == 2:
         try:
             wake(*args, patience=300)
