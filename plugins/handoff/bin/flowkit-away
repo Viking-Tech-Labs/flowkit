@@ -29,6 +29,8 @@ AWAY = CLAUDE / "away"
 QUESTION = "input needed"
 PERMISSION = "permission prompt"
 SETTLE = 10  # seconds a session may take to leave `waiting` after Escape or `claude stop`
+RESUME_GRACE = 3  # seconds between the process going and the resume: measured on 2.1.302, a resume
+#                   within a second of the stop starts a copy under a new id, one after 2 s continues
 
 
 def run(*cmd, timeout=15, **kw):
@@ -98,17 +100,29 @@ def status_of(name):
     return None
 
 
+def background_row(name):
+    """The newest background entry called `name` in `claude agents --json --all`, where a stopped
+    session keeps its entry (without a pid) while the live list drops it at once."""
+    out = run("claude", "agents", "--json", "--all")
+    try:
+        rows = json.loads(out.stdout) if out and out.returncode == 0 else []
+    except ValueError:
+        rows = []
+    rows = [r for r in rows if isinstance(r, dict) and r.get("kind") == "background" and r.get("name") == name]
+    return max(rows, key=lambda r: r.get("startedAt") or 0) if rows else None
+
+
 def settled(name, pid_gone=False):
     """Wait until the session called `name` is no longer waiting (or, with pid_gone, until its
-    process is gone). True when it happened within SETTLE seconds."""
+    process is gone: `claude stop` returns before that, and a resume while it lingers starts a
+    copy under a new id). True when it happened within SETTLE seconds."""
     deadline = time.time() + SETTLE
     while time.time() < deadline:
-        rows = agents() or []
-        row = next((r for r in rows if r.get("name") == name), None)
         if pid_gone:
-            if row is None or not row.get("pid"):
-                return True
-        elif row is None or row.get("status") != "waiting":
+            row = background_row(name)
+        else:
+            row = next((r for r in (agents() or []) if r.get("name") == name), None)
+        if row is None or (not row.get("pid") if pid_gone else row.get("status") != "waiting"):
             return True
         time.sleep(0.5)
     return False
@@ -122,22 +136,26 @@ def nudge_pane(row, pane):
     """Escape ends the question's turn; the away line is typed once the session has left waiting."""
     tmux("send-keys", "-t", pane, "Escape")
     if not settled(row.get("name")):
-        return False
+        return False, ""
     time.sleep(0.5)
     tmux("send-keys", "-t", pane, "C-u")
     tmux("send-keys", "-t", pane, "-l", line())
     tmux("send-keys", "-t", pane, "Enter")
-    return True
+    return True, ""
 
 
 def nudge_background(row):
     """A background session is stopped, then resumed under its own id with the line as its
-    prompt (a live one would get a copy instead, so the resume waits until the process is gone)."""
+    prompt (a live one would get a copy instead, so the resume waits until the process is gone,
+    plus RESUME_GRACE)."""
     run("claude", "stop", row["id"], timeout=30)
     if not settled(row.get("name"), pid_gone=True):
-        return False
+        return False, ""
+    time.sleep(RESUME_GRACE)
     out = run("claude", "--bg", "--resume", row["sessionId"], line(), timeout=60, cwd=row.get("cwd") or None)
-    return bool(out) and out.returncode == 0
+    text = ((out.stdout or "") + (out.stderr or "")).strip().splitlines() if out else []
+    note = next((l.strip() for l in text if "copy" in l), "")
+    return bool(out) and out.returncode == 0, note
 
 
 def classify(row):
@@ -190,7 +208,8 @@ def nudge(dry, only):
         if dry:
             print(f"would nudge {name} ({where})")
             continue
-        ok = nudge_background(row) if pane is None else nudge_pane(row, pane)
+        ok, note = nudge_background(row) if pane is None else nudge_pane(row, pane)
+        where += f"; {note}" if note else ""
         print(f"{'nudged' if ok else 'not nudged'} {name} ({where}){'' if ok else ': it did not leave the question in time'}")
     if not shown:
         print("no session waits on you")
