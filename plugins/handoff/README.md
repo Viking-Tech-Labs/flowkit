@@ -51,8 +51,8 @@ background sessions, so no tmux is needed:
 - with `reporter=on` the story's first launch also starts `<story>-report` in the background.
   Each close rings it: `handoff.py record` wakes it with `closed <session>` as its prompt
   (stopping it first when it sits idle, since a running background session cannot be typed into);
-- a background session idle at its prompt for about an hour is stopped by Claude, its
-  conversation kept: the next ring wakes a stopped reporter, and `claude attach` reopens any;
+- a background session idle at its prompt for some hours (8 h on Claude Code 2.1.301; the
+  number changes between versions) is stopped by Claude, its conversation kept: the next ring wakes a stopped reporter, and `claude attach` reopens any;
 - `claude --bg` does not pass on your shell's environment; the next session gets
   `XDG_CONFIG_HOME` from the one that started it, so both read the same settings.
 
