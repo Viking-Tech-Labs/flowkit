@@ -73,8 +73,10 @@ Each plugin is its own decision: install only the ones you want, with
 Copilot reads this marketplace as it is, in Copilot CLI and in VS Code. Three plugins work there:
 `brain`, `session-discipline` and `walkthrough`. The other five need Claude Code: `prompt-audit`
 reads Claude Code's transcripts, and `handoff`, `board`, `ladder` and `coordinate` drive the
-`claude` command. This section is written from the Copilot docs of October 2026 and not yet tried
-on a machine. The access note under Quick start applies here too.
+`claude` command. Checked on 2026-10-19 with Copilot CLI 1.0.100: the marketplace adds, the three
+plugins install and all eight of their skills load (from brain 0.1.1 and session-discipline 0.1.1).
+Running them in a session, and VS Code, are not yet tried. The access note under Quick start
+applies here too.
 
 Copilot CLI is the closer fit. Its docs confirm this plugin format, the `${CLAUDE_PLUGIN_ROOT}` and
 `${CLAUDE_PLUGIN_DATA}` variables every skill passes to its script, and a tool that asks you
@@ -86,7 +88,8 @@ questions.
 3. In a new `copilot` session: `/brain:init ~/brain`, then
    `/session-discipline:adopt ~/.copilot/copilot-instructions.md`. Copilot CLI does not read
    `~/.claude/CLAUDE.md`, so the conventions go into its own user-level instructions file.
-   `/skills list` shows the names Copilot gave the skills.
+   `/skills list` shows the names Copilot gave the skills (it lists them without the plugin name).
+4. Updates: `copilot plugin marketplace update flowkit`, then `copilot plugin update --all`.
 
 In VS Code:
 
