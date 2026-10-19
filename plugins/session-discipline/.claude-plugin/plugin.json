@@ -1,6 +1,6 @@
 {
   "name": "session-discipline",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Working-session conventions you adopt into your own CLAUDE.md as a managed block, and a decision-interview skill",
   "author": {
     "name": "flowkit"

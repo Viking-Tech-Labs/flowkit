@@ -1,7 +1,7 @@
 ---
 name: adopt
 description: Write the flowkit session conventions into the user's own CLAUDE.md as one managed block between marker comments, report what is installed against what is available, or update the block. Use when the user types /session-discipline:adopt, or says "adopt the session conventions", "is my conventions block up to date", "update the conventions block".
-argument-hint: [status | update] [path to a CLAUDE.md or its directory]
+argument-hint: "[status | update] [path to a CLAUDE.md or its directory]"
 disable-model-invocation: true
 ---
 

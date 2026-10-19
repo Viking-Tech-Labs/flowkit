@@ -1,7 +1,7 @@
 ---
 name: init
 description: Create the user's brain vault at a path, or register one that already exists, so the other brain skills find it. Run once per machine. Builds the vault from the template inside the plugin, starts git there, and writes the vault's settings file that registers the flowkit marketplace.
-argument-hint: [vault-path]
+argument-hint: "[vault-path]"
 disable-model-invocation: true
 ---
 
