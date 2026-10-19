@@ -10,6 +10,10 @@ questions: a second walkthrough of the same code must not find its own answers.
   moment in the product's life: "a user saves the form while offline", "the app starts cold a day
   after sign-in", "a visitor who is not signed in opens a shared link". Never "what does this
   function return".
+- **Set the scene in the question.** Two to four sentences: who acts, on which version, release
+  or state, what happened just before, and exactly what is asked. The user answers cold, often
+  days after the change was planned, and must never have to rebuild the setup from earlier
+  rounds. The scene is context, not a hint: it never narrows toward the answer.
 - **Mechanisms and sequencing.** Which layer decides, in what order, who is affected. Names,
   paths and counts are trivia; skip them.
 - **The reasonable expectation is always an option** when the code deviates from it. That option
@@ -21,7 +25,8 @@ questions: a second walkthrough of the same code must not find its own answers.
 
 ## Options
 
-- Three or four. Labels of four words or fewer; descriptions one sentence each.
+- Three or four. Labels of four words or fewer; each description states the complete outcome in
+  one or two sentences, never a fragment the user has to expand.
 - Exactly one correct option, verified against the code before the batch goes out, with the
   `file:line` in your notes. Never from memory of your own summary.
 - Each wrong option encodes one specific misconception a programmer who has not read the code

@@ -1,6 +1,6 @@
 {
   "name": "walkthrough",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Understand a branch, a pull request or a pasted diff by predicting it before reading it: a quiz graded against the code, findings where the code deviates, and the checks to run by hand",
   "author": {
     "name": "flowkit"
