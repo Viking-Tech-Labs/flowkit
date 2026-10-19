@@ -68,6 +68,45 @@ and `/handoff:back` when you return. A closed laptop lid pauses everything.
 Each plugin is its own decision: install only the ones you want, with
 `claude plugin install <plugin>@flowkit`. Each says in its own README what it needs.
 
+## GitHub Copilot
+
+Copilot reads this marketplace as it is, in Copilot CLI and in VS Code. Three plugins work there:
+`brain`, `session-discipline` and `walkthrough`. The other five need Claude Code: `prompt-audit`
+reads Claude Code's transcripts, and `handoff`, `board`, `ladder` and `coordinate` drive the
+`claude` command. This section is written from the Copilot docs of October 2026 and not yet tried
+on a machine. The access note under Quick start applies here too.
+
+Copilot CLI is the closer fit. Its docs confirm this plugin format, the `${CLAUDE_PLUGIN_ROOT}` and
+`${CLAUDE_PLUGIN_DATA}` variables every skill passes to its script, and a tool that asks you
+questions.
+
+1. `copilot plugin marketplace add Viking-Tech-Labs/flowkit`
+2. `copilot plugin install brain@flowkit`, and the same for `session-discipline@flowkit` and
+   `walkthrough@flowkit`
+3. In a new `copilot` session: `/brain:init ~/brain`, then
+   `/session-discipline:adopt ~/.copilot/copilot-instructions.md`. Copilot CLI does not read
+   `~/.claude/CLAUDE.md`, so the conventions go into its own user-level instructions file.
+   `/skills list` shows the names Copilot gave the skills.
+
+In VS Code:
+
+1. In your user settings: `"chat.plugins.enabled": true`,
+   `"chat.plugins.marketplaces": ["Viking-Tech-Labs/flowkit"]` (experimental) and
+   `"chat.useClaudeMdFile": true`, which makes chat read `~/.claude/CLAUDE.md`, where
+   `/session-discipline:adopt` writes by default.
+2. Install the three from the Extensions view (search `@agentPlugins`) or with the command
+   Chat: Install Plugin From Source and `https://github.com/Viking-Tech-Labs/flowkit`.
+3. In an agent chat: `/brain:init ~/brain`, then `/session-discipline:adopt`.
+
+VS Code's docs do not say whether it fills in the two variables or has a question tool. If
+`/brain:init` creates the vault and then fails to save its path, put `export BRAIN_DIR=~/brain` in
+your shell profile and restart VS Code: every brain command reads that first. If a command cannot
+find its script at all, use Copilot CLI. Without a question tool the decision interview asks in
+plain chat text.
+
+Chains of sessions stay Claude Code only. Copilot CLI has no machine-readable list of sessions
+and their state and no detached background sessions, and `handoff` and `board` are built on both.
+
 ## Updates
 
 An update reaches you only when a plugin's `version` changes; commits in between do not. You get
