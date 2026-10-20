@@ -133,6 +133,8 @@ def tab_state(row, slug):
         return ""
     if sid in closed(slug):
         return "done"
+    if (row.get("name") or "").endswith("-report"):
+        return ""  # a reporter idles between closes; that is not a stall
     since = (info.get("statusUpdatedAt") or 0) / 1000
     cutoff = time.time() - STALL
     return "stalled" if since and since <= cutoff and untouched(sid, cutoff) else ""

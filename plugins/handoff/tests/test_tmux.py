@@ -50,12 +50,12 @@ class Labels(unittest.TestCase):
         self.story = story
         self.wid = wid
 
-    def session(self, n, status, live=None, idle_for=0, closed=False, retry=False, touched=None):
+    def session(self, n, status, live=None, idle_for=0, closed=False, retry=False, touched=None, name=""):
         """A claude pane in the current window, its agents row and, optionally, its sessions file."""
         sid = f"{n:08d}-0000-0000-0000-000000000000"
         pid = str(1000 + n)
         self.pane_list.append([pid, f"%{n}", "work", self.wid, "1", "w", str(n), "2.1.304", "", self.story])
-        self.rows.append({"kind": "interactive", "pid": int(pid), "sessionId": sid, "status": status})
+        self.rows.append({"kind": "interactive", "pid": int(pid), "sessionId": sid, "status": status, "name": name})
         updated = (time.time() - idle_for) * 1000
         (self.tmp / "sessions" / f"{pid}.json").write_text(json.dumps(
             {"pid": int(pid), "sessionId": sid, "status": live or status, "statusUpdatedAt": updated}))
@@ -96,6 +96,7 @@ class Labels(unittest.TestCase):
         self.assertEqual(self.one(status="idle", idle_for=16 * 60), "stalled")
         self.assertEqual(self.one(status="idle", closed=True), "done")
         self.assertEqual(self.one(status="idle", idle_for=60), "unchanged")
+        self.assertEqual(self.one(status="idle", idle_for=16 * 60, name="st-report"), "unchanged")
 
     def test_not_stalled_while_the_transcript_or_a_fork_moves(self):
         self.assertEqual(self.one(status="idle", idle_for=16 * 60, touched=60), "unchanged")
