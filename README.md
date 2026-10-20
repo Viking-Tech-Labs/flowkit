@@ -110,6 +110,38 @@ plain chat text.
 Chains of sessions stay Claude Code only. Copilot CLI has no machine-readable list of sessions
 and their state and no detached background sessions, and `handoff` and `board` are built on both.
 
+### Setting Copilot CLI up like the Claude Code flow
+
+What each piece of the Claude Code flow is in Copilot CLI, and how to set it up. Flags, settings
+and commands are from `copilot help` of 1.0.100 (settings go in `~/.copilot/settings.json`); the
+hook is from the Copilot docs. None of it is tried in a session yet.
+
+| Claude Code flow | Copilot CLI | Set up |
+|---|---|---|
+| session conventions in `~/.claude/CLAUDE.md` | `~/.copilot/copilot-instructions.md` | `/session-discipline:adopt ~/.copilot/copilot-instructions.md` |
+| skills in `~/.claude/skills` | `~/.copilot/skills` (`~/.agents/skills` is read too) | `npx skills add <repo> -g -a github-copilot` |
+| auto mode | the `assisted` permission mode (`allow-all` is `--yolo`) | `"defaultPermissionMode": "assisted"` |
+| a model and effort per kind of session (`ladder`) | `--model`, `--reasoning-effort`, `/model` | `"model"` for the default; flags per launch |
+| `/handoff:close spawn` starts the next session in a tmux pane | `copilot -i "<prompt>" --name <name>` in a new tmux window | a launcher script that reads the prompt file |
+| Remote Control | `--remote`, `/remote` | the flag in the launcher |
+| keep the Mac awake while sessions run | keep-alive | `"keepAlive": "busy"`, or `/keep-alive` |
+| `/handoff:away`: sessions decide without asking | `--no-ask-user`, or a `preToolUse` hook denying `ask_user` | the flag in the launcher, or a hook in `~/.copilot/hooks/` |
+| the board, which session needs you | the Sessions tab inside one `copilot` process; OS notifications | `"notifications": true` |
+| the status line with context and cost | `/statusline`, `/context`, `/usage` | `/statusline` |
+| resume a session | `--resume=<name>`, `--continue` | none |
+| unattended overnight | `/delegate`: GitHub's cloud agent, a branch and a draft pull request | none |
+
+Nothing in Copilot CLI stands in for `claude agents --json` (every session and its state, which
+the board and `away` read), `claude --bg`, nudging a session parked on a question, or the prompt
+audit, which reads Claude Code's transcripts.
+
+To have Copilot do the setup, start `copilot` in your home folder and paste:
+
+> Read ~/flowkit/README.md, the section "Setting Copilot CLI up like the Claude Code flow", and set
+> up my Copilot CLI to match it: the settings in ~/.copilot/settings.json, a tmux launcher script
+> that starts a named session from a prompt file with --remote, and anything else in the table.
+> Show me each change before you make it.
+
 ## Updates
 
 An update reaches you only when a plugin's `version` changes; commits in between do not. You get
