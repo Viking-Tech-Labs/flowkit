@@ -1,6 +1,6 @@
 """Run with `python3 -m unittest discover plugins/handoff/tests`. Each test gets its own config
-dir and temp dir, a stub `claude` that serves a session list and records what it was
-called with, and a stub `tmux` that serves a pane list, so nothing reaches a real
+dir and temp dir, a stub `claude` that serves a session list and a usage answer and records what
+else it was called with, and a stub `tmux` that serves a pane list, so nothing reaches a real
 session or the user's files."""
 import json
 import os
@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent.parent
@@ -31,6 +32,8 @@ class Handoff(unittest.TestCase):
         (self.tmp / "agents.json").write_text(json.dumps(rows))
         stub = self.tmp / "bin" / "claude"
         stub.write_text(f"#!/bin/sh\nif [ \"$1\" = agents ]; then cat {self.tmp / 'agents.json'}; "
+                        f"elif [ \"$1\" = -p ]; then echo probe >> {self.tmp / 'probes'}; "
+                        f"cat {self.tmp / 'usage.jsonl'}; "
                         f"else echo \"$@\" >> {self.calls}; fi\n")
         stub.chmod(0o755)
 
@@ -100,14 +103,66 @@ class Handoff(unittest.TestCase):
         self.agents([
             {"name": "s3", "kind": "interactive", "pid": 1, "status": "waiting", "waitingFor": "permission prompt"},
         ])
+        self.usage_answer()
         out = self.handoff("away").stdout.splitlines()
         self.assertTrue(self.flag.is_file())
         self.assertTrue(out[0].startswith("away: since "))
-        self.assertEqual(out[1], "permission s3: waits on a permission prompt; answer it from the phone")
+        self.assertTrue(out[1].startswith("Week 49% used, resets "))
+        self.assertEqual(out[2], "permission s3: waits on a permission prompt; answer it from the phone")
         out = self.handoff("back").stdout.splitlines()
         self.assertFalse(self.flag.exists())
         self.assertEqual(out, ["away: off", "s3: waits on permission prompt"])
         self.assertFalse(self.calls.exists())
+
+    def usage_answer(self, hours=15):
+        stamp = datetime.fromtimestamp(time.time() + hours * 3600 + 60, timezone.utc).isoformat()
+        limits = [
+            {"kind": "session", "percent": 9, "resets_at": stamp, "scope": None},
+            {"kind": "weekly_all", "percent": 49, "resets_at": stamp, "scope": None},
+            {"kind": "weekly_scoped", "percent": 37, "resets_at": stamp,
+             "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}},
+        ]
+        answer = {"type": "control_response", "response": {
+            "subtype": "success", "request_id": "flowkit-usage", "response": {"rate_limits": {
+                "limits": limits,
+                "weekly_scoped_shares": [
+                    {"limit_index": 2, "used_percent_of_weekly": 19, "allowance_percent_of_weekly": 50}]}}}}
+        (self.tmp / "usage.jsonl").write_text('{"type":"system","subtype":"hook_started"}\n' + json.dumps(answer) + "\n")
+        return time.strftime("%a %H:%M", time.localtime(time.time() + hours * 3600 + 60))
+
+    def probes(self):
+        path = self.tmp / "probes"
+        return len(path.read_text().splitlines()) if path.exists() else 0
+
+    def test_usage_line_then_cache_per_config_folder(self):
+        when = self.usage_answer()
+        out = self.handoff("usage")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), f"Week 49% used, resets {when} (in 15 h) · Fable 37% of its bucket, "
+                                             "19% of the week (cap 50%) · 5-hour 9%")
+        (self.tmp / "usage.jsonl").unlink()
+        cached = json.loads(self.handoff("usage", "--json").stdout)
+        self.assertEqual((cached["source"], cached["models"][0]["week_share"], self.probes()), ("cache", 19, 1))
+        self.env["CLAUDE_CONFIG_DIR"] = str(self.tmp / "other")
+        self.assertEqual(json.loads(self.handoff("usage", "--json").stdout)["source"], "old")
+        self.assertEqual(self.probes(), 2)
+
+    def test_usage_falls_back_to_the_newest_week_file(self):
+        out = self.handoff("usage")
+        self.assertEqual(out.returncode, 1)
+        self.assertEqual(out.stdout.strip(),
+                         "usage: the live call failed (no answer (exit 1)), and no status line has recorded a week")
+        weeks = self.tmp / "claude" / "usage-stats"
+        weeks.mkdir()
+        (weeks / "week-1.json").write_text('{"seven_day_pct": 10, "resets_at": 1}')
+        (weeks / "week-2.json").write_text(json.dumps({"seven_day_pct": 49, "resets_at": int(time.time()) + 7200,
+                                                       "five_hour_pct": 11, "updated": "2026-10-20T09:50:55Z"}))
+        out = self.handoff("usage")
+        self.assertEqual(out.returncode, 0)
+        self.assertRegex(out.stdout.strip(), r"^usage: the live call failed \(no answer \(exit 1\)\); old figures "
+                                             r"from the status line at \w+ \d\d:\d\d: Week 49% used, resets "
+                                             r"\w+ \d\d:\d\d \(in 2 h\) · 5-hour 11%$")
+        self.assertEqual(json.loads(self.handoff("usage", "--json").stdout)["models"], [])
 
     def context(self, pct, prompt=None, calls=(), sid="s1", name="story-s3", requests=30, **extra):
         stats = self.tmp / "claude" / "session-stats"

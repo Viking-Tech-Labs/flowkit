@@ -4,7 +4,8 @@ description: Mark the user as away, so sessions and closes run unattended (no qu
 ---
 
 Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py" away` and relay its lines: the first is
-the flag, the rest are the sessions that were waiting on the user (`nudged`, `permission`,
+the flag, the second how much of the plan's usage is left, the rest are the sessions that were
+waiting on the user (`nudged`, `permission`,
 `unreachable`, `skipped`, or `no session waits on you`).
 
 Then tell the user, plainly and in this order:

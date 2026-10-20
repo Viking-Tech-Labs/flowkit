@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""flowkit-usage: how much of the plan's usage is left, in one line.
+
+  flowkit-usage           Week 49% used, resets Tue 02:59 (in 15 h) · <model> 37% of its bucket, ...
+  flowkit-usage --json    the same fields as JSON
+
+Claude Code answers it itself: a `get_usage` control request through `claude -p` stream-json,
+with no model call and no transcript left behind. An answer is kept 10 minutes per config folder
+(CLAUDE_CONFIG_DIR), so a second account has its own. When the call fails the line says so and
+falls back to the newest week-*.json a status line of your own may record under
+~/.claude/usage-stats/ (seven_day_pct, resets_at, five_hour_pct), marked old and without the
+per-model figures.
+
+The plugin runs its own copy (`handoff.py usage`; `handoff.py away` prints the line);
+`/handoff:setup-tmux` copies this file to ~/.local/bin, kept at the plugin's version at every
+session start.
+"""
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime
+from pathlib import Path
+
+CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+WEEKS = CLAUDE / "usage-stats"
+CACHE = Path(tempfile.gettempdir()) / f"flowkit-usage-{hashlib.sha1(str(CLAUDE).encode()).hexdigest()[:12]}.json"
+CACHE_SECONDS = 600
+TIMEOUT = 20
+REQUEST = {"type": "control_request", "request_id": "flowkit-usage",
+           "request": {"subtype": "get_usage", "skip_behaviors": True}}
+
+
+def probe():
+    out = subprocess.run(
+        ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+         "--no-session-persistence"],
+        input=json.dumps(REQUEST) + "\n", capture_output=True, text=True, timeout=TIMEOUT,
+        cwd=tempfile.gettempdir())
+    for line in out.stdout.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(msg, dict):
+            continue
+        answer = msg.get("response") or {}
+        if msg.get("type") == "control_response" and answer.get("request_id") == REQUEST["request_id"]:
+            if answer.get("subtype") != "success":
+                raise RuntimeError(answer.get("error") or "refused")
+            limits = (answer.get("response") or {}).get("rate_limits")
+            if not limits:
+                raise RuntimeError("no rate limits for this account")
+            return limits
+    raise RuntimeError(f"no answer (exit {out.returncode})")
+
+
+def epoch(stamp):
+    try:
+        return int(datetime.fromisoformat(stamp).timestamp())
+    except (TypeError, ValueError):
+        return None
+
+
+def fields(usage):
+    limits = usage.get("limits") or []
+    shares = {s.get("limit_index"): s for s in usage.get("weekly_scoped_shares") or []}
+
+    def window(kind, plain):
+        found = next((x for x in limits if x.get("kind") == kind), None)
+        if found:
+            return {"percent": found.get("percent"), "resets_at": epoch(found.get("resets_at"))}
+        found = usage.get(plain)
+        return {"percent": found.get("utilization"), "resets_at": epoch(found.get("resets_at"))} if found else None
+
+    models = []
+    for i, x in enumerate(limits):
+        name = (((x.get("scope") or {}).get("model") or {}).get("display_name"))
+        if x.get("kind") == "weekly_scoped" and name:
+            share = shares.get(i, {})
+            models.append({"model": name, "percent": x.get("percent"), "resets_at": epoch(x.get("resets_at")),
+                           "week_share": share.get("used_percent_of_weekly"),
+                           "week_cap": share.get("allowance_percent_of_weekly")})
+    return {"week": window("weekly_all", "seven_day"), "models": models, "five_hour": window("session", "five_hour")}
+
+
+def fallback():
+    """The newest week file a status line recorded, or None."""
+    weeks = sorted(WEEKS.glob("week-*.json"), key=lambda p: p.stat().st_mtime) if WEEKS.is_dir() else []
+    for path in reversed(weeks):
+        try:
+            w = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        return {"week": {"percent": w.get("seven_day_pct"), "resets_at": w.get("resets_at")}, "models": [],
+                "five_hour": {"percent": w.get("five_hour_pct"), "resets_at": w.get("five_hour_resets_at")},
+                "as_of": epoch((w.get("updated") or "").replace("Z", "+00:00")) or int(path.stat().st_mtime)}
+    return None
+
+
+def resets(ts, now):
+    if not ts:
+        return ""
+    left = ts - now
+    if left <= 0:
+        return ", reset passed"
+    span = f"{max(1, round(left / 60))} min" if left < 3600 else \
+        f"{round(left / 3600)} h" if left < 48 * 3600 else f"{round(left / 86400)} d"
+    return f", resets {time.strftime('%a %H:%M', time.localtime(ts))} (in {span})"
+
+
+def line(f, now):
+    parts = []
+    if f.get("week"):
+        parts.append(f"Week {f['week']['percent']}% used{resets(f['week'].get('resets_at'), now)}")
+    for m in f.get("models") or []:
+        text = f"{m['model']} {m['percent']}% of its bucket"
+        if m.get("week_share") is not None:
+            text += f", {m['week_share']}% of the week"
+            if m.get("week_cap") is not None:
+                text += f" (cap {m['week_cap']}%)"
+        parts.append(text)
+    if f.get("five_hour") and f["five_hour"].get("percent") is not None:
+        parts.append(f"5-hour {f['five_hour']['percent']}%")
+    return " · ".join(parts) or "no usage figures in the answer"
+
+
+def usage():
+    """(fields, source, error): source is live, cache or old; fields None when nothing is known."""
+    now = time.time()
+    try:
+        cached = json.loads(CACHE.read_text())
+        if now - cached["at"] < CACHE_SECONDS:
+            return {**cached["fields"], "as_of": cached["at"]}, "cache", None
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        f = fields(probe())
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError, AttributeError) as e:
+        error = f"timed out after {TIMEOUT} s" if isinstance(e, subprocess.TimeoutExpired) else str(e)
+        return fallback(), "old", error or type(e).__name__
+    try:
+        CACHE.write_text(json.dumps({"at": int(now), "fields": f}))
+    except OSError:
+        pass
+    return {**f, "as_of": int(now)}, "live", None
+
+
+def main(argv):
+    if argv not in ([], ["--json"]):
+        sys.exit(__doc__)
+    f, source, error = usage()
+    if argv:
+        print(json.dumps({"source": source, "error": error, **(f or {})}, indent=2))
+    elif source != "old":
+        print(line(f, time.time()))
+    elif f:
+        stamp = time.strftime("%a %H:%M", time.localtime(f["as_of"]))
+        print(f"usage: the live call failed ({error}); old figures from the status line at {stamp}: "
+              f"{line(f, time.time())}")
+    else:
+        print(f"usage: the live call failed ({error}), and no status line has recorded a week")
+    sys.exit(0 if f else 1)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

@@ -16,6 +16,7 @@ saved prompts and story files. The skills call this with plain arguments; nothin
                                                  `back` lists the sessions waiting on the user
   handoff.py question-gate                       PreToolUse hook on AskUserQuestion: denied while away
   handoff.py context                             UserPromptSubmit and PostToolBatch hook: the context line
+  handoff.py usage [--json]                      the plan's usage left (bin/flowkit-usage)
   handoff.py statusline diff|install <root>      the status line that records context and cost
   handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
   handoff.py refresh <root>                      update an installed status line and tmux kit (SessionStart)
@@ -48,9 +49,11 @@ KIT = {  # the tmux kit: where each file of the plugin is copied, so a tmux.conf
     "tmux/cheatsheet.md": CONFIG / "tmux-cheatsheet.md",
     "bin/flowkit-tmux": HOME / ".local" / "bin" / "flowkit-tmux",
     "bin/flowkit-away": HOME / ".local" / "bin" / "flowkit-away",
+    "bin/flowkit-usage": HOME / ".local" / "bin" / "flowkit-usage",
 }
 KIT_CONF = KIT["tmux/tmux.conf"]
 AWAY_BIN = Path(__file__).resolve().parent.parent / "bin" / "flowkit-away"
+USAGE_BIN = Path(__file__).resolve().parent.parent / "bin" / "flowkit-usage"
 STATS = CLAUDE / "session-stats"
 CTX_STEPS = (40, 50, 60)
 CTX_CLEAR = 35  # a reading this low (a /compact, a fresh start) lets the steps fire again
@@ -215,6 +218,15 @@ def context_hook():
     if line:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit" if prompt else "PostToolBatch", "additionalContext": line}}))
+
+
+def usage(*args):
+    """bin/flowkit-usage, its line going straight to the caller; its exit code, or 1 when it could not run."""
+    try:
+        return subprocess.run([sys.executable, str(USAGE_BIN), *args], timeout=60).returncode
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"flowkit-usage: {e}")
+        return 1
 
 
 def state(data, repo):
@@ -557,6 +569,7 @@ def main(argv):
         AWAY.write_text(time.strftime("%Y-%m-%d %H:%M") + "\n")
         print(f"away: since {AWAY.read_text().strip()} (clears with back or after {AWAY_HOURS} hours)")
         sys.stdout.flush()
+        usage()
         reach("nudge")
     elif cmd == "back" and not args:
         AWAY.unlink(missing_ok=True)
@@ -570,6 +583,8 @@ def main(argv):
             context_hook()
         except Exception:
             pass
+    elif cmd == "usage" and args in ([], ["--json"]):
+        sys.exit(usage(*args))
     elif cmd == "wake" and len(args) == 2:
         try:
             wake(*args, patience=300)
