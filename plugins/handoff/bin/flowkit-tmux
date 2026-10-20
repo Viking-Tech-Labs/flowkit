@@ -3,7 +3,8 @@
 
   flowkit-tmux waiting        status-bar job: marks each Claude pane with its state
                               (@flowkit_state: working, waiting, idle), each tab with how many
-                              of its sessions wait on you (@flowkit_wait), prints the total
+                              of its sessions wait on you (@flowkit_wait), each story and adhoc
+                              tab with its most urgent state (@flowkit_tab), prints the total
   flowkit-tmux list [client]  numbered list of every session, waiting first; a number jumps there
   flowkit-tmux help           the cheat sheet
 
@@ -11,6 +12,7 @@ The kit's conf calls the copy at ~/.local/bin/flowkit-tmux, which the handoff pl
 its own version at every session start. A session is mapped to its pane through its parent
 processes, up to the pane's shell; background sessions have no pane and are listed apart.
 """
+import functools
 import json
 import os
 import re
@@ -24,6 +26,10 @@ os.environ["PATH"] = os.pathsep.join(
 SEP = "\x1f"
 VERSION = re.compile(r"^\d+\.\d+\.\d+$")  # a pane running claude shows its version as the command
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "flowkit"
+CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+URGENCY = ("needs you", "error", "stalled", "running", "watching", "done")  # a tab shows its first
+STALL = 15 * 60
+SESSION_LINE = re.compile(r"^Session: ([0-9a-f-]{36})\b", re.M)  # a recorded close names its session
 
 
 def run(*cmd):
@@ -46,8 +52,9 @@ def agents():
 
 def panes():
     fmt = SEP.join(["#{pane_pid}", "#{pane_id}", "#{session_name}", "#{window_id}", "#{window_index}",
-                    "#{window_name}", "#{pane_index}", "#{pane_current_command}", "#{@flowkit_state}"])
-    return [dict(zip(("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "state"), line.split(SEP)))
+                    "#{window_name}", "#{pane_index}", "#{pane_current_command}", "#{@flowkit_state}",
+                    "#{@flowkit_story}#{@flowkit_adhoc}"])
+    return [dict(zip(("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "state", "story"), line.split(SEP)))
             for line in tmux("list-panes", "-a", "-F", fmt).splitlines() if line]
 
 
@@ -76,6 +83,61 @@ def state(row):
     return {"busy": "working", "waiting": "waiting", "idle": "idle"}.get(row.get("status"), row.get("status") or "")
 
 
+@functools.lru_cache(None)
+def closed(slug):
+    """Session ids with a close recorded in the story's file; the adhoc tab has no story, so all files."""
+    paths = (CLAUDE / "stories").glob("*.md") if slug == "adhoc" else [CLAUDE / "stories" / f"{slug}.md"]
+    ids = set()
+    for path in paths:
+        try:
+            ids.update(SESSION_LINE.findall(path.read_text(errors="replace")))
+        except OSError:
+            pass
+    return ids
+
+
+def live(row):
+    """The session's ~/.claude/sessions/<pid>.json, only if it is still this session's: pids are reused."""
+    try:
+        data = json.loads((CLAUDE / "sessions" / f"{row.get('pid')}.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) and data.get("sessionId") == row.get("sessionId") else {}
+
+
+def untouched(sid, cutoff):
+    """Neither the transcript nor a fork's under <sid>/subagents/ changed after cutoff."""
+    for transcript in (CLAUDE / "projects").glob(f"*/{sid}.jsonl"):
+        forks = transcript.with_suffix("") / "subagents"
+        for path in [transcript, forks, *(forks.glob("*") if forks.is_dir() else [])]:
+            try:
+                if path.stat().st_mtime > cutoff:
+                    return False
+            except OSError:
+                pass
+    return True
+
+
+def tab_state(row, slug):
+    """The pane's word for its tab label, or "" for none."""
+    sid = row.get("sessionId") or ""
+    status = row.get("status")
+    if status == "waiting":
+        return "needs you"
+    if sid and (CLAUDE / "flowkit" / "retry" / f"{sid}.json").exists():
+        return "error"
+    info = live(row) if sid else {}
+    if status == "busy":
+        return "watching" if info.get("status") == "shell" and sid in closed(slug) else "running"
+    if status != "idle" or not sid:
+        return ""
+    if sid in closed(slug):
+        return "done"
+    since = (info.get("statusUpdatedAt") or 0) / 1000
+    cutoff = time.time() - STALL
+    return "stalled" if since and since <= cutoff and untouched(sid, cutoff) else ""
+
+
 def waiting():
     pane_list = panes()
     found = []
@@ -85,23 +147,31 @@ def waiting():
             return  # claude agents failed: leave the marks as they are
         found = placed(rows, pane_list)
     want = {p["id"]: state(r) for p, r in found}
-    count = {}
+    count, tab = {}, {}
     for p, r in found:
         if r.get("status") == "waiting":
             count[p["wid"]] = count.get(p["wid"], 0) + 1
+        word = tab_state(r, p.get("story")) if p.get("story") else ""
+        if word and (p["wid"] not in tab or URGENCY.index(word) < URGENCY.index(tab[p["wid"]])):
+            tab[p["wid"]] = word
     cmds = []
     for p in pane_list:
         if p["id"] in want and want[p["id"]] != p["state"]:
             cmds += [";", "set-option", "-p", "-t", p["id"], "@flowkit_state", want[p["id"]]]
         elif p["id"] not in want and p["state"]:
             cmds += [";", "set-option", "-p", "-u", "-t", p["id"], "@flowkit_state"]
-    for line in tmux("list-windows", "-a", "-F", f"#{{window_id}}{SEP}#{{@flowkit_wait}}").splitlines():
-        wid, _, have = line.partition(SEP)
+    for line in tmux("list-windows", "-a", "-F", SEP.join(["#{window_id}", "#{@flowkit_wait}", "#{@flowkit_tab}"])).splitlines():
+        wid, have, label = (line.split(SEP) + ["", ""])[:3]
         n = count.get(wid, 0)
         if n and have != str(n):
             cmds += [";", "set-option", "-w", "-t", wid, "@flowkit_wait", str(n)]
         elif not n and have:
             cmds += [";", "set-option", "-w", "-u", "-t", wid, "@flowkit_wait"]
+        word = tab.get(wid, "")
+        if word and label != word:
+            cmds += [";", "set-option", "-w", "-t", wid, "@flowkit_tab", word]
+        elif not word and label:
+            cmds += [";", "set-option", "-w", "-u", "-t", wid, "@flowkit_tab"]
     if cmds:
         tmux(*cmds[1:])
     total = sum(count.values())

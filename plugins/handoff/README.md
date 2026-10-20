@@ -74,12 +74,18 @@ they are.
 `flowkit-away`, see "Being away") and adds one line to your tmux.conf: `source-file
 ~/.config/flowkit/tmux.conf`. It keeps tmux's Ctrl-b prefix
 and adds: mouse on, tabs and panes counted from 1, **⚑ n need you** in the status bar with ⚑n on
-each tab that has sessions waiting on you, `prefix a` to list every Claude session and jump to
-one, and `prefix H` for the one-page cheat sheet (`tmux/cheatsheet.md`). The conf calls the
+each tab that has sessions waiting on you, a one-word state after each story or adhoc tab's
+name (`3:my-story · running`), `prefix a` to list every Claude session and jump to one, and `prefix H` for the one-page cheat sheet (`tmux/cheatsheet.md`). The conf calls the
 helper at `~/.local/bin/flowkit-tmux`, a copy kept at the plugin's version by a session-start
 hook, because the plugin's own directory moves with every version; the hook does nothing until
 you install the kit. Put your own changes below the `source-file` line: a setting there wins.
 Sessions started in the background have no pane and are not counted; `prefix a` lists them.
+
+The tab's word is its most urgent session's state, in this order: **needs you** (a question or a
+permission), **error** (the last turn failed on an API error), **stalled** (idle 15 minutes or
+more, transcript and forks untouched, no close recorded), **running**, **watching** (closed, but a
+watch or background task still runs), **done** (closed and idle). A close counts once the story
+file has its `Session:` line. Your own windows, without a story or adhoc mark, get no word.
 
 ## Being away
 
