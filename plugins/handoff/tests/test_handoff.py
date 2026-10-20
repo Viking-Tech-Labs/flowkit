@@ -4,6 +4,7 @@ else it was called with, and a stub `tmux` that serves a pane list, so nothing r
 session or the user's files."""
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -224,6 +225,177 @@ class Handoff(unittest.TestCase):
         self.assertIsNone(self.context(50, "hi", requests=29))
         self.assertIsNotNone(self.context(50, "hi", name="story-coordinator"))
         self.assertIsNone(self.context("missing", "hi", sid="nostats"))
+
+    SID = "5e55f00d-0000-0000-0000-000000000000"
+
+    def retry_setup(self, autoretry="on", away=True, status="idle", story="", screen="│ > \n", in_mode="0"):
+        """A live fake session (a sleep) in pane %7 with its sessions file and transcript; the tmux stub
+        answers show-options with the story, capture-pane with the screen, and records the rest."""
+        if getattr(self, "proc", None):  # the previous case's session ends, and its waiter with it
+            self.proc.kill()
+            self.proc.wait()
+        self.proc = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(lambda: (self.proc.kill(), self.proc.wait()))
+        self.pid = self.proc.pid
+        self.calls.unlink(missing_ok=True)
+        (self.tmp / "claude" / "sessions").mkdir(exist_ok=True)
+        (self.tmp / "claude" / "sessions" / f"{self.pid}.json").write_text(json.dumps(
+            {"sessionId": self.SID, "name": "s4", "kind": "interactive", "status": status}))
+        self.transcript = self.tmp / "t.jsonl"
+        self.transcript.write_text("{}\n")
+        (self.tmp / "flowkit").mkdir(exist_ok=True)
+        (self.tmp / "flowkit" / "handoff.conf").write_text(f"autoretry={autoretry}\n")
+        if away:
+            self.flag.write_text("2026-10-20 01:00\n")
+        (self.tmp / "story").write_text(story)
+        (self.tmp / "screen").write_text(screen)
+        stub = self.tmp / "bin" / "tmux"
+        stub.write_text(f"#!/bin/sh\ncase \"$1\" in list-panes) echo '{self.pid} %7 {in_mode}';;\n"
+                        f"show-options) cat {self.tmp / 'story'};; capture-pane) cat {self.tmp / 'screen'};;\n"
+                        f"*) echo tmux \"$@\" >> {self.calls};; esac\n")
+        stub.chmod(0o755)
+        self.env.update(CLAUDE_PID=str(self.pid), TMUX_PANE="%7", XDG_CONFIG_HOME=str(self.tmp),
+                        FLOWKIT_RETRY_MINUTE="0.05")
+
+    def api_error(self, error, details=""):
+        return self.handoff("api-error", stdin=json.dumps({
+            "session_id": self.SID, "hook_event_name": "StopFailure", "error": error, "error_details": details,
+            "transcript_path": str(self.transcript)}))
+
+    def record(self):
+        path = self.tmp / "claude" / "flowkit" / "retry" / f"{self.SID}.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def typed(self, wait=3.0):
+        """What the waiter typed into %7 within `wait` seconds, once its lock is gone."""
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            text = self.calls.read_text() if self.calls.exists() else ""
+            if "send-keys" in text and not list((self.tmp / "claude" / "flowkit" / "retry").glob("*.lock")):
+                return text
+            time.sleep(0.05)
+        return self.calls.read_text() if self.calls.exists() else ""
+
+    def test_retry_record_lifecycle_and_log(self):
+        self.retry_setup(autoretry="off")
+        self.api_error("server_error", "500  Internal\nerror")
+        rec = self.record()
+        self.assertEqual((rec["kind"], rec["attempts"], rec["name"], rec["pid"]), ("server_error", 0, "s4", self.pid))
+        first = rec["first"]
+        self.api_error("overloaded")
+        rec = self.record()
+        self.assertEqual((rec["kind"], rec["first"]), ("overloaded", first), "a repeat error keeps the first time")
+        log = (self.tmp / "claude" / "flowkit" / "retries.log").read_text().splitlines()
+        self.assertRegex(log[0], r"^> retry s4 · \d{4}-\d\d-\d\d \d\d:\d\d · server_error · 500 Internal error$")
+        self.assertTrue(log[1].endswith("· overloaded"))
+        self.handoff("api-ok", stdin=json.dumps({"session_id": self.SID, "hook_event_name": "Stop"}))
+        self.assertIsNone(self.record())
+        self.assertFalse(self.calls.exists(), "autoretry=off types nothing")
+
+    def test_retry_line_goes_to_the_story_file(self):
+        self.retry_setup(autoretry="off", story="my-story\n")
+        story = self.tmp / "claude" / "stories" / "my-story.md"
+        story.parent.mkdir()
+        story.write_text("# my-story\n")
+        self.api_error("authentication_failed", "invalid x-api-key")
+        self.assertIn("· authentication_failed · invalid x-api-key", story.read_text().splitlines()[-1])
+        self.assertFalse((self.tmp / "claude" / "flowkit" / "retries.log").exists())
+
+    def test_retry_continues_server_errors_while_away(self):
+        for error in ("server_error", "overloaded"):
+            self.retry_setup()
+            self.api_error(error)
+            self.assertIn(f"tmux send-keys -t %7 -l Your last turn ended on an API error ({error}) at ", self.typed())
+            self.assertIn("Carry on from where you were. ; run-shell sleep 0.5 ; send-keys -t %7 Enter", self.typed())
+            self.assertEqual(self.record()["attempts"], 1)
+            self.handoff("api-ok", stdin=json.dumps({"session_id": self.SID}))
+
+    def test_retry_max_output_tokens_once_in_smaller_pieces(self):
+        self.retry_setup()
+        self.api_error("max_output_tokens")
+        self.assertIn("in smaller pieces", self.typed())
+        self.calls.unlink()
+        self.api_error("max_output_tokens")
+        self.assertEqual(self.typed(0.5), "", "one continue per record")
+
+    def test_retry_leaves_the_rest_alone(self):
+        for kw, error in ((dict(), "rate_limit"), (dict(), "authentication_failed"), (dict(), "invalid_request"),
+                          (dict(), "unknown"), (dict(away=False), "server_error"),
+                          (dict(autoretry="off"), "server_error")):
+            self.retry_setup(**kw)
+            self.api_error(error)
+            self.assertEqual(self.typed(0.5), "", f"{kw} {error}")
+            self.assertIsNotNone(self.record())
+            self.flag.unlink(missing_ok=True)
+
+    def test_retry_awake_counts_like_away(self):
+        self.retry_setup(away=False)
+        (self.tmp / "claude" / "awake").write_text("2026-10-20 01:00\n")
+        self.api_error("server_error")
+        self.assertIn("send-keys", self.typed())
+
+    def test_retry_types_nothing_unless_safe(self):
+        for kw in (dict(status="busy"), dict(screen="│ > half a thought\n"), dict(in_mode="1")):
+            self.retry_setup(**kw)
+            self.api_error("server_error")
+            self.assertEqual(self.typed(0.6), "", kw)
+        self.retry_setup()
+        self.env["FLOWKIT_RETRY_MINUTE"] = "0.5"  # the first continue is due after 1 s
+        self.api_error("server_error")
+        time.sleep(0.4)
+        with self.transcript.open("a") as f:
+            f.write("{}\n")
+        self.assertEqual(self.typed(1.5), "", "the transcript moved")
+
+    def test_retry_one_waiter_per_session_and_pid(self):
+        self.retry_setup()
+        lock = self.tmp / "claude" / "flowkit" / "retry" / f"{self.SID}-{self.pid}.lock"
+        lock.parent.mkdir(parents=True)
+        lock.write_text(str(self.pid))  # held by a live process
+        self.api_error("server_error")
+        self.assertEqual(self.typed(0.6), "")
+        lock.write_text("999999")  # a dead waiter's lock is taken over
+        self.api_error("server_error")
+        self.assertIn("send-keys", self.typed())
+
+    @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+    def test_retry_types_into_a_real_pane_but_not_in_copy_mode(self):
+        """A throwaway tmux server whose pane runs `cat`, standing in for the session's process."""
+        sock = f"flowkit-retry-{os.getpid()}"
+        real = lambda *a: subprocess.run(["tmux", "-L", sock, *a], capture_output=True, text=True)
+        self.addCleanup(real, "kill-server")
+        real("-f", "/dev/null", "new-session", "-d", "-x", "200", "-y", "20", "cat")
+        cat = int(real("list-panes", "-F", "#{pane_pid}").stdout.split()[0])
+        for copy_mode in (True, False):
+            self.retry_setup()
+            (self.tmp / "bin" / "tmux").unlink()
+            (self.tmp / "claude" / "sessions" / f"{cat}.json").write_text(json.dumps(
+                {"sessionId": self.SID, "name": "s4", "kind": "interactive", "status": "idle"}))
+            self.env.update(CLAUDE_PID=str(cat), FLOWKIT_TMUX_SOCKET=sock, TMUX_PANE="")
+            if copy_mode:
+                real("copy-mode")
+            self.api_error("server_error")
+            time.sleep(1.0)
+            screen = real("capture-pane", "-p").stdout
+            if copy_mode:
+                self.assertNotIn("API error", screen)
+                real("send-keys", "-X", "cancel")
+                self.handoff("api-ok", stdin=json.dumps({"session_id": self.SID}))
+            else:
+                self.assertIn("Your last turn ended on an API error (server_error)", screen)
+
+    def test_retry_background_session_is_resumed(self):
+        self.retry_setup()
+        (self.tmp / "claude" / "sessions" / f"{self.pid}.json").write_text(json.dumps(
+            {"sessionId": self.SID, "name": "bg", "kind": "background", "status": "idle"}))
+        self.agents([{"name": "bg", "kind": "background", "id": "b1", "sessionId": self.SID, "status": "idle"}])
+        self.api_error("overloaded")
+        deadline = time.time() + 3
+        while time.time() < deadline and not self.calls.exists():
+            time.sleep(0.05)
+        time.sleep(0.2)
+        self.assertIn(f"--bg --resume {self.SID} Your last turn ended on an API error (overloaded)",
+                      self.calls.read_text())
 
 
 if __name__ == "__main__":

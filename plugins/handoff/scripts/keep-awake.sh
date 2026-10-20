@@ -9,7 +9,7 @@
 #
 # Wired in hooks/hooks.json:
 #   UserPromptSubmit, PreToolUse -> keep-awake.sh hold
-#   Stop                         -> keep-awake.sh idle-hold
+#   Stop, StopFailure            -> keep-awake.sh idle-hold
 #   SessionEnd                   -> keep-awake.sh release
 #
 # hold:      if this session has no turn hold younger than RENEW_MIN, start one (capped at

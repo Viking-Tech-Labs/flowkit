@@ -9,6 +9,7 @@ saved prompts and story files. The skills call this with plain arguments; nothin
                                                  story slugified as flowkit-spawn does), then the
                                                  story's reporter is told `closed <name>`
   handoff.py wake <slug> <name>                  ring a busy background reporter once it is idle (5 min)
+  handoff.py wake --id <session id> <text>       resume a background session with <text> once it is idle
   handoff.py conf <key> <value>                  set a key of ~/.config/flowkit/handoff.conf
   handoff.py settings diff|install <key=json>…   values for the user's settings.json (a.b nests)
   handoff.py away | back | away-status           the ~/.claude/away flag (12 hours); `away` then nudges
@@ -16,6 +17,8 @@ saved prompts and story files. The skills call this with plain arguments; nothin
                                                  `back` lists the sessions waiting on the user
   handoff.py question-gate                       PreToolUse hook on AskUserQuestion: denied while away
   handoff.py context                             UserPromptSubmit and PostToolBatch hook: the context line
+  handoff.py api-error | api-ok                  StopFailure and Stop hooks: the retry record and line, and
+                                                 with autoretry=on the waiter (retry-wait <session id>)
   handoff.py usage [--json]                      the plan's usage left (bin/flowkit-usage)
   handoff.py statusline diff|install <root>      the status line that records context and cost
   handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
@@ -58,6 +61,14 @@ STATS = CLAUDE / "session-stats"
 CTX_STEPS = (40, 50, 60)
 CTX_CLEAR = 35  # a reading this low (a /compact, a fresh start) lets the steps fire again
 CTX_WARM = 30  # requests before a session hears anything: a successor that starts high must not loop
+AWAKE = CLAUDE / "awake"  # out but reachable: written by the user's own setup, read like the away flag
+RETRY = CLAUDE / "flowkit" / "retry"  # <session id>.json while a session sits on an API error
+RETRIES_LOG = CLAUDE / "flowkit" / "retries.log"  # retry lines of sessions outside a story
+RETRY_KINDS = ("server_error", "overloaded")  # what the waiter continues; rate_limit is Claude Code's own
+RETRY_STEPS = (2, 5, 10, 20, 30)  # minutes the waiter waits before each continue, then every 30
+RETRY_HOURS = 12
+SETTLE = 10  # seconds after the error before the transcript is read as the session's resting state
+PROMPT_LINE = re.compile(r"^[│|\s]*[>❯]\s?(.*?)[\s│|]*$")
 HEADING = "WHERE TO PICK UP"
 NAMES = ("PLAN.md", "BUILD-PLAN.md", "HANDOFF.md", "ROADMAP.md", "docs/PLAN.md", "docs/plan.md", "docs/HANDOFF.md")
 SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -268,6 +279,208 @@ def save_prompt(name):
     print(path)
 
 
+def reachable():
+    """Away, or the awake flag (out but reachable from a phone) younger than AWAY_HOURS."""
+    try:
+        awake = time.time() - AWAKE.stat().st_mtime <= AWAY_HOURS * 3600
+    except OSError:
+        awake = False
+    return bool(away_since()) or awake
+
+
+def session_file(pid, sid):
+    """~/.claude/sessions/<pid>.json, only while it is still this session's: pids are reused."""
+    try:
+        data = json.loads((CLAUDE / "sessions" / f"{pid}.json").read_text())
+    except (OSError, ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) and data.get("sessionId") == sid else {}
+
+
+def retry_record(sid):
+    try:
+        return json.loads((RETRY / f"{sid}.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def api_error_hook():
+    """StopFailure: an API error ended the turn, so Stop (and its idle hold) did not fire. Writes
+    the retry record that labels the tab `error`, logs one line, and, with autoretry=on while the
+    user is away or awake, starts the waiter that continues the session."""
+    data = json.load(sys.stdin)
+    sid = str(data.get("session_id") or "")
+    if data.get("agent_id") or not SAFE.match(sid):
+        return
+    kind = str(data.get("error") or "unknown")
+    pid = os.environ.get("CLAUDE_PID", "")
+    now = time.time()
+    rec = retry_record(sid) or {"first": now, "attempts": 0}
+    info = session_file(pid, sid)
+    rec.update(session=sid, kind=kind, at=now, pid=int(pid) if pid.isdigit() else None,
+               name=info.get("name") or sid[:8], background=info.get("kind") == "background",
+               transcript=str(data.get("transcript_path") or ""))
+    RETRY.mkdir(parents=True, exist_ok=True)
+    (RETRY / f"{sid}.json").write_text(json.dumps(rec))
+    details = " ".join(str(data.get("error_details") or "").split())[:160]
+    entry = f"> retry {rec['name']} · {time.strftime('%Y-%m-%d %H:%M')} · {kind}{' · ' + details if details else ''}\n"
+    story = ""
+    try:
+        if os.environ.get("TMUX_PANE"):
+            story = tmux("show-options", "-wqv", "-t", os.environ["TMUX_PANE"], "@flowkit_story").stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    path = STORIES / f"{story}.md" if SAFE.match(story) else None
+    with (path if path and path.is_file() else RETRIES_LOG).open("a") as f:
+        f.write(entry)
+    if setting("autoretry", "off") != "on" or not reachable() or not rec["pid"]:
+        return
+    if kind in RETRY_KINDS or (kind == "max_output_tokens" and rec["attempts"] == 0):
+        subprocess.Popen([sys.executable, __file__, "retry-wait", sid], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+
+
+def snapshot(path):
+    try:
+        st = Path(path).stat()
+        return [st.st_size, st.st_mtime]
+    except (OSError, TypeError):
+        return None
+
+
+def session_pane(pid):
+    """The tmux pane the live process `pid` runs in, if it is not in copy mode."""
+    panes = {}
+    for line in tmux("list-panes", "-a", "-F", "#{pane_pid} #{pane_id} #{pane_in_mode}").stdout.splitlines():
+        p, pane, in_mode = (line.split() + ["", "", ""])[:3]
+        if p.isdigit():
+            panes[int(p)] = (pane, in_mode)
+    ps = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+    parents = {int(a): int(b) for a, b in (row.split() for row in ps.splitlines() if len(row.split()) == 2)}
+    for _ in range(4):
+        if pid in panes:
+            pane, in_mode = panes[pid]
+            return pane if in_mode == "0" else None
+        pid = parents.get(pid)
+        if pid is None:
+            return None
+    return None
+
+
+def draft(pane):
+    """Text sitting in the pane's prompt box (the last line that starts with the prompt mark)."""
+    lines = [l for l in tmux("capture-pane", "-p", "-t", pane).stdout.splitlines() if PROMPT_LINE.match(l)]
+    return bool(lines) and bool(PROMPT_LINE.match(lines[-1]).group(1))
+
+
+def continue_session(rec, text):
+    """Type `text` as the session's next prompt, or resume a background one with it, once every
+    check passes: still idle, the pane is the live process's, not in copy mode, no draft."""
+    if not session_file(rec["pid"], rec["session"]):
+        return False
+    if rec.get("background"):
+        row = next((a for a in agents_json() if isinstance(a, dict) and a.get("sessionId") == rec["session"]), None)
+        if row is None or mode(row) != "idle":
+            return False
+        wake("", text, sid=rec["session"])
+        return True
+    if session_file(rec["pid"], rec["session"]).get("status") != "idle":
+        return False
+    pane = session_pane(rec["pid"])
+    if pane is None or draft(pane):
+        return False
+    # one tmux call, so nothing else typing into panes lands in between; the pause lets the TUI take
+    # the text as typed before Enter, which it would otherwise read as part of a paste
+    return tmux("send-keys", "-t", pane, "-l", text, ";", "run-shell", "sleep 0.5",
+                ";", "send-keys", "-t", pane, "Enter").returncode == 0
+
+
+def retry_wait(sid):
+    """The waiter one StopFailure starts: locked on session id plus pid, the computer kept awake
+    while it waits. It waits the next step of RETRY_STEPS (minutes, then every 30) and types one
+    continue, which is its own probe: the next error starts a waiter that keeps the count, and the
+    next Stop deletes the record. Gives up 12 hours after the first error."""
+    rec = retry_record(sid)
+    if not rec or not rec.get("pid"):
+        return
+    pid = rec["pid"]
+    lock = RETRY / f"{sid}-{pid}.lock"
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            if alive(int(lock.read_text())):
+                return
+        except (OSError, ValueError):
+            pass
+        lock.unlink(missing_ok=True)
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return
+    os.write(fd, str(os.getpid()).encode())
+    os.close(fd)
+    awake = None
+    if shutil.which("caffeinate"):
+        awake = subprocess.Popen(["caffeinate", "-i", "-w", str(pid)],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    unit = float(os.environ.get("FLOWKIT_RETRY_MINUTE") or 60)
+    try:
+        at, seen = None, None
+        while True:
+            rec = retry_record(sid)
+            if not rec or rec["pid"] != pid or not alive(pid) or time.time() > rec["first"] + RETRY_HOURS * 3600:
+                return
+            if rec["at"] != at:  # a new error: wait the next step from it, the count kept
+                at = rec["at"]
+                step = 0 if rec["kind"] == "max_output_tokens" else \
+                    RETRY_STEPS[min(rec["attempts"], len(RETRY_STEPS) - 1)]
+                settle = SETTLE * unit / 60
+                due = at + max(step * unit, settle)
+                time.sleep(max(at + settle - time.time(), 0))
+                seen = snapshot(rec["transcript"])
+            if time.time() < due:
+                time.sleep(min(5, due - time.time()))
+                continue
+            if setting("autoretry", "off") != "on" or not reachable():
+                return
+            when = time.strftime("%H:%M", time.localtime(rec["at"]))
+            if rec["kind"] == "max_output_tokens":
+                text = (f"Your last turn hit the output token limit at {when}. Carry on from where you were, "
+                        "in smaller pieces: shorter replies, smaller edits, one file at a time.")
+            else:
+                text = f"Your last turn ended on an API error ({rec['kind']}) at {when}. Carry on from where you were."
+            now_seen = snapshot(rec["transcript"])
+            if now_seen == seen and continue_session(rec, text):
+                rec["attempts"] += 1
+                (RETRY / f"{sid}.json").write_text(json.dumps(rec))
+                return
+            if rec["kind"] == "max_output_tokens":
+                return
+            seen, due = now_seen, time.time() + RETRY_STEPS[-1] * unit  # not idle or not safe: the next slot
+    finally:
+        if awake:
+            awake.terminate()
+        lock.unlink(missing_ok=True)
+
+
+def api_ok_hook():
+    """Stop: the turn ended cleanly, so the session's retry record goes."""
+    sid = str(json.load(sys.stdin).get("session_id") or "")
+    if SAFE.match(sid):
+        (RETRY / f"{sid}.json").unlink(missing_ok=True)
+
+
 def tmux(*args):
     sock = os.environ.get("FLOWKIT_TMUX_SOCKET")
     return subprocess.run(
@@ -296,9 +509,10 @@ def agents_json(*args):
     )
 
 
-def bg_reporter(slug):
-    rows = [a for a in agents_json("--all") if isinstance(a, dict)
-            and a.get("kind") == "background" and a.get("name") == f"{slug}-report"]
+def bg_reporter(slug, sid=None):
+    """The story's background reporter, or with sid the background session with that id."""
+    rows = [a for a in agents_json("--all") if isinstance(a, dict) and a.get("kind") == "background"
+            and (a.get("sessionId") == sid if sid else a.get("name") == f"{slug}-report")]
     return max(rows, key=lambda a: a.get("startedAt") or 0) if rows else None
 
 
@@ -311,33 +525,34 @@ def mode(agent):
     return status
 
 
-def wake(slug, name, patience=0):
-    """Ring a background reporter. `claude --bg --resume` hands a stopped session the prompt under
+def wake(slug, name, patience=0, sid=None):
+    """Ring a background reporter (with sid: resume that background session with `name` as the prompt). `claude --bg --resume` hands a stopped session the prompt under
     its own id; a live one would get a copy instead, so a live one is stopped first. Never while it
     waits on a prompt; while it is mid-turn, a process of its own waits up to five minutes, so the
     close does not."""
-    reporter = bg_reporter(slug)
+    reporter = bg_reporter(slug, sid)
     deadline = time.time() + patience
     while reporter is not None and mode(reporter) == "busy":
         if time.time() >= deadline:
             if patience == 0:
-                subprocess.Popen([sys.executable, __file__, "wake", slug, name], start_new_session=True,
+                again = ["--id", sid, name] if sid else [slug, name]
+                subprocess.Popen([sys.executable, __file__, "wake", *again], start_new_session=True,
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
         time.sleep(10)
-        reporter = bg_reporter(slug)
+        reporter = bg_reporter(slug, sid)
     if reporter is None or mode(reporter) == "waiting":
         return
     if reporter.get("pid"):
         subprocess.run(["claude", "stop", reporter["id"]], capture_output=True, text=True, timeout=30)
         for _ in range(20):  # `stop` returns before the process is gone
             time.sleep(0.5)
-            if not (bg_reporter(slug) or {}).get("pid"):
+            if not (bg_reporter(slug, sid) or {}).get("pid"):
                 break
         else:
             return
     subprocess.run(
-        ["claude", "--bg", "--resume", reporter["sessionId"], f"closed {name}"],
+        ["claude", "--bg", "--resume", reporter["sessionId"], name if sid else f"closed {name}"],
         cwd=reporter.get("cwd") or None, capture_output=True, text=True, timeout=60,
     )
 
@@ -588,6 +803,16 @@ def main(argv):
     elif cmd == "wake" and len(args) == 2:
         try:
             wake(*args, patience=300)
+        except Exception:
+            pass
+    elif cmd == "wake" and len(args) == 3 and args[0] == "--id":
+        try:
+            wake("", args[2], patience=300, sid=args[1])
+        except Exception:
+            pass
+    elif cmd in ("api-error", "api-ok", "retry-wait") and len(args) == (cmd == "retry-wait"):
+        try:
+            {"api-error": api_error_hook, "api-ok": api_ok_hook, "retry-wait": retry_wait}[cmd](*args)
         except Exception:
             pass
     elif cmd == "conf" and len(args) == 2:
