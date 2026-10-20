@@ -1,6 +1,7 @@
 """Run with `python3 -m unittest discover plugins/handoff/tests`. Each test gets its own config
-dir and a stub `claude` that serves a session list and records what it was called with, and a
-stub `tmux` that serves a pane list, so nothing reaches a real session or the user's files."""
+dir and temp dir, a stub `claude` that serves a session list and records what it was
+called with, and a stub `tmux` that serves a pane list, so nothing reaches a real
+session or the user's files."""
 import json
 import os
 import subprocess
@@ -21,7 +22,7 @@ class Handoff(unittest.TestCase):
         (self.tmp / "claude").mkdir()
         self.calls = self.tmp / "calls"
         self.flag = self.tmp / "claude" / "away"
-        self.env = {**os.environ, "CLAUDE_CONFIG_DIR": str(self.tmp / "claude"),
+        self.env = {**os.environ, "CLAUDE_CONFIG_DIR": str(self.tmp / "claude"), "TMPDIR": str(self.tmp),
                     "PATH": f"{self.tmp / 'bin'}:{os.environ['PATH']}"}
         self.agents([])
         self.panes("")
@@ -107,6 +108,67 @@ class Handoff(unittest.TestCase):
         self.assertFalse(self.flag.exists())
         self.assertEqual(out, ["away: off", "s3: waits on permission prompt"])
         self.assertFalse(self.calls.exists())
+
+    def context(self, pct, prompt=None, calls=(), sid="s1", name="story-s3", requests=30, **extra):
+        stats = self.tmp / "claude" / "session-stats"
+        stats.mkdir(parents=True, exist_ok=True)
+        if pct != "missing":
+            (stats / f"{sid}.json").write_text(json.dumps({"session_id": sid, "session_name": name, "ctx_pct": pct}))
+        transcript = self.tmp / f"{sid}.jsonl"
+        transcript.write_text("".join(f'{{"requestId":"req_{i}"}}\n' for i in range(requests)))
+        data = {"session_id": sid, "transcript_path": str(transcript), **extra}
+        if prompt is not None:
+            data.update(hook_event_name="UserPromptSubmit", prompt=prompt)
+        else:
+            data.update(hook_event_name="PostToolBatch", tool_calls=list(calls))
+        out = self.handoff("context", stdin=json.dumps(data)).stdout
+        if not out:
+            return None
+        hook = json.loads(out)["hookSpecificOutput"]
+        self.assertEqual(hook["hookEventName"], "UserPromptSubmit" if prompt is not None else "PostToolBatch")
+        return hook["additionalContext"]
+
+    def test_context_every_prompt_at_40(self):
+        self.assertIsNone(self.context(39, "hi"))
+        self.assertTrue(self.context(45, "hi").startswith("Context ~45%. Repo work: /handoff:close"))
+        self.assertIn("/compact Keep:", self.context(45, "again"))
+        self.assertIsNone(self.context(45), "the prompt told step 40")
+        self.assertIn("~45%", self.context(45, "/handoff:away"), "away does not latch")
+
+    def test_context_mid_run_steps(self):
+        self.assertIsNotNone(self.context(41))
+        self.assertIsNone(self.context(48))
+        self.assertIn("~50%", self.context(50))
+        self.assertIsNone(self.context(55))
+        self.assertIn("~63%", self.context(63))
+        self.assertIsNone(self.context(70))
+
+    def test_context_quiet_from_a_close_until_the_next_prompt(self):
+        self.assertIsNotNone(self.context(41))
+        skill = {"tool_name": "Skill", "tool_input": {"skill": "handoff:close", "args": "spawn"}}
+        self.assertIsNone(self.context(52, calls=[skill]))
+        self.assertIsNone(self.context(61))
+        self.assertIsNotNone(self.context(61, "next request"), "a close does not silence the prompt line")
+        self.assertIsNone(self.context(62), "resumes at the step reached")
+        self.assertIsNone(self.context(62, "/handoff:close spawn"))
+        self.assertIsNone(self.context(65))
+
+    def test_context_low_reading_clears_missing_does_not(self):
+        self.assertIsNotNone(self.context(41))
+        self.assertIsNone(self.context("missing"))
+        self.assertIsNone(self.context(None))
+        self.assertIsNone(self.context(42))
+        self.assertIsNone(self.context(36))
+        self.assertIsNone(self.context(42))
+        self.assertIsNone(self.context(35))
+        self.assertIsNotNone(self.context(42), "a reading of 35% or less clears the steps")
+
+    def test_context_silent_for_subagents_reporters_and_cold_sessions(self):
+        self.assertIsNone(self.context(50, "hi", agent_id="a1"))
+        self.assertIsNone(self.context(50, "hi", name="story-report"))
+        self.assertIsNone(self.context(50, "hi", requests=29))
+        self.assertIsNotNone(self.context(50, "hi", name="story-coordinator"))
+        self.assertIsNone(self.context("missing", "hi", sid="nostats"))
 
 
 if __name__ == "__main__":

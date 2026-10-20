@@ -15,6 +15,7 @@ saved prompts and story files. The skills call this with plain arguments; nothin
                                                  the sessions parked on a question (bin/flowkit-away),
                                                  `back` lists the sessions waiting on the user
   handoff.py question-gate                       PreToolUse hook on AskUserQuestion: denied while away
+  handoff.py context                             UserPromptSubmit and PostToolBatch hook: the context line
   handoff.py statusline diff|install <root>      the status line that records context and cost
   handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
   handoff.py refresh <root>                      update an installed status line and tmux kit (SessionStart)
@@ -27,6 +28,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -49,6 +51,10 @@ KIT = {  # the tmux kit: where each file of the plugin is copied, so a tmux.conf
 }
 KIT_CONF = KIT["tmux/tmux.conf"]
 AWAY_BIN = Path(__file__).resolve().parent.parent / "bin" / "flowkit-away"
+STATS = CLAUDE / "session-stats"
+CTX_STEPS = (40, 50, 60)
+CTX_CLEAR = 35  # a reading this low (a /compact, a fresh start) lets the steps fire again
+CTX_WARM = 30  # requests before a session hears anything: a successor that starts high must not loop
 HEADING = "WHERE TO PICK UP"
 NAMES = ("PLAN.md", "BUILD-PLAN.md", "HANDOFF.md", "ROADMAP.md", "docs/PLAN.md", "docs/plan.md", "docs/HANDOFF.md")
 SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -149,6 +155,66 @@ def question_gate():
               'on a question. A brief that forbids "(auto)" decisions stops here and lists its questions instead.')
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
+
+
+def closing(data):
+    """A /handoff:close typed as the prompt, or run as a skill in this batch of tool calls."""
+    prompt = str(data.get("prompt") or "").strip()
+    if prompt == "/handoff:close" or prompt.startswith("/handoff:close "):
+        return True
+    return any(c.get("tool_name") == "Skill" and (c.get("tool_input") or {}).get("skill") == "handoff:close"
+               for c in data.get("tool_calls") or [] if isinstance(c, dict))
+
+
+def warm(transcript):
+    try:
+        text = Path(transcript).read_text(errors="replace")
+    except (OSError, TypeError):
+        return False
+    return len(set(re.findall(r'"requestId":"(req_[^"]*)"', text))) >= CTX_WARM
+
+
+def context_hook():
+    """UserPromptSubmit and PostToolBatch. A session cannot see its own context use; the status
+    line writes it to session-stats/<id>.json, one message behind. Every prompt at 40% or more gets
+    one line; mid-run, each of 40, 50 and 60% is told once, and nothing from a /handoff:close until
+    the next prompt. Silent for subagents, reporters (*-report), a session's first CTX_WARM requests,
+    and without a reading."""
+    data = json.load(sys.stdin)
+    sid = str(data.get("session_id") or "")
+    if data.get("agent_id") or not SAFE.match(sid):
+        return
+    prompt = data.get("hook_event_name") == "UserPromptSubmit"
+    mark = Path(tempfile.gettempdir()) / f"flowkit-context-{sid}.json"
+    try:
+        seen = json.loads(mark.read_text())
+    except (OSError, ValueError):
+        seen = {}
+    told = dict(seen)
+    if prompt:
+        seen.pop("quiet", None)
+    if closing(data):
+        seen["quiet"] = True
+    try:
+        stats = json.loads((STATS / f"{sid}.json").read_text())
+    except (OSError, ValueError):
+        stats = {}
+    pct, line = stats.get("ctx_pct"), None
+    if isinstance(pct, (int, float)) and not str(stats.get("session_name") or "").endswith("-report"):
+        pct = int(pct)
+        if 0 <= pct <= CTX_CLEAR:
+            seen.pop("step", None)
+        step = max((s for s in CTX_STEPS if pct >= s), default=0)
+        if step and not seen.get("quiet") and (prompt or step > seen.get("step", 0)) and \
+                (seen.get("warm") or warm(data.get("transcript_path"))):
+            seen.update(warm=True, step=max(step, seen.get("step", 0)))
+            line = (f"Context ~{pct}%. Repo work: /handoff:close at a stopping point. A hub or coordinator: "
+                    "a paste-ready `/compact Keep: …` line under FOR ME.")
+    if seen != told:
+        mark.write_text(json.dumps(seen))
+    if line:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit" if prompt else "PostToolBatch", "additionalContext": line}}))
 
 
 def state(data, repo):
@@ -499,6 +565,11 @@ def main(argv):
         reach("waiting")
     elif cmd == "question-gate" and not args:
         question_gate()
+    elif cmd == "context" and not args:
+        try:
+            context_hook()
+        except Exception:
+            pass
     elif cmd == "wake" and len(args) == 2:
         try:
             wake(*args, patience=300)
