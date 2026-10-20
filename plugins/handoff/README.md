@@ -65,6 +65,7 @@ so an update or an uninstall keeps them, and readable by the scripts that run ou
 | `reporter` | `off` | `on` starts a `<story>-report` session in slot 1 of each new story tab (in the background with that driver): it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done. Each close rings it: `handoff.py record` types `closed <session>` into its pane, or wakes the background one with it. |
 | `permission_mode` | empty | The `--permission-mode` of spawned sessions; empty keeps your default. A chain that runs while you are away needs a mode that does not stop to ask. |
 | `autoclose` | `off` | `on` lets the tmux kit's status-bar tick close a finished story's tab on its own (see "The tmux kit"). `/handoff:setup` offers it. |
+| `autoretry` | `off` | `on` lets a session an API error stopped carry on by itself while you are away (see "API errors"). `/handoff:setup` offers it. |
 
 The model and effort of the next session come from its prompt (see "Your own ladder"), passed as
 they are.
@@ -140,6 +141,30 @@ which `/handoff:setup-tmux` copies to `~/.local/bin`. Claude Code answers it its
 request through `claude -p`, no model call, no transcript, about 5 s), kept 10 minutes per config
 folder. A failed call says so and falls back to the newest `~/.claude/usage-stats/week-*.json` a
 status line of yours may record, marked old.
+
+## API errors
+
+New in 0.7.0. When an API error ends a turn, Claude Code fires `StopFailure` instead of `Stop`, and
+the session sits there until something prompts it. A hook on it (`handoff.py api-error`) always:
+
+- keeps the computer awake between turns, as `Stop` would have (see "Keeping the computer awake")
+- writes `~/.claude/flowkit/retry/<session id>.json`, which labels the tab `error` until the
+  session's next clean turn end deletes it
+- logs `> retry <session> · <time> · <error> · <details>` in the story file, or in
+  `~/.claude/flowkit/retries.log` outside a story
+
+Off until you turn it on (`autoretry=on`, which `/handoff:setup` offers), and only while you are
+away (or `~/.claude/awake` is younger than 12 hours, for a setup of your own that marks you out but
+reachable): a `server_error` or `overloaded` stop gets one detached waiter per session, which keeps
+the computer awake while it waits 2, 5, 10, 20 and 30 minutes, then every 30, for up to 12 hours
+from the first error. Then it types `Your last turn ended on an API error (<error>) at <time>. Carry
+on from where you were.` into the session's pane, in one tmux call, but only when the session is
+idle, its transcript has not moved, the pane is the one its live process runs in, and the pane is
+neither in copy mode nor holding a draft. The continue is its own probe: another error starts the
+next wait, the count kept. A background session is resumed with the line (`handoff.py wake --id`).
+A stop on the output-token limit gets one continue asking for smaller pieces. `rate_limit` is left
+to Claude Code's own `autoContinueAtUsageLimit`; anything else (an authentication failure, an
+invalid request) is only recorded.
 
 ## Keeping the computer awake
 

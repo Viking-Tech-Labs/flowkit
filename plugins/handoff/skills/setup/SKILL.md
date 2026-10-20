@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), and whether finished story tabs close on their own. Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
+description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, and whether a session an API error stopped carries on while the user is away. Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
 disable-model-invocation: true
 ---
 
@@ -83,3 +83,20 @@ kit" says when). It kills sessions, so it is off until the user turns it on.
    AskUserQuestion tool, change nothing: print the command below, and stop.
 4. Write the answer: `handoff.py conf autoclose <on|off>`. The next tick, within 15 seconds,
    applies it; nothing needs a restart.
+
+## Continuing after an API error
+
+The `autoretry` key of `handoff.conf` lets a session that an API error stopped carry on by
+itself while the user is away (the plugin README's "API errors" says how). It types into the
+user's sessions, so it is off until the user turns it on.
+
+1. Say in plain words what it does: only while `/handoff:away` (or `~/.claude/awake`) is set,
+   and only on `server_error` and `overloaded`, one waiter per session waits 2, 5, 10, 20 and
+   30 minutes, then every 30, for up to 12 hours, and types one line asking the session to carry
+   on, never while the session is busy, its pane is in copy mode or holds a draft; a background
+   session is resumed with that line instead; an output-token-limit stop gets one continue asking
+   for smaller pieces. Without it, the error is still recorded and the tab labelled `error`.
+2. Ask with AskUserQuestion: turn it on (recommended), or leave it off. Without the
+   AskUserQuestion tool, change nothing: print the command below, and stop.
+3. Write the answer: `handoff.py conf autoretry <on|off>`. The next error reads it; nothing needs
+   a restart.
