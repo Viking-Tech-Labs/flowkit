@@ -72,7 +72,7 @@ they are.
 ## The tmux kit
 
 `/handoff:setup-tmux` copies a small tmux setup to `~/.config/flowkit/tmux.conf` (and
-`flowkit-away`, see "Being away") and adds one line to your tmux.conf: `source-file
+`flowkit-away` and `flowkit-usage`, see "Being away") and adds one line to your tmux.conf: `source-file
 ~/.config/flowkit/tmux.conf`. It keeps tmux's Ctrl-b prefix
 and adds: mouse on, tabs and panes counted from 1, **⚑ n need you** in the status bar with ⚑n on
 each tab that has sessions waiting on you, a one-word state after each story or adhoc tab's
@@ -128,6 +128,19 @@ call `flowkit-away nudge` and `flowkit-away waiting` too (`--dry-run` shows what
 `--only <name>` limits it to one session). The flag is the record and the nudge a courtesy: a
 session the nudge could not reach still reads the flag at its next question.
 
+`/handoff:away` (and so `/handoff:close overnight`) also prints how much of your plan is left, so
+you see before you leave whether the night fits:
+
+```text
+Week 49% used, resets Tue 02:59 (in 15 h) · Fable 37% of its bucket, 19% of the week (cap 50%) · 5-hour 9%
+```
+
+New in 0.6.0, the same line from `handoff.py usage` (`--json` for the fields), or `flowkit-usage`,
+which `/handoff:setup-tmux` copies to `~/.local/bin`. Claude Code answers it itself (a `get_usage`
+request through `claude -p`, no model call, no transcript, about 5 s), kept 10 minutes per config
+folder. A failed call says so and falls back to the newest `~/.claude/usage-stats/week-*.json` a
+status line of yours may record, marked old.
+
 ## Keeping the computer awake
 
 The plugin's hooks hold a `caffeinate -i` while a turn runs, and between turns while Remote Control
@@ -146,6 +159,14 @@ $1.23`. If you already have a status line, yours keeps showing: the new command 
 numbers, then runs yours. The script is copied to `~/.config/flowkit/statusline.py` and kept at the
 plugin's version by a session-start hook, which does nothing when you have not installed it. Your
 previous settings are kept as `settings.json.flowkit-bak`.
+
+New in 0.6.0, a session hears its own context use from that file: a hook on every prompt and
+after every batch of tool calls adds one line, `Context ~45%. Repo work: /handoff:close at a
+stopping point. A hub or coordinator: a paste-ready /compact Keep: … line under FOR ME.` It comes
+on every prompt at 40% or more, and mid-run once at each of 40, 50 and 60%; from a
+`/handoff:close` it stays quiet until your next prompt. A reading of 35% or less (after a
+`/compact`) lets the steps fire again. Subagents, reporters (`*-report`) and a session's first 30
+requests hear nothing, and without the status line the hook stays silent.
 
 ## What a close writes
 
