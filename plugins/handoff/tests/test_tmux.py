@@ -60,7 +60,8 @@ class Labels(unittest.TestCase):
         sid = f"{n:08d}-0000-0000-0000-000000000000"
         pid = str(1000 + n)
         self.pane(pid, n, "2.1.304")
-        self.rows.append({"kind": "interactive", "pid": int(pid), "sessionId": sid, "status": status, "name": name})
+        self.rows.append({"kind": "interactive", "pid": int(pid), "sessionId": sid, "status": status, "name": name,
+                          "startedAt": (time.time() - 2 * 3600) * 1000})
         updated = (time.time() - idle_for) * 1000
         (self.tmp / "sessions" / f"{pid}.json").write_text(json.dumps(
             {"pid": int(pid), "sessionId": sid, "status": live or status, "statusUpdatedAt": updated}))
@@ -187,7 +188,10 @@ class Closer(Labels):
         self.session(2, status="idle", idle_for=10 * 60, closed=True)
         self.session(1, status="idle", idle_for=10 * 60, name="st-report")
         self.session(3, status="idle", idle_for=10 * 60, closed=True)
-        self.note("## Final report · 2026-10-20 13:00")
+        self.note(self.final())
+
+    def final(self):
+        return f"## Final report · {time.strftime('%Y-%m-%d %H:%M', time.localtime(time.time() - 3600))}"
 
     def test_a_finished_story_goes_reporter_last(self):
         self.finished()
@@ -202,8 +206,14 @@ class Closer(Labels):
         self.session(3, status="idle", idle_for=20 * 60)  # never closed
         self.assertEqual(self.closes(), [])
         self.assertTrue(self.rang())
-        self.note("## Final report · 2026-10-20 13:00", "s9 never closed; s3 recorded from its transcript")
+        self.note(self.final(), "s9 never closed; s3 recorded from its transcript")
         self.assertEqual(self.closes(), ["%2", "%3", "%1"])
+
+    def test_a_session_started_after_the_final_report_needs_its_own_close(self):
+        self.finished()
+        self.session(5, status="idle", idle_for=10 * 60)
+        self.rows[-1]["startedAt"] = (time.time() - 30 * 60) * 1000
+        self.assertEqual(self.closes(), [])
 
     def test_a_complete_story_rings_its_reporter_until_the_report_is_in(self):
         self.note("# st", "Next: spawned s2")

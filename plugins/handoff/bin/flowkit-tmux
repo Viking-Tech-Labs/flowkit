@@ -33,6 +33,7 @@ URGENCY = ("needs you", "error", "stalled", "running", "watching", "done")  # a 
 STALL = 15 * 60
 SESSION_LINE = re.compile(r"^Session: ([0-9a-f-]{36})\b", re.M)  # a recorded close names its session
 HEADING = re.compile(r"^## (.+?) · \d{4}-\d\d-\d\d", re.M)  # a close section, or the reporter's final report
+FINAL = re.compile(r"^## Final report · (\d{4}-\d\d-\d\d \d\d:\d\d)", re.M)
 PROMISED = re.compile(r"^Next: (?:spawned|started) (.*)$", re.M)  # the sessions a close launched
 SHELLS = {"zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh"}
 QUIET = 5 * 60  # a session is closed only once its transcript and forks have been still this long
@@ -174,11 +175,17 @@ def story_complete(text):
 
 
 def story_reported(text):
-    """The reporter's final report is newer than the last close (a story can go on after one)."""
+    """When the reporter's final report was written, if it is newer than the last close (a story can
+    go on after one), else 0."""
     last = {}
     for m in HEADING.finditer(text):
         last[m.group(1) == "Final report"] = m.start()
-    return last.get(True, -1) > last.get(False, -1)
+    if last.get(True, -1) < last.get(False, -1):
+        return 0
+    try:
+        return time.mktime(time.strptime(FINAL.findall(text)[-1], "%Y-%m-%d %H:%M"))
+    except (IndexError, ValueError):
+        return 0
 
 
 def ring(pane, now):
@@ -234,8 +241,9 @@ def close_stories(pane_list, found, words):
             continue
         if now - written < GRACE or not all(untouched(r.get("sessionId") or "", now - QUIET) for _, r in claudes):
             continue
-        if not reported and any(r.get("sessionId") not in closed(slug) for p, r in claudes if p not in report):
-            continue  # no final report, so every session needs its own close
+        if any(r.get("sessionId") not in closed(slug) and (r.get("startedAt") or now * 1000) / 1000 > reported + 60
+               for p, r in claudes if p not in report):
+            continue  # a session needs its own close, unless it started before a final report that covers it
         for p in [p for p in members if p["id"] not in rows] + [p for p, _ in claudes if p not in report] + report:
             if p["id"] in rows and not terminate(int(rows[p["id"]]["pid"])):
                 break  # it would not go: the rest stay, the reporter with them

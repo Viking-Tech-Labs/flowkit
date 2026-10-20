@@ -91,7 +91,8 @@ file has its `Session:` line. Your own windows, without a story or adhoc mark, g
 New in 0.5.0, off until you turn it on: with `autoclose=on` in `handoff.conf`, the same tick
 closes a story's tab once the story is finished, so finished tabs no longer pile up. A story is
 finished when its reporter's final report is in, or, with no reporter left, when every session a
-close launched has recorded its own close; while the closes are still missing, the tick types
+close launched has recorded its own close (a session started after the final report needs its
+own close either way); while the closes are still missing, the tick types
 `report now` into an idle reporter (at most every 5 minutes) so it writes that report. The whole
 story goes at once, every pane in every one of its tabs, the reporter last, and only when nothing
 in it is busy, waiting on you, watching or in error, no pane runs anything but Claude or a bare
