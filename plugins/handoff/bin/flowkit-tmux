@@ -4,7 +4,8 @@
   flowkit-tmux waiting        status-bar job: marks each Claude pane with its state
                               (@flowkit_state: working, waiting, idle), each tab with how many
                               of its sessions wait on you (@flowkit_wait), each story and adhoc
-                              tab with its most urgent state (@flowkit_tab), prints the total
+                              tab with its most urgent state (@flowkit_tab), prints the total;
+                              with autoclose=on in handoff.conf it also closes finished story tabs
   flowkit-tmux list [client]  numbered list of every session, waiting first; a number jumps there
   flowkit-tmux help           the cheat sheet
 
@@ -16,6 +17,7 @@ import functools
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -30,6 +32,13 @@ CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 URGENCY = ("needs you", "error", "stalled", "running", "watching", "done")  # a tab shows its first
 STALL = 15 * 60
 SESSION_LINE = re.compile(r"^Session: ([0-9a-f-]{36})\b", re.M)  # a recorded close names its session
+HEADING = re.compile(r"^## (.+?) · \d{4}-\d\d-\d\d", re.M)  # a close section, or the reporter's final report
+PROMISED = re.compile(r"^Next: (?:spawned|started) (.*)$", re.M)  # the sessions a close launched
+SHELLS = {"zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh"}
+QUIET = 5 * 60  # a session is closed only once its transcript and forks have been still this long
+BACKFILL = 15 * 60  # an unfinished story this quiet rings its reporter, who records the missing closes
+GRACE = 5 * 60  # the story file sits this long after its last write before the tab goes
+RING_EVERY = 5 * 60
 
 
 def run(*cmd):
@@ -53,8 +62,10 @@ def agents():
 def panes():
     fmt = SEP.join(["#{pane_pid}", "#{pane_id}", "#{session_name}", "#{window_id}", "#{window_index}",
                     "#{window_name}", "#{pane_index}", "#{pane_current_command}", "#{@flowkit_state}",
-                    "#{@flowkit_story}#{@flowkit_adhoc}"])
-    return [dict(zip(("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "state", "story"), line.split(SEP)))
+                    "#{@flowkit_story}#{@flowkit_adhoc}", "#{@flowkit_story}", "#{@flowkit_hold}#{@cc_hold}",
+                    "#{@flowkit_rung}"])
+    keys = ("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "state", "story", "slug", "hold", "rung")
+    return [dict(zip(keys, line.split(SEP)))
             for line in tmux("list-panes", "-a", "-F", fmt).splitlines() if line]
 
 
@@ -140,6 +151,97 @@ def tab_state(row, slug):
     return "stalled" if since and since <= cutoff and untouched(sid, cutoff) else ""
 
 
+def setting(key):
+    """A key=value line of handoff.conf, the plugin's own settings; the last one wins."""
+    value = ""
+    try:
+        for line in (CONFIG / "handoff.conf").read_text().splitlines():
+            k, sep, v = line.partition("=")
+            if sep and k.strip() == key:
+                value = v.strip()
+    except OSError:
+        pass
+    return value
+
+
+def story_complete(text):
+    """Every session a close launched has a close section of its own."""
+    have = set(HEADING.findall(text)) - {"Final report"}
+    want = set()
+    for rest in PROMISED.findall(text):
+        want.update(n.strip() for n in re.split(r",\s*", re.sub(r"\s*\(.*$", "", rest)))
+    return want - {"", "none"} <= have
+
+
+def story_reported(text):
+    """The reporter's final report is newer than the last close (a story can go on after one)."""
+    last = {}
+    for m in HEADING.finditer(text):
+        last[m.group(1) == "Final report"] = m.start()
+    return last.get(True, -1) > last.get(False, -1)
+
+
+def ring(pane, now):
+    """Wake the reporter so it writes the final report; at most once every 5 min."""
+    rung = pane.get("rung") or ""
+    if rung.isdigit() and now - int(rung) < RING_EVERY:
+        return
+    tmux("set-option", "-p", "-t", pane["id"], "@flowkit_rung", str(int(now)),
+         ";", "send-keys", "-t", pane["id"], "C-u", ";", "send-keys", "-t", pane["id"], "report now", "Enter")
+
+
+def terminate(pid):
+    """SIGTERM, then up to 5 s for the process to go; True once it has."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(10):
+            time.sleep(0.5)
+            os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass
+    return False
+
+
+def close_stories(pane_list, found, words):
+    """A story whose sessions are all finished goes as a whole, its reporter last. Only tabs marked
+    @flowkit_story are looked at; @flowkit_hold (or the older @cc_hold) on a tab keeps its story."""
+    now = time.time()
+    rows = {p["id"]: r for p, r in found}
+    stories = {}
+    for p in pane_list:
+        if p.get("slug"):
+            stories.setdefault(p["slug"], []).append(p)
+    for slug, members in stories.items():
+        path = CLAUDE / "stories" / f"{slug}.md"
+        try:
+            text, written = path.read_text(errors="replace"), path.stat().st_mtime
+        except OSError:
+            continue
+        if any(p.get("hold") for p in members):
+            continue
+        if any(p["id"] not in rows and p["cmd"].lstrip("-") not in SHELLS for p in members):
+            continue  # a pane runs something else, or a claude that claude agents does not list
+        claudes = [(p, rows[p["id"]]) for p in members if p["id"] in rows]
+        if any(r.get("status") != "idle" or words.get(p["id"]) == "error" for p, r in claudes):
+            continue  # at work, waiting on the user, watching or in error
+        report = [p for p, r in claudes if (r.get("name") or "").endswith("-report")]
+        reported, complete = story_reported(text), story_complete(text)
+        if not (reported or not claudes or (complete and not report)):
+            if report and (complete or all(untouched(r.get("sessionId") or "", now - BACKFILL) for _, r in claudes)):
+                ring(report[0], now)
+            continue
+        if now - written < GRACE or not all(untouched(r.get("sessionId") or "", now - QUIET) for _, r in claudes):
+            continue
+        if not reported and any(r.get("sessionId") not in closed(slug) for p, r in claudes if p not in report):
+            continue  # no final report, so every session needs its own close
+        for p in [p for p in members if p["id"] not in rows] + [p for p, _ in claudes if p not in report] + report:
+            if p["id"] in rows and not terminate(int(rows[p["id"]]["pid"])):
+                break  # it would not go: the rest stay, the reporter with them
+            tmux("kill-pane", "-t", p["id"])
+
+
 def waiting():
     pane_list = panes()
     found = []
@@ -149,11 +251,11 @@ def waiting():
             return  # claude agents failed: leave the marks as they are
         found = placed(rows, pane_list)
     want = {p["id"]: state(r) for p, r in found}
-    count, tab = {}, {}
+    count, tab, words = {}, {}, {}
     for p, r in found:
         if r.get("status") == "waiting":
             count[p["wid"]] = count.get(p["wid"], 0) + 1
-        word = tab_state(r, p.get("story")) if p.get("story") else ""
+        word = words[p["id"]] = tab_state(r, p.get("story")) if p.get("story") else ""
         if word and (p["wid"] not in tab or URGENCY.index(word) < URGENCY.index(tab[p["wid"]])):
             tab[p["wid"]] = word
     cmds = []
@@ -176,6 +278,8 @@ def waiting():
             cmds += [";", "set-option", "-w", "-u", "-t", wid, "@flowkit_tab"]
     if cmds:
         tmux(*cmds[1:])
+    if setting("autoclose") == "on":
+        close_stories(pane_list, found, words)
     total = sum(count.values())
     if total:
         print(f"#[reverse] ⚑ {total} need{'s' if total == 1 else ''} you #[noreverse] ", end="")
