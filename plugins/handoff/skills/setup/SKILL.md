@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, and choose how spawned sessions start (tmux or Claude's background sessions). Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
+description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), and whether finished story tabs close on their own. Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
 disable-model-invocation: true
 ---
 
@@ -66,3 +66,20 @@ How `/handoff:close spawn` and `/handoff:spawn` start the next session, the `dri
    `'worktree.bgIsolation="none"'`. Nothing chosen: write nothing.
 4. Say what is left to the user: push notifications for sessions that need them are the
    `/config` toggles plus the Claude app signed in on the phone.
+
+## Closing finished story tabs
+
+With the `tmux` driver and the tmux kit, the `autoclose` key of `handoff.conf` lets the kit's
+status-bar tick close a story's tab once the story is finished (the plugin README's "The tmux
+kit" says when). It kills sessions, so it is off until the user turns it on.
+
+1. Skip this part when the driver is `background`.
+2. Say in plain words what it does: the whole story goes at once, reporter last, only once its
+   final report is in (or every launched session has closed, with no reporter left), nothing in
+   it is busy, waiting, watching or in error, and every session has been still for 5 minutes;
+   `tmux set-option -w @flowkit_hold 1` in a tab keeps it; the adhoc tab and the user's own
+   windows are never closed.
+3. Ask with AskUserQuestion: turn it on (recommended), or leave it off. Without the
+   AskUserQuestion tool, change nothing: print the command below, and stop.
+4. Write the answer: `handoff.py conf autoclose <on|off>`. The next tick, within 15 seconds,
+   applies it; nothing needs a restart.

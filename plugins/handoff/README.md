@@ -64,6 +64,7 @@ so an update or an uninstall keeps them, and readable by the scripts that run ou
 | `driver` | `tmux` | How the next session starts: `tmux` (a tab per story) or `background` (`claude --bg`). |
 | `reporter` | `off` | `on` starts a `<story>-report` session in slot 1 of each new story tab (in the background with that driver): it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done. Each close rings it: `handoff.py record` types `closed <session>` into its pane, or wakes the background one with it. |
 | `permission_mode` | empty | The `--permission-mode` of spawned sessions; empty keeps your default. A chain that runs while you are away needs a mode that does not stop to ask. |
+| `autoclose` | `off` | `on` lets the tmux kit's status-bar tick close a finished story's tab on its own (see "The tmux kit"). `/handoff:setup` offers it. |
 
 The model and effort of the next session come from its prompt (see "Your own ladder"), passed as
 they are.
@@ -86,6 +87,17 @@ permission), **error** (the last turn failed on an API error), **stalled** (idle
 more, transcript and forks untouched, no close recorded), **running**, **watching** (closed, but a
 watch or background task still runs), **done** (closed and idle). A close counts once the story
 file has its `Session:` line. Your own windows, without a story or adhoc mark, get no word.
+
+New in 0.5.0, off until you turn it on: with `autoclose=on` in `handoff.conf`, the same tick
+closes a story's tab once the story is finished, so finished tabs no longer pile up. A story is
+finished when its reporter's final report is in, or, with no reporter left, when every session a
+close launched has recorded its own close; while the closes are still missing, the tick types
+`report now` into an idle reporter (at most every 5 minutes) so it writes that report. The whole
+story goes at once, every pane in every one of its tabs, the reporter last, and only when nothing
+in it is busy, waiting on you, watching or in error, no pane runs anything but Claude or a bare
+shell, the story file has sat 5 minutes and every session's transcript and forks have been still
+for 5 minutes. A tab whose sessions all exited closes too. `tmux set-option -w @flowkit_hold 1`
+in a tab keeps its story open; the adhoc tab and your own windows are never closed.
 
 ## Being away
 
