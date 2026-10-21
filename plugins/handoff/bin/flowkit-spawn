@@ -344,6 +344,7 @@ fi
 start() { # pane command session-name
   local up=0 rcurl="" screen shell_pid pid
   shell_pid="$(tm display-message -p -t "$1" '#{pane_pid}')"
+  tm set-option -p -t "$1" @flowkit_born "$(date +%s)" # the story closer leaves a starting pane alone
   tm send-keys -t "$1" C-u # anything half-typed would prefix the command
   tm send-keys -t "$1" "cd '$repo' && $2" Enter
   for _ in $(seq 1 15); do

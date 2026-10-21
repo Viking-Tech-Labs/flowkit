@@ -51,9 +51,10 @@ class Labels(unittest.TestCase):
         self.wid = wid
         self.hold = hold
 
-    def pane(self, pid, n, cmd):
+    def pane(self, pid, n, cmd, born=""):
         slug = "" if self.story == "adhoc" else self.story
-        self.pane_list.append([pid, f"%{n}", "work", self.wid, "1", "w", str(n), cmd, "", self.story, slug, self.hold, ""])
+        self.pane_list.append([pid, f"%{n}", "work", self.wid, "1", "w", str(n), cmd, "", self.story, slug, self.hold, "",
+                               born])
 
     def session(self, n, status, live=None, idle_for=0, closed=False, retry=False, touched=None, name=""):
         """A claude pane in the current window, its agents row and, optionally, its sessions file."""
@@ -169,8 +170,8 @@ class Closer(Labels):
             f.write("".join(f"{line}\n" for line in lines))
         os.utime(path, (time.time() - age, time.time() - age))
 
-    def shell(self, n):
-        self.pane(str(5000 + n), n, "zsh")
+    def shell(self, n, born=""):
+        self.pane(str(5000 + n), n, "zsh", born)
 
     def closes(self):
         self.writes.clear()
@@ -230,6 +231,21 @@ class Closer(Labels):
         self.shell(1)
         self.shell(2)
         self.assertEqual(self.closes(), ["%1", "%2"])
+        self.assertEqual(self.killed, [])
+
+    def test_a_tab_flowkit_spawn_just_opened_stays_until_its_sessions_come_up(self):
+        self.note("# st", "Next: spawned s2")
+        self.shell(1, born=str(int(time.time())))
+        self.shell(2, born=str(int(time.time()) - 5))
+        self.assertEqual(self.closes(), [])
+        for p in self.pane_list:
+            p[13] = str(int(time.time() - self.ft.SPAWN_GRACE - 1))
+        self.assertEqual(self.closes(), ["%1", "%2"])
+
+    def test_a_shell_just_reused_in_a_finished_tab_keeps_the_story(self):
+        self.finished()
+        self.shell(4, born=str(int(time.time())))
+        self.assertEqual(self.closes(), [])
         self.assertEqual(self.killed, [])
 
     def test_a_session_whose_transcript_or_fork_moved_lately_is_not_killed(self):

@@ -40,6 +40,7 @@ QUIET = 5 * 60  # a session is closed only once its transcript and forks have be
 BACKFILL = 15 * 60  # an unfinished story this quiet rings its reporter, who records the missing closes
 GRACE = 5 * 60  # the story file sits this long after its last write before the tab goes
 RING_EVERY = 5 * 60
+SPAWN_GRACE = 2 * 60  # a pane flowkit-spawn stamped @flowkit_born this recently is still starting its claude
 
 
 def run(*cmd):
@@ -64,8 +65,9 @@ def panes():
     fmt = SEP.join(["#{pane_pid}", "#{pane_id}", "#{session_name}", "#{window_id}", "#{window_index}",
                     "#{window_name}", "#{pane_index}", "#{pane_current_command}", "#{@flowkit_state}",
                     "#{@flowkit_story}#{@flowkit_adhoc}", "#{@flowkit_story}", "#{@flowkit_hold}#{@cc_hold}",
-                    "#{@flowkit_rung}"])
-    keys = ("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "state", "story", "slug", "hold", "rung")
+                    "#{@flowkit_rung}", "#{@flowkit_born}"])
+    keys = ("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "state", "story", "slug", "hold", "rung",
+            "born")
     return [dict(zip(keys, line.split(SEP)))
             for line in tmux("list-panes", "-a", "-F", fmt).splitlines() if line]
 
@@ -228,6 +230,8 @@ def close_stories(pane_list, found, words):
             continue
         if any(p.get("hold") for p in members):
             continue
+        if any((p.get("born") or "").isdigit() and now - int(p["born"]) < SPAWN_GRACE for p in members):
+            continue  # a shell flowkit-spawn just typed a launch into, before claude agents lists it
         if any(p["id"] not in rows and p["cmd"].lstrip("-") not in SHELLS for p in members):
             continue  # a pane runs something else, or a claude that claude agents does not list
         claudes = [(p, rows[p["id"]]) for p in members if p["id"] in rows]
