@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, whether a session an API error stopped carries on while the user is away, and what a chain's last slice leaves behind (the branch, a Draft MR, the MR ready, merged). Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
+description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, whether a session an API error stopped carries on while the user is away, what a chain's last slice leaves behind (the branch, a Draft MR, the MR ready, merged), and whether a helper session reports its verdict back to the session that launched it. Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
 disable-model-invocation: true
 ---
 
@@ -123,3 +123,27 @@ proposed.
    Without the AskUserQuestion tool, change nothing: print the command below, and stop.
 3. Write the answer: `handoff.py conf chain_end <value>`. The next close that drafts a story's
    first prompt proposes it; nothing needs a restart.
+
+## A helper reports back
+
+The `report_to` key of `handoff.conf` lets a session launched beside a story's chain (a review or
+investigation `/handoff:spawn` starts, or one a close launches next to its chain; never the
+chain's next slice) send its verdict back to the session that launched it: its brief gets a
+`Report-to: <session>` line in its header, and its close sends that session one message (the
+plugin README's "A helper reports back"). It is off until the user turns it on: the launching
+session then has a message to relay and act on.
+
+1. Say in plain words what it does: with `on`, `/handoff:spawn` with a prompt and a close's
+   helper launch write `Report-to:` naming the launching session (`handoff.py self` prints its
+   name); at its close the helper sends that session its verdict, one line, the findings by
+   number with a worth-fixing word, the links, at most ten lines; the launching session relays
+   it to the user and acts on it as their rules say. A message between sessions of different
+   permission modes waits for the receiver's approval, one to a session parked on a question
+   waits with it, and a stopped background session gets none, so the helper's close and DONE
+   carry the verdict too. A name instead of `on` sends every helper's verdict to that session;
+   `report_to=none` on a `/handoff:spawn` skips one launch, and a `single` without a prompt never
+   carries the line.
+2. Ask with AskUserQuestion: turn it on (recommended), or leave it off. Without the
+   AskUserQuestion tool, change nothing: print the command below, and stop.
+3. Write the answer: `handoff.py conf report_to <on|off>`. The next launch reads it; nothing
+   needs a restart.

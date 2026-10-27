@@ -65,8 +65,8 @@ file:
 4. **The report.** When the launched session's message arrives (a SendMessage from the session
    named in the `SPAWNED` line), relay it to the user in plain words: the verdict line, the
    findings by number, the links; then act on it as the user's rules say (a worth-fixing finding
-   goes to the story's next slice). A session that ends without a message sent nothing it could
-   deliver: its DONE carries the verdict, in its tab.
+   goes to the story's next slice). A helper whose message never arrives (held for the receiver's
+   approval, or a send that failed) put the verdict in its DONE: read it in its tab.
 
 A story session launched here owns its repo from then on: this session makes no more edits or
 commits there.

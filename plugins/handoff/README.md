@@ -15,8 +15,8 @@ called `handoff` keeps working beside this one.
 | `/handoff:close [modes] [what next]` | Closes the session: commits green work (never pushes), fixes docs it made stale, writes the pick-up block, drafts the next session's prompt when repo work is left, closes with `DONE` / `FOR ME` / `OPEN` / `LEFT` and records the close in the story file. |
 | `/handoff:away` | Marks you away (`~/.claude/away`, cleared by `/handoff:back` or after 12 hours): every session, running already or started later, stops asking and takes the recommended option, marked "(auto)"; a session already sitting on a question is told so at once (below). |
 | `/handoff:back` | Clears the flag, so sessions ask you again, and lists the sessions waiting on you right now. |
-| `/handoff:spawn [single] <prompt>` | Starts any session with a prompt the way a close's `spawn` does: in its story's tab, or with `single` as a one-off in a shared `adhoc` tab ("open a fresh session in that repo"). |
-| `/handoff:setup` | Offers the status line below, as a diff of your settings, and writes it only on your yes; asks which launch driver spawned sessions use, and for background sessions offers two settings of yours. |
+| `/handoff:spawn [single] <prompt>` | Starts any session with a prompt the way a close's `spawn` does: in its story's tab, or with `single` as a one-off in a shared `adhoc` tab ("open a fresh session in that repo"); with `report_to=on` the new session reports its verdict back here (below). |
+| `/handoff:setup` | Offers the status line below, as a diff of your settings, and writes it only on your yes; asks which launch driver spawned sessions use, and for background sessions offers two settings of yours; offers the `handoff.conf` keys below (tabs closing on their own, continuing after an API error, where a chain ends, a helper reporting back). |
 | `/handoff:setup-tmux` | Offers the tmux kit below and the one line that loads it from your tmux.conf, and writes only on your yes; explains the launch settings. |
 
 Modes, combined freely: `quick` skips the docs sweep; `prompt-only` prints only the next prompt
@@ -84,6 +84,7 @@ so an update or an uninstall keeps them, and readable by the scripts that run ou
 | `autoclose` | `off` | `on` lets the tmux kit's status-bar tick close a finished story's tab on its own (see "The tmux kit"). `/handoff:setup` offers it. |
 | `autoretry` | `off` | `on` lets a session an API error stopped carry on by itself while you are away (see "API errors"). `/handoff:setup` offers it. |
 | `chain_end` | `mr-ready` | What a story's chain ends with, proposed when its first prompt is drafted (see "Where a chain ends"): `branch`, `draft-mr`, `mr-ready` or `merge`. `/handoff:setup` offers it. |
+| `report_to` | `off` | `on` writes `Report-to: <the launching session>` into the brief of a helper (`/handoff:spawn` with a prompt, or a close's review or investigation beside the chain), so its close sends the verdict back (see "A helper reports back"); a name sends every helper's verdict to that session. `/handoff:setup` offers it. |
 
 The model and effort of the next session come from its prompt (see "Your own ladder"), passed as
 they are.
@@ -258,6 +259,28 @@ merged); your own words are taken as they are. Unattended, the close takes the c
 The line lives in the story file's header (`handoff.py chain-end <story>` prints it, with a value
 or words sets it) and in the pick-up block. The close itself still never pushes: the slices do, as
 the line says.
+
+## A helper reports back
+
+New in 0.7.6. A review or investigation launched beside a story's chain used to end in its own
+tab, and the session that launched it learned the verdict only when you pasted it over. With
+`report_to=on` in `handoff.conf`, the brief of such a helper carries `Report-to: <session>` in its
+header, naming the session that launched it (`handoff.py self` prints a session's own name, from
+`~/.claude/sessions/$CLAUDE_PID.json` or the `claude agents` row of its parent process; `handoff.py
+state` prints the key as `report-to:`), and its `Stop when:` ends with the send: at its close the
+helper sends that session one message, the verdict in one line, the findings by number with a
+worth-fixing word, the links, at most ten lines (the close skill's step 8, the one exception to
+"do not send unless asked"); the launching session relays it in plain words and acts on it as
+your rules say. Which launches carry it: `/handoff:spawn` with a prompt (`report_to=<name>` or
+`report_to=none` on the command override the conf; `save-prompt <name> --report-to <session>`
+writes the line, on the `Repo:` line of a brief or as a first line of its own), and a close's
+helper beside the chain; never the chain's next slice, never a `single` without a prompt, and a
+prompt whose header already names a `Report-to:`, or that carries a coordinator's `REPORTING`
+line, is left as it is. A name instead of `on` sends every helper's verdict to that session; off
+by default, since a colleague's spawns have nowhere to report. The caveat: a message between
+sessions of different permission modes waits for the receiver's approval, one to a session parked
+on a question waits with it, and a stopped background session gets none; so the helper's close
+and DONE carry the verdict too, and a held or failed send loses nothing but the ring.
 
 ## Your own ladder
 
