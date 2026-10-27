@@ -2,9 +2,11 @@ The next session's prompt. The close fills it in and prints it in a fenced block
 for a launch. Lines in [brackets] appear only when they apply. Name sections to read, never
 whole files; carry what this session verified so the next one does not look it up again. The
 Chain end line is the story's own (`handoff.py chain-end <slug>`), repeated by every brief.
+`Report-to:` names the session a helper beside the chain sends its verdict to (step 5), never a
+chain successor.
 
 ```
-Repo: <absolute path>   Session: <next session's name>[   Story: <slug>]
+Repo: <absolute path>   Session: <next session's name>[   Story: <slug>][   Report-to: <session>]
 [Model: <model>   Effort: <effort>]
 [Why this model: <the reason the ladder gave>]
 
@@ -29,5 +31,7 @@ open, keep working or say what blocks it.
 [Chain end: <the story's line>[; this slice is the chain's LAST: it does that work, then closes without `spawn`]]
 Stop when: <done condition>, or when a step needs the user's hands; then close with
 `/handoff:close` (add `spawn` when the plan runs on without the user), which records the
-close in the story file.
+close in the story file[; then send your verdict to <Report-to> with SendMessage (load it
+with ToolSearch): one line, findings by number with a worth-fixing word, the links, at most
+ten lines; on any error or delivery notice, DONE carries it].
 ```

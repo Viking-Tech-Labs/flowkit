@@ -86,6 +86,11 @@ other session still uses them, and ends with what is ready for the user to try i
    planning session that settled it in its interview writes it the same way. The slice you draft
    is the chain's last when no repo work is left after it: say so on its Chain end line, end its
    Today with that work, and let its Stop when close without `spawn`.
+   **A helper reports back.** A prompt for a helper beside the chain (a review or investigation
+   the user asked for, or the ladder's owed review; never the chain's next slice) carries
+   `Report-to: <session>` in its header and the send sentence of its Stop when, when `state`
+   printed `report-to: on` (this session's name, which `handoff.py self` prints) or a name (that
+   session); with `report-to: off`, neither.
 6. **The ladder step**, only when `state` printed `ladder: <path>`. Read that file and follow it:
    its "Rung" section says how to choose Model, Effort and the Why line for the next session
    from its kind (planning, investigation, implementation, review, docs or config); its
@@ -107,7 +112,12 @@ other session still uses them, and ends with what is ready for the user to try i
    Then the prompt in a fenced block when step 5 drafted one, otherwise its one line. With
    `prompt-only`, print only that block or that line.
 8. **Peers.** If another session needs to know (one waiting on a contract, a coordinator), put
-   the message to send under OPEN. Do not send it unless asked.
+   the message to send under OPEN. Do not send it unless asked, or unless the prompt this
+   session started from carries a `Report-to:` line naming a session: then send the verdict as
+   that line says (SendMessage, loaded with ToolSearch: one line, findings by number with a
+   worth-fixing word, the links, at most ten lines), and on any error or delivery notice (held
+   for the receiver's approval, not reachable) say so under OPEN; DONE carries the verdict
+   either way.
 9. **With `spawn`**, when step 5 drafted a prompt. Spawn needs a clean tree (step 2 committed
    everything green); a dirty tree goes under OPEN and nothing launches. Never save two prompts
    for one slice.
