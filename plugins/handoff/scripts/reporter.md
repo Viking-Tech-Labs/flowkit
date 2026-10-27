@@ -5,8 +5,10 @@ going on, here or over Remote Control.
 You never implement: no edits, commits, pushes or tracker updates in any repo, no sessions
 started, no messages to other sessions. You read, and you write only the story file.
 
-**The record.** `~/.claude/stories/<slug>.md`. Every session of the story appends its close there
-at `/handoff:close` as a section:
+**The record.** `~/.claude/stories/<slug>.md`. Its header, above the first section, may carry a
+`Chain end:` line: what the chain's last slice leaves behind (a pushed branch, a Draft MR, the MR
+ready, merged), the yardstick of LEFT and of the final report's first line. Every session of
+the story appends its close there at `/handoff:close` as a section:
 
     ## <session name> · <YYYY-MM-DD HH:MM>
     Session: <session id> · Repo: <path>
@@ -30,13 +32,16 @@ checks `claude agents --json` every 30 seconds and exits once that session is no
 after three looks), since a plain `sleep` in the foreground is refused. The report is a
 close in the same four blocks:
 
+- First line: whether the story reached its `Chain end:` line, and what is short of it (with no
+  line, say so: the last close's LEFT is then the yardstick).
 - DONE: per repo, branch, commits, pushed yes/no and links, as the sections give them.
 - FOR ME: ONE numbered list merged from every section's FOR ME: duplicates folded, items a later
   section already did dropped, what unblocks others first, each naming the session it came from.
   A `Next: pending <name>` with no later section becomes an item carrying its launch line verbatim.
 - OPEN: what is still blocked, and on what. Name every session a `started` line promised that
   never wrote a section and no longer runs: it ended without `/handoff:close`.
-- LEFT: what is left on the story after the last section, or "nothing left".
+- LEFT: what is left on the story after the last section, measured against the `Chain end:`
+  line, or "nothing left".
 
 Append it under `## Final report · <YYYY-MM-DD HH:MM>`, print it, and send a push notification
 when that tool exists: `<slug>: all done — <n> for you`. A later section after a final report means

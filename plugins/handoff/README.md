@@ -73,7 +73,7 @@ so an update or an uninstall keeps them, and readable by the scripts that run ou
 | Key | Default | Means |
 |---|---|---|
 | `driver` | `tmux` | How the next session starts: `tmux` (a tab per story) or `background` (`claude --bg`). |
-| `reporter` | `off` | `on` starts a `<story>-report` session whenever a story's launch finds none running (in the background with that driver): it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done. Each close rings it: `handoff.py record` types `closed <session>` into its pane, or wakes the background one with it. |
+| `reporter` | `off` | `on` starts a `<story>-report` session whenever a story's launch finds none running (in the background with that driver): it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done; the story's `Chain end:` line is the yardstick of its LEFT and of the report's first line. Each close rings it: `handoff.py record` types `closed <session>` into its pane, or wakes the background one with it. |
 | `permission_mode` | empty | The `--permission-mode` of spawned sessions; empty keeps your default. A chain that runs while you are away needs a mode that does not stop to ask. |
 | `autoclose` | `off` | `on` lets the tmux kit's status-bar tick close a finished story's tab on its own (see "The tmux kit"). `/handoff:setup` offers it. |
 | `autoretry` | `off` | `on` lets a session an API error stopped carry on by itself while you are away (see "API errors"). `/handoff:setup` offers it. |
