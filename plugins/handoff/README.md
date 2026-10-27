@@ -66,6 +66,7 @@ so an update or an uninstall keeps them, and readable by the scripts that run ou
 | `permission_mode` | empty | The `--permission-mode` of spawned sessions; empty keeps your default. A chain that runs while you are away needs a mode that does not stop to ask. |
 | `autoclose` | `off` | `on` lets the tmux kit's status-bar tick close a finished story's tab on its own (see "The tmux kit"). `/handoff:setup` offers it. |
 | `autoretry` | `off` | `on` lets a session an API error stopped carry on by itself while you are away (see "API errors"). `/handoff:setup` offers it. |
+| `chain_end` | `mr-ready` | What a story's chain ends with, proposed when its first prompt is drafted (see "Where a chain ends"): `branch`, `draft-mr`, `mr-ready` or `merge`. `/handoff:setup` offers it. |
 
 The model and effort of the next session come from its prompt (see "Your own ladder"), passed as
 they are.
@@ -204,17 +205,34 @@ requests hear nothing, and without the status line the hook stays silent.
   file) or asked once, and remembered in the plugin's data directory. The block's shape is
   `skills/close/pickup-template.md`.
 - **The next session's prompt**, only when repo work is left: repo, session name, story, the
-  sections to read, verified facts, today's items with their checks, the fences and the stop
-  condition. Its shape is `skills/close/prompt-template.md`. A prompt that nothing started is
+  sections to read, verified facts, today's items with their checks, the fences, the story's
+  Chain end line and the stop condition. Its shape is `skills/close/prompt-template.md`. A prompt that nothing started is
   saved under `~/.claude/spawned/<name>.md`.
 - **The story file**, `~/.claude/stories/<slug>.md`, when the session's prompt names a `Story:`:
   one section per close with the session id, how to resume it, the four close blocks and a
   `Next:` line: `started <name>`, `pending <name>` (a saved prompt nothing started) or `none`.
   `Next: none` is written only when no repo work is left; on the last close, with no session of
-  the story still live, it is what marks the story done.
+  the story still live, it is what marks the story done. Its header carries the story's
+  `Chain end:` line (below).
 
 Unattended (`overnight`, the away flag set, or a headless run without the question tool) the close
 never asks: it takes the recommended option at every fork and marks it "(auto)".
+
+## Where a chain ends
+
+New in 0.7.3. A chain of spawned sessions used to stop short of what you meant by done: every brief
+said "never push", so the last slice landed its commits and waited for your word on the push, the
+MR and the merge, which no one was there to give. Now the story carries one line, `Chain end:`,
+saying what the chain's last slice leaves behind, and every brief repeats it next to `Stop when:`,
+the last slice told that it is the last. The close that drafts a story's first prompt asks once,
+proposing `chain_end=` from `handoff.conf` (`/handoff:setup` offers it; `mr-ready` until it is set):
+`branch` (no slice pushes), `draft-mr` (each slice pushes its green commits, the first push opens a
+Draft MR, the last slice leaves it there), `mr-ready` (the last slice also takes it out of Draft and
+watches the pipeline to green, no merge) or `merge` (then sets auto-merge and watches until it is
+merged); your own words are taken as they are. Unattended, the close takes the conf value "(auto)".
+The line lives in the story file's header (`handoff.py chain-end <story>` prints it, with a value
+or words sets it) and in the pick-up block. The close itself still never pushes: the slices do, as
+the line says.
 
 ## Your own ladder
 
