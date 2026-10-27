@@ -66,6 +66,37 @@ class Handoff(unittest.TestCase):
         os.utime(self.flag, (old, old))
         self.assertIsNone(self.gate())
 
+    def test_state_prints_the_chain_end_of_the_conf(self):
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp)
+        conf = self.tmp / "flowkit" / "handoff.conf"
+        conf.parent.mkdir()
+        state = lambda: self.handoff("state", str(self.tmp / "data"), str(repo)).stdout
+        self.assertIn("chain-end: mr-ready (each slice pushes its green commits, the first push opens a Draft MR; "
+                      "the last slice takes it out of Draft, watches the pipeline to green, no merge)", state())
+        conf.write_text("driver=tmux\nchain_end=merge\n")
+        self.assertIn("chain-end: merge (each slice pushes", state())
+        conf.write_text("chain_end=ship\n")
+        self.assertIn("chain-end: ship (not one of branch, draft-mr, mr-ready, merge)", state())
+
+    def test_chain_end_lives_in_the_story_header(self):
+        story = self.tmp / "claude" / "stories" / "my-story.md"
+        self.assertEqual(self.handoff("chain-end", "My Story").stdout, "none\n")
+        self.assertFalse(story.exists(), "reading writes nothing")
+        line = self.handoff("chain-end", "My Story", "mr-ready").stdout.strip()
+        self.assertTrue(line.startswith("Chain end: mr-ready — each slice pushes its green commits"), line)
+        self.assertEqual(story.read_text(), f"# my-story\n{line}\n")
+        self.assertEqual(self.handoff("chain-end", "my-story").stdout.strip(), line[len("Chain end: "):])
+        self.handoff("record", "my-story", stdin="## s1 · 2026-10-27 12:00\nSession: x · Repo: /r\nNext: none\n")
+        self.handoff("chain-end", "my-story", "push, MR ready,\nno merge")
+        text = story.read_text()
+        self.assertEqual(text.splitlines()[:2], ["# my-story", "Chain end: push, MR ready, no merge"])
+        self.assertEqual(text.count("Chain end:"), 1, "the header line is replaced, never doubled")
+        self.assertIn("\n## s1 · 2026-10-27 12:00\nSession: x · Repo: /r\nNext: none\n", text)
+        self.assertEqual(self.handoff("chain-end", "my-story", "   ").returncode, 1)
+
     def test_nudge_sorts_the_waiting_sessions(self):
         me, shell = os.getpid(), os.getppid()
         self.agents([

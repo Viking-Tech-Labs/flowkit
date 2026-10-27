@@ -1,6 +1,7 @@
 The next session's prompt. The close fills it in and prints it in a fenced block, or saves it
 for a launch. Lines in [brackets] appear only when they apply. Name sections to read, never
-whole files; carry what this session verified so the next one does not look it up again.
+whole files; carry what this session verified so the next one does not look it up again. The
+Chain end line is the story's own (`handoff.py chain-end <slug>`), repeated by every brief.
 
 ```
 Repo: <absolute path>   Session: <next session's name>[   Story: <slug>]
@@ -11,7 +12,7 @@ Read first, ONLY these sections: <doc → section>, <doc → section>. Don't rea
 whole files; don't re-derive what the docs already carry.
 
 Branch from: <branch>. Validation: <command> must be green before any commit;
-commit per change, never push.
+commit per change; push only as the Chain end line says (no line: never push).
 
 Verified facts: <bullets>
 
@@ -25,6 +26,7 @@ Keep Today's items in the task list and tick them as you go; check it before end
 turn. A text-only message is a progress report, not the end: while an item is open, keep
 working or say what blocks it.
 
+[Chain end: <the story's line>[; this slice is the chain's LAST: it does that work, then closes without `spawn`]]
 Stop when: <done condition>, or when a step needs the user's hands; then close with
 `/handoff:close` (add `spawn` when the plan runs on without the user), which records the
 close in the story file.

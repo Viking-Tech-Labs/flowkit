@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, and whether a session an API error stopped carries on while the user is away. Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
+description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, whether a session an API error stopped carries on while the user is away, and what a chain's last slice leaves behind (the branch, a Draft MR, the MR ready, merged). Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
 disable-model-invocation: true
 ---
 
@@ -100,3 +100,26 @@ user's sessions, so it is off until the user turns it on.
    AskUserQuestion tool, change nothing: print the command below, and stop.
 3. Write the answer: `handoff.py conf autoretry <on|off>`. The next error reads it; nothing needs
    a restart.
+
+## Where a chain ends
+
+The `chain_end` key of `handoff.conf` is what a close proposes when it drafts a story's first
+prompt: what the chain's last slice leaves behind. The close asks once per story (the user's own
+words are taken as they are), writes the answer as a `Chain end:` line into the story file's
+header, and every brief of the chain repeats it next to `Stop when:`, the last slice told it is
+the last; unattended, the close takes this value "(auto)". Until it is set, `mr-ready` is
+proposed.
+
+| Value | Every slice | The last slice |
+|---|---|---|
+| `branch` | commits, never pushes | leaves the branch committed; the user pushes |
+| `draft-mr` | pushes its green commits; the first push opens a Draft MR | reads the pipeline, leaves the MR in Draft |
+| `mr-ready` | as `draft-mr` | takes the MR out of Draft, watches the pipeline to green, no merge |
+| `merge` | as `draft-mr` | as `mr-ready`, then sets auto-merge and watches until it is merged |
+
+1. Say in plain words what it does, with the table; `handoff.py state` prints the current value as
+   `chain-end:`.
+2. Ask with AskUserQuestion: the four values, the current one marked, `mr-ready` recommended.
+   Without the AskUserQuestion tool, change nothing: print the command below, and stop.
+3. Write the answer: `handoff.py conf chain_end <value>`. The next close that drafts a story's
+   first prompt proposes it; nothing needs a restart.

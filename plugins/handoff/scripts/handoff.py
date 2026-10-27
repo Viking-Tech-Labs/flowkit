@@ -8,6 +8,9 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py record <story>                      stdin appended to ~/.claude/stories/<slug>.md (the
                                                  story slugified as flowkit-spawn does), then the
                                                  story's reporter is told `closed <name>`
+  handoff.py chain-end <story> [<value|words>]   the story file's `Chain end:` line (what the chain's last
+                                                 slice leaves behind): print it, or none; with a chain_end=
+                                                 value or your own words, write it into the header
   handoff.py wake <slug> <name>                  ring a busy background reporter once it is idle (5 min)
   handoff.py wake --id <session id> <text>       resume a background session with <text> once it is idle
   handoff.py conf <key> <value>                  set a key of ~/.config/flowkit/handoff.conf
@@ -72,6 +75,16 @@ PROMPT_LINE = re.compile(r"^[│|\s]*[>❯]\s?(.*?)[\s│|]*$")
 HEADING = "WHERE TO PICK UP"
 NAMES = ("PLAN.md", "BUILD-PLAN.md", "HANDOFF.md", "ROADMAP.md", "docs/PLAN.md", "docs/plan.md", "docs/HANDOFF.md")
 SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+CHAIN_END = "mr-ready"  # chain_end= of handoff.conf when the key is absent
+CHAIN_ENDS = {  # a chain's end: what its slices do about pushing, the MR and the merge; the last slice ends it
+    "branch": "no slice pushes; the last slice leaves the branch committed and the user pushes",
+    "draft-mr": "each slice pushes its green commits, the first push opens a Draft MR; the last slice reads the "
+                "pipeline and leaves the MR in Draft",
+    "mr-ready": "each slice pushes its green commits, the first push opens a Draft MR; the last slice takes it out "
+                "of Draft, watches the pipeline to green, no merge",
+    "merge": "each slice pushes its green commits, the first push opens a Draft MR; the last slice takes it out of "
+             "Draft, sets auto-merge and watches until it is merged",
+}
 
 
 def fail(msg):
@@ -256,6 +269,7 @@ def state(data, repo):
     since = away_since()
     print(f"away: since {since}" if since else "away: off")
     print(f"spawn-driver: {setting('driver', 'tmux')}")
+    print(f"chain-end: {chain_end_conf()}")
     print(f"spawned-dir: {SPAWNED}")
     print(f"stories-dir: {STORIES}")
 
@@ -605,6 +619,37 @@ def record(story):
         ring(slug, section.group(1))
 
 
+def chain_end_conf():
+    """The chain_end= of handoff.conf, as `state` prints it: the value and what it means."""
+    value = setting("chain_end", CHAIN_END)
+    return f"{value} ({CHAIN_ENDS.get(value) or 'not one of ' + ', '.join(CHAIN_ENDS)})"
+
+
+def chain_end(story, text=None):
+    """The story file's `Chain end:` line, in its header above the first close: what the chain's last
+    slice leaves behind, which every brief of the chain repeats. Prints it, or `none`; with text,
+    writes it (a chain_end value with its meaning), creating the file as record does."""
+    slug = safe(slugify(story), "the story slug")
+    path = STORIES / f"{slug}.md"
+    lines = path.read_text().splitlines() if path.is_file() else [f"# {slug}"]
+    head = next((i for i, line in enumerate(lines) if line.startswith("## ")), len(lines))
+    have = next((i for i in range(head) if lines[i].startswith("Chain end:")), None)
+    if text is None:
+        print(lines[have].partition(":")[2].strip() if have is not None else "none")
+        return
+    text = " ".join(text.split())
+    if not text:
+        fail("the Chain end line needs words: a chain_end value or your own")
+    line = f"Chain end: {text} — {CHAIN_ENDS[text]}" if text in CHAIN_ENDS else f"Chain end: {text}"
+    if have is not None:
+        lines[have] = line
+    else:
+        lines.insert(1 if lines and lines[0].startswith("# ") else 0, line)
+    STORIES.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+    print(line)
+
+
 def conf(key, value):
     """Set one key=value line of handoff.conf, keeping every other line as it is."""
     if not re.fullmatch(r"[a-z_]+", key) or "\n" in value:
@@ -779,6 +824,8 @@ def main(argv):
         save_prompt(*args)
     elif cmd == "record" and len(args) == 1:
         record(*args)
+    elif cmd == "chain-end" and len(args) in (1, 2):
+        chain_end(*args)
     elif cmd == "away" and not args:
         CLAUDE.mkdir(parents=True, exist_ok=True)
         AWAY.write_text(time.strftime("%Y-%m-%d %H:%M") + "\n")

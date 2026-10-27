@@ -6,6 +6,7 @@ than dropping a line.
 ### WHERE TO PICK UP — <date "+%Y-%m-%d %H:%M">
 Planned by: <this session's model>
 Branch: <name> (<n> commits ahead of its upstream, pushed: yes/no)
+Chain end: <the story's line, or none>
 Landed this session: <one line per item>
 Verified facts (do not re-derive): <paths, commands, numbers the next session would otherwise look up>
 Decisions taken: <numbered; "(auto)" where taken unattended; where each is written down>

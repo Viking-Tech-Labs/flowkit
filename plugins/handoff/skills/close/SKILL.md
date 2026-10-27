@@ -72,6 +72,17 @@ other session still uses them, and ends with what is ready for the user to try i
    that nothing is left. The pick-up block of step 4 is written either way: it, not the prompt,
    is the real handoff. When drafted, fill `prompt-template.md` (next to this file). Name the
    next session `<repo or story>-<slice>`, for example `billing-s3`.
+   **The chain's end.** With a `Story:`, the prompt carries the story's `Chain end:` line: what
+   the chain's last slice leaves behind (the branch committed, a Draft MR, the MR ready, merged),
+   which `handoff.py chain-end <slug>` prints, or `none`. With `none` (the story's first prompt:
+   the close that follows plan approval), ask once with AskUserQuestion: the conf value `state`
+   printed as `chain-end:` recommended, the other values `/handoff:setup` offers as the
+   alternatives, the user's own words taken as they are; unattended, take the conf value
+   "(auto)". Write the answer with `handoff.py chain-end <slug> <value or words>` before the
+   prompt is filled, so the story file, the pick-up block and every later brief carry one line. A
+   planning session that settled it in its interview writes it the same way. The slice you draft
+   is the chain's last when no repo work is left after it: say so on its Chain end line, end its
+   Today with that work, and let its Stop when close without `spawn`.
 6. **The ladder step**, only when `state` printed `ladder: <path>`. Read that file and follow it:
    its "Rung" section says how to choose Model, Effort and the Why line for the next session
    from its kind (planning, investigation, implementation, review, docs or config); its
