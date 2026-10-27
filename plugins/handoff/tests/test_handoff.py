@@ -15,6 +15,7 @@ from pathlib import Path
 PLUGIN = Path(__file__).resolve().parent.parent
 HANDOFF = PLUGIN / "scripts" / "handoff.py"
 AWAY_BIN = PLUGIN / "bin" / "flowkit-away"
+SPAWN_BIN = PLUGIN / "bin" / "flowkit-spawn"
 
 
 class Handoff(unittest.TestCase):
@@ -111,6 +112,23 @@ class Handoff(unittest.TestCase):
         typed = [l for l in self.calls.read_text().splitlines() if "send-keys" in l]
         self.assertEqual(len(typed), 1, typed)
         self.assertRegex(typed[0], r"-t %7 C-u ; send-keys -t %7 -l closed s1 ; run-shell sleep 0.5 ; send-keys -t %7 Enter$")
+
+    def test_spawn_hands_over_to_a_newer_installed_release_once(self):
+        fake = self.tmp / "fake"
+        (fake / "bin").mkdir(parents=True)
+        (fake / ".claude-plugin").mkdir()
+        (fake / "bin" / "flowkit-spawn").write_text('#!/bin/sh\necho "fake $* reexec=${FLOWKIT_SPAWN_REEXEC:-unset}"\n')
+        (fake / "bin" / "flowkit-spawn").chmod(0o755)
+        (self.tmp / "claude" / "plugins").mkdir()
+        (self.tmp / "claude" / "plugins" / "installed_plugins.json").write_text(json.dumps(
+            {"plugins": {"handoff@flowkit": [{"installPath": str(fake)}]}}))
+        def spawn(version):
+            (fake / ".claude-plugin" / "plugin.json").write_text(json.dumps({"version": version}))
+            out = subprocess.run([str(SPAWN_BIN), "--dry-run", "--name", "s2", "p.md"], capture_output=True,
+                                 text=True, env=self.env)
+            return out.stdout + out.stderr
+        self.assertEqual(spawn("9.9.9"), "fake --dry-run --name s2 p.md reexec=1\n")
+        self.assertNotIn("fake", spawn("0.0.1"), "an older install leaves the called copy in charge")
 
     def test_record_says_what_the_doorbell_did(self):
         def recorded(name):

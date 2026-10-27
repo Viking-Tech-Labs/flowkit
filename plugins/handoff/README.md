@@ -44,6 +44,12 @@ your phone. Two drivers, set once with `/handoff:setup`. The tmux driver:
 Outside tmux nothing launches: the close prints the launch line under FOR ME and records the
 prompt as pending. After a launch the closing session leaves the repo alone.
 
+Whichever copy of `flowkit-spawn` is called, the installed release answers: a session keeps the
+plugin directory it started with, and an older cache directory can sit before the newest on the
+PATH, so a copy older than the one `installed_plugins.json` names hands over to that one
+(`--dry-run` says which copy answered). A close in a session started before a release spawns
+with the newest release anyway; only the skill text waits for a restart.
+
 The background driver (`driver=background`) starts the session with `claude --bg`, Claude's own
 background sessions, so no tmux is needed:
 

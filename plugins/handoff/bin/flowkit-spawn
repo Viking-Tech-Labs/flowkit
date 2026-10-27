@@ -44,6 +44,31 @@
 #   SPAWNED driver=background id=<id> story=<slug> name=<name> rc=<url|pending> prompt=<file>
 set -euo pipefail
 
+# The installed release answers, whichever copy was called: a session keeps the plugin
+# directory it started with, and an older cache directory can sit before the newest on the
+# PATH. A copy older than the one installed_plugins.json names hands over to it, once.
+me="$(cd "$(dirname "$0")/.." && pwd -P)"
+newer="$(python3 - "$me" <<'EOF' 2>/dev/null || true
+import json, os, sys
+own = sys.argv[1]
+conf = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+def version(root):
+    with open(os.path.join(root, ".claude-plugin", "plugin.json")) as f:
+        return tuple(int(n) for n in json.load(f)["version"].split("."))
+try:
+    with open(os.path.join(conf, "plugins", "installed_plugins.json")) as f:
+        installed = os.path.realpath(json.load(f)["plugins"]["handoff@flowkit"][0]["installPath"])
+    if installed != own and version(installed) > version(own):
+        print(installed)
+except Exception:
+    pass
+EOF
+)"
+if [ -z "${FLOWKIT_SPAWN_REEXEC:-}" ] && [ -n "$newer" ] && [ -x "$newer/bin/flowkit-spawn" ]; then
+  FLOWKIT_SPAWN_REEXEC=1 exec "$newer/bin/flowkit-spawn" "$@"
+fi
+copy="$me/bin/flowkit-spawn${FLOWKIT_SPAWN_REEXEC:+ (the installed release, in place of the copy called)}"
+
 conf="${XDG_CONFIG_HOME:-$HOME/.config}/flowkit/handoff.conf"
 setting() { [ -f "$conf" ] && sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$conf" | tail -1 | sed 's/[[:space:]]*$//'; }
 driver="$(setting driver || true)"; driver="${driver:-tmux}"
@@ -299,6 +324,7 @@ sys.exit(0 if any(a.get(sys.argv[1]) == sys.argv[2] for a in json.load(sys.stdin
   start_reporter=0
   [ "$reporter" -eq 1 ] && ! listed name "$slug-report" --all && start_reporter=1
   if [ "$dry" -eq 1 ]; then
+    echo "copy:   $copy"
     echo "driver: background"
     echo "story:  $slug$([ "$start_reporter" -eq 1 ] && echo " (starts $slug-report first)")"
     echo "repo:   $repo"
@@ -322,6 +348,7 @@ sys.exit(0 if any(a.get(sys.argv[1]) == sys.argv[2] for a in json.load(sys.stdin
 fi
 
 if [ "$dry" -eq 1 ]; then
+  echo "copy:   $copy"
   rwhere="in slot 1"; [ -n "$new_tab" ] || rwhere="in a pane after the last"
   echo "story:  $slug${rpane:+ (starts $slug-report $rwhere)}"
   echo "tab:    ${new_tab:+new tab $new_tab after the last one}${win:+$(tm display-message -p -t "$win" '#{window_name}')}${claim:+ (becomes tab $part of the story)}"
