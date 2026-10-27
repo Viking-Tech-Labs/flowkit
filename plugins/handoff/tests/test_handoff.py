@@ -83,6 +83,49 @@ class Handoff(unittest.TestCase):
         conf.write_text("chain_end=ship\n")
         self.assertIn("chain-end: ship (not one of branch, draft-mr, mr-ready, merge)", state())
 
+    def test_state_prints_the_report_to_of_the_conf(self):
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp)
+        conf = self.tmp / "flowkit" / "handoff.conf"
+        conf.parent.mkdir()
+        state = lambda: self.handoff("state", str(self.tmp / "data"), str(repo)).stdout
+        self.assertIn("report-to: off\n", state())
+        conf.write_text("driver=tmux\nreport_to=on\n")
+        self.assertIn("report-to: on\n", state())
+        conf.write_text("report_to=billing-hub\n")
+        self.assertIn("report-to: billing-hub\n", state())
+
+    def test_self_reads_the_sessions_file_then_the_agents_list(self):
+        sessions = self.tmp / "claude" / "sessions"
+        sessions.mkdir()
+        (sessions / "4242.json").write_text(json.dumps({"pid": 4242, "sessionId": "sid-1", "name": "billing-s2"}))
+        self.env["CLAUDE_PID"] = "4242"
+        self.assertEqual(self.handoff("self").stdout, "name: billing-s2\nid: -\nsession: sid-1\n")
+        self.env["CLAUDE_PID"] = "4243"
+        out = self.handoff("self")
+        self.assertEqual(out.returncode, 4)
+        self.assertIn("name it with /rename", out.stderr)
+        self.agents([{"kind": "interactive", "name": "billing-hub", "pid": os.getpid(), "sessionId": "sid-2"}])
+        self.assertEqual(self.handoff("self").stdout, "name: billing-hub\nid: -\nsession: sid-2\n",
+                         "the agents row of a parent pid, when the sessions file has no name")
+
+    def test_save_prompt_puts_the_report_to_line_in_the_header(self):
+        store = self.tmp / "claude" / "spawned"
+        brief = "Repo: /r   Session: s2   Story: billing\nModel: opus\n\nToday: review it\n"
+        out = self.handoff("save-prompt", "s2", "--report-to", "billing-hub", stdin=brief)
+        self.assertEqual(out.stdout, f"{store / 's2.md'}\n")
+        with_line = "Repo: /r   Session: s2   Story: billing   Report-to: billing-hub\nModel: opus\n\nToday: review it\n"
+        self.assertEqual((store / "s2.md").read_text(), with_line)
+        self.handoff("save-prompt", "s3", "--report-to", "billing-hub", stdin="review the branch\n")
+        self.assertEqual((store / "s3.md").read_text(), "Report-to: billing-hub\n\nreview the branch\n")
+        for text in (with_line, 'Task\n\nREPORTING: SendMessage to "hub" when DONE\n'):
+            self.handoff("save-prompt", "s4", "--report-to", "other", stdin=text)
+            self.assertEqual((store / "s4.md").read_text(), text, "a prompt that already reports is left as it is")
+        self.handoff("save-prompt", "s5", stdin=brief)
+        self.assertEqual((store / "s5.md").read_text(), brief, "without the option, nothing is added")
+
     def test_chain_end_lives_in_the_story_header(self):
         story = self.tmp / "claude" / "stories" / "my-story.md"
         self.assertEqual(self.handoff("chain-end", "My Story").stdout, "none\n")

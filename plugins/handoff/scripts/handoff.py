@@ -4,7 +4,10 @@ saved prompts and story files. The skills call this with plain arguments; nothin
 
   handoff.py state <data-dir> <repo>             what a close needs to know, one line each
   handoff.py pickup-doc <data-dir> <repo> <doc>  remember the repo's pick-up doc
-  handoff.py save-prompt <name>                  stdin -> ~/.claude/spawned/<name>.md
+  handoff.py save-prompt <name> [--report-to <session>]
+                                                 stdin -> ~/.claude/spawned/<name>.md; with a session,
+                                                 `Report-to: <session>` goes into the prompt's header
+  handoff.py self                                this session's name (what a helper's Report-to line names)
   handoff.py record <story>                      stdin (first line `## <name> · YYYY-MM-DD HH:MM`) appended
                                                  to ~/.claude/stories/<slug>.md (the story slugified as
                                                  flowkit-spawn does), then the reporter is told `closed <name>`
@@ -276,6 +279,7 @@ def state(data, repo):
     print(f"away: since {since}" if since else "away: off")
     print(f"spawn-driver: {setting('driver', 'tmux')}")
     print(f"chain-end: {chain_end_conf()}")
+    print(f"report-to: {setting('report_to', 'off')}")
     print(f"spawned-dir: {SPAWNED}")
     print(f"stories-dir: {STORIES}")
 
@@ -292,11 +296,54 @@ def pickup_doc(data, repo, doc):
     print(f"pickup-doc: {rel} (remembered for {root})")
 
 
-def save_prompt(name):
+def save_prompt(name, report_to=None):
     SPAWNED.mkdir(parents=True, exist_ok=True)
     path = SPAWNED / f"{safe(name, 'the session name')}.md"
-    path.write_text(sys.stdin.read().rstrip("\n") + "\n")
+    text = sys.stdin.read().rstrip("\n") + "\n"
+    path.write_text(with_report_to(text, report_to) if report_to else text)
     print(path)
+
+
+def with_report_to(text, session):
+    """The prompt with `Report-to: <session>` in its header: on the `Repo:` line of a brief, else as a
+    first line of its own. A header that already names one, or a coordinator's REPORTING line
+    anywhere, leaves the text as it is."""
+    header = text.split("\n\n", 1)[0]
+    if re.search(r"(^|\s)Report-to:", header) or re.search(r"^REPORTING\b", text, re.M):
+        return text
+    first, sep, rest = text.partition("\n")
+    if first.startswith("Repo:"):
+        return f"{first}   Report-to: {session}{sep}{rest}"
+    return f"Report-to: {session}\n\n{text}"
+
+
+def whoami():
+    """This session's name, id and session id: `~/.claude/sessions/$CLAUDE_PID.json` (claude writes it
+    at start-up, so a live pid's file is its own), else the `claude agents --json` row of the nearest
+    parent pid (the Bash tool's shell is a child of the claude process, maybe nested)."""
+    info = session_file(os.environ.get("CLAUDE_PID", ""))
+    if not info.get("name"):
+        try:
+            rows = agents_json()
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            rows = []
+        by_pid = {r["pid"]: r for r in rows if isinstance(r, dict) and r.get("pid")}
+        ps = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+        parents = {int(a): int(b) for a, b in (row.split() for row in ps.splitlines() if len(row.split()) == 2)}
+        pid = os.getppid()
+        for _ in range(8):
+            if pid in by_pid:
+                info = by_pid[pid]
+                break
+            pid = parents.get(pid, 0)
+            if pid <= 1:
+                break
+    if not info.get("name"):
+        print("this session is not listed by `claude agents`; name it with /rename and retry", file=sys.stderr)
+        sys.exit(4)
+    print(f"name: {info['name']}")
+    print(f"id: {info.get('id') or '-'}")
+    print(f"session: {info.get('sessionId') or '-'}")
 
 
 def reachable():
@@ -308,13 +355,14 @@ def reachable():
     return bool(away_since()) or awake
 
 
-def session_file(pid, sid):
-    """~/.claude/sessions/<pid>.json, only while it is still this session's: pids are reused."""
+def session_file(pid, sid=None):
+    """~/.claude/sessions/<pid>.json, with a sid only while it is still that session's: pids are
+    reused."""
     try:
         data = json.loads((CLAUDE / "sessions" / f"{pid}.json").read_text())
     except (OSError, ValueError, TypeError):
         return {}
-    return data if isinstance(data, dict) and data.get("sessionId") == sid else {}
+    return data if isinstance(data, dict) and (sid is None or data.get("sessionId") == sid) else {}
 
 
 def retry_record(sid):
@@ -851,8 +899,10 @@ def main(argv):
         state(*args)
     elif cmd == "pickup-doc" and len(args) == 3:
         pickup_doc(*args)
-    elif cmd == "save-prompt" and len(args) == 1:
-        save_prompt(*args)
+    elif cmd == "save-prompt" and (len(args) == 1 or (len(args) == 3 and args[1] == "--report-to")):
+        save_prompt(args[0], *args[2:])
+    elif cmd == "self" and not args:
+        whoami()
     elif cmd == "record" and len(args) == 1:
         record(*args)
     elif cmd == "chain-end" and len(args) in (1, 2):
