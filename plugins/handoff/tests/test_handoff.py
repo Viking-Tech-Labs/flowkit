@@ -97,6 +97,21 @@ class Handoff(unittest.TestCase):
         self.assertIn("\n## s1 · 2026-10-27 12:00\nSession: x · Repo: /r\nNext: none\n", text)
         self.assertEqual(self.handoff("chain-end", "my-story", "   ").returncode, 1)
 
+    def test_record_wants_a_close_heading_then_rings_in_one_call(self):
+        story = self.tmp / "claude" / "stories" / "my-story.md"
+        out = self.handoff("record", "my-story", stdin="closed without a heading\nDONE\n- x\n")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("## <session name> · YYYY-MM-DD HH:MM", out.stderr)
+        self.assertFalse(story.exists(), "a refused record writes nothing")
+        self.agents([{"kind": "interactive", "name": "my-story-report", "pid": os.getpid(), "status": "idle"}])
+        self.panes(f"{os.getppid()} %7")
+        out = self.handoff("record", "my-story", stdin="## s1 · 2026-10-27 12:00\nSession: x · Repo: /r\nNext: none\n")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertTrue(story.read_text().startswith("# my-story\n\n## s1 · 2026-10-27 12:00\n"))
+        typed = [l for l in self.calls.read_text().splitlines() if "send-keys" in l]
+        self.assertEqual(len(typed), 1, typed)
+        self.assertRegex(typed[0], r"-t %7 C-u ; send-keys -t %7 -l closed s1 ; run-shell sleep 0.5 ; send-keys -t %7 Enter$")
+
     def test_nudge_sorts_the_waiting_sessions(self):
         me, shell = os.getpid(), os.getppid()
         self.agents([

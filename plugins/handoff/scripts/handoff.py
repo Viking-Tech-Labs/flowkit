@@ -5,9 +5,9 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py state <data-dir> <repo>             what a close needs to know, one line each
   handoff.py pickup-doc <data-dir> <repo> <doc>  remember the repo's pick-up doc
   handoff.py save-prompt <name>                  stdin -> ~/.claude/spawned/<name>.md
-  handoff.py record <story>                      stdin appended to ~/.claude/stories/<slug>.md (the
-                                                 story slugified as flowkit-spawn does), then the
-                                                 story's reporter is told `closed <name>`
+  handoff.py record <story>                      stdin (first line `## <name> · YYYY-MM-DD HH:MM`) appended
+                                                 to ~/.claude/stories/<slug>.md (the story slugified as
+                                                 flowkit-spawn does), then the reporter is told `closed <name>`
   handoff.py chain-end <story> [<value|words>]   the story file's `Chain end:` line (what the chain's last
                                                  slice leaves behind): print it, or none; with a chain_end=
                                                  value or your own words, write it into the header
@@ -596,9 +596,9 @@ def ring(slug, name):
         found = reporter_pane(agents, panes, parents, f"{slug}-report")
         if found is None or found[1] == "waiting":
             return
-        tmux("send-keys", "-t", found[0], "C-u")
-        tmux("send-keys", "-t", found[0], "-l", f"closed {name}")
-        tmux("send-keys", "-t", found[0], "Enter")
+        # one tmux call, as continue_session: nothing else typing into panes lands in between
+        tmux("send-keys", "-t", found[0], "C-u", ";", "send-keys", "-t", found[0], "-l", f"closed {name}",
+             ";", "run-shell", "sleep 0.5", ";", "send-keys", "-t", found[0], "Enter")
     except Exception:  # the record is already written; a doorbell never fails the close
         return
 
@@ -610,12 +610,15 @@ def record(story):
     text = sys.stdin.read().strip("\n")
     if not text:
         fail("nothing to record: the close goes on stdin")
+    section = re.match(r"## (.+?) · \d{4}-\d{2}-\d{2} \d{2}:\d{2}\s*$", text.splitlines()[0])
+    if not section:  # the heading the reporter, the board and the tmux kit read a close by
+        fail("nothing recorded: the first line must be `## <session name> · YYYY-MM-DD HH:MM`, "
+             f"not {text.splitlines()[0]!r}")
     head = "" if path.exists() else f"# {slug}\n"
     with path.open("a") as f:
         f.write(f"{head}\n{text}\n")
     print(path)
-    section = re.match(r"## (.+?) · \d{4}-\d{2}-\d{2} \d{2}:\d{2}\s*$", text.splitlines()[0])
-    if section and section.group(1) != "Final report":
+    if section.group(1) != "Final report":
         ring(slug, section.group(1))
 
 
