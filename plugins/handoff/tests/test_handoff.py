@@ -180,6 +180,63 @@ class Handoff(unittest.TestCase):
         self.assertRegex(copy, rf"^{re.escape(str(store))}/s2-\d{{8}}-\d{{6}}\.md$")
         self.assertIn(f'"$(cat {copy})"', out.stdout)
 
+    def spawn_in_tmux(self, exits):
+        """A throwaway tmux server whose one pane runs bash with a fake `claude` first on its PATH:
+        the first `exits` launches exit 1 at once, the next writes its pid and sleeps; `claude
+        agents --json` lists that pid once the file is there. Returns the pane id and the run."""
+        repo = self.spawn_repo()
+        (self.tmp / "flowkit" / "handoff.conf").write_text("driver=tmux\nreporter=off\n")
+        (self.tmp / "bin" / "tmux").unlink()
+        pidfile, launches = self.tmp / "claude.pid", self.tmp / "launches"
+        fake = self.tmp / "bin" / "claude"
+        fake.write_text(
+            "#!/bin/sh\n"
+            f"if [ \"$1\" = agents ]; then\n"
+            f"  if [ -f {pidfile} ]; then printf '[{{\"name\":\"s2\",\"pid\":%s,\"kind\":\"interactive\","
+            f"\"status\":\"idle\",\"cwd\":\"{repo}\"}}]' \"$(cat {pidfile})\"; else echo '[]'; fi\n"
+            "  exit 0\n"
+            "fi\n"
+            f"echo launch >> {launches}\n"
+            f"if [ \"$(wc -l < {launches})\" -le {exits} ]; then echo 'claude: boom' >&2; exit 1; fi\n"
+            f"echo $$ > {pidfile}\n"
+            "exec sleep 30\n")
+        fake.chmod(0o755)
+        sock = f"flowkit-test-{os.getpid()}"
+        real = lambda *a: subprocess.run(["tmux", "-L", sock, *a], capture_output=True, text=True)
+        self.addCleanup(real, "kill-server")
+        real("-f", "/dev/null", "new-session", "-d", "-x", "200", "-y", "50", "/bin/bash --noprofile --norc")
+        pane = real("list-panes", "-F", "#{pane_id}").stdout.split()[0]
+        # Typed, not `new-session -e`: tmux starts the command through the user's shell, whose rc
+        # files rewrite PATH. The pane must never reach the real claude.
+        which = self.tmp / "which"
+        real("send-keys", "-t", pane, f"export PATH={self.tmp / 'bin'}:$PATH; command -v claude > {which}.tmp && mv {which}.tmp {which}; clear", "Enter")
+        deadline = time.time() + 5
+        while time.time() < deadline and not which.exists():
+            time.sleep(0.05)
+        self.assertEqual(which.read_text().strip(), str(fake), "the pane sees the fake claude")
+        prompt = self.tmp / "p.md"
+        prompt.write_text("hi\n")
+        out = subprocess.run([str(SPAWN_BIN), "--tmux-socket", sock, "--pane", pane, "--no-rc", "--repo", str(repo),
+                              "--name", "s2", str(prompt)], capture_output=True, text=True, env=self.env)
+        return pane, out, launches
+
+    @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+    def test_spawn_types_the_launch_again_when_claude_exits_at_start_up(self):
+        pane, out, launches = self.spawn_in_tmux(exits=1)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertRegex(out.stdout, rf"^SPAWNED pane=\d+ id={pane} tab=\S+ story=s2 name=s2 rc=off prompt=\S+ created=0 try=2\n$")
+        self.assertEqual(out.stderr, f"warning: session 's2' exited at start-up in {pane}; typed again\n")
+        self.assertEqual(launches.read_text(), "launch\nlaunch\n")
+
+    @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+    def test_spawn_gives_up_when_claude_exits_twice(self):
+        pane, out, launches = self.spawn_in_tmux(exits=2)
+        self.assertEqual(out.returncode, 10)
+        self.assertEqual(out.stdout, "", "no SPAWNED line")
+        self.assertEqual(out.stderr, f"warning: session 's2' exited at start-up in {pane}; typed again\n"
+                         f"session 's2' exited twice at start-up in pane {pane}; its output is in the pane\n")
+        self.assertEqual(launches.read_text(), "launch\nlaunch\n")
+
     def test_refresh_prunes_the_old_prompt_copies(self):
         self.env["XDG_CONFIG_HOME"] = str(self.tmp)  # no installed kit in the sandbox: refresh copies nothing
         store = self.tmp / "claude" / "spawned"

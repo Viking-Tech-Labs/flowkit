@@ -35,10 +35,12 @@
 # Exit: 2 bad arguments · 3 no tmux to launch in (prints the command to run by hand) ·
 #       4 a session of that name runs · 5 --pane is busy · 6 the repo has uncommitted changes ·
 #       7 the driver is not available · 8 the folder is not trusted yet (background: run
-#       `claude` there once and accept the prompt) · 9 `claude --bg` failed (its output printed)
-# Last lines, machine-readable:
-#   REPORTER pane=<n> id=<%id> tab=<tab> name=<slug>-report rc=<url|pending>   (reporter only)
-#   SPAWNED pane=<n> id=<%id> tab=<tab> story=<slug> name=<name> rc=<url|pending> prompt=<file> created=<0|1>
+#       `claude` there once and accept the prompt) · 9 `claude --bg` failed (its output printed) ·
+#       10 claude exited twice at start-up (tmux: the launch is typed once more when the pane is
+#       a bare shell again within the 15 s; its output is in the pane)
+# Last lines, machine-readable (try=2 when the launch was typed a second time):
+#   REPORTER pane=<n> id=<%id> tab=<tab> name=<slug>-report rc=<url|pending> try=<1|2>   (reporter only)
+#   SPAWNED pane=<n> id=<%id> tab=<tab> story=<slug> name=<name> rc=<url|pending> prompt=<file> created=<0|1> try=<1|2>
 # background driver, <id> being the id `claude attach`, `logs` and `stop` take:
 #   REPORTER driver=background id=<id> name=<slug>-report rc=<url|pending>   (reporter only)
 #   SPAWNED driver=background id=<id> story=<slug> name=<name> rc=<url|pending> prompt=<file>
@@ -95,7 +97,7 @@ while [ $# -gt 0 ]; do
     --dry-run) dry=1; shift ;;
     --tmux-socket) socket="$2"; shift 2 ;;
     --tmux-session) sess="$2"; shift 2 ;;
-    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) prompt="$1"; shift ;;
   esac
@@ -175,14 +177,18 @@ fi
 
 # Refusal 1: the new session shares this working tree; uncommitted changes mean the session
 # spawning it has not landed its work. An untracked `.claude/` is not work: EnterWorktree keeps a
-# session's worktrees under `.claude/worktrees/`, and nothing ignores them.
-if [ "$force" -eq 0 ] && [ "$single" -eq 0 ] && git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# session's worktrees under `.claude/worktrees/`, and nothing ignores them. Run again before a
+# launch is typed a second time (start).
+clean_tree() {
+  local dirty
+  [ "$force" -eq 0 ] && [ "$single" -eq 0 ] && git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   dirty="$(git -C "$repo" status --porcelain 2>/dev/null | grep -v '^?? \.claude/' | head -5 || true)"
   if [ -n "$dirty" ]; then
     printf 'repo has uncommitted changes; commit them first (or --force):\n%s\n' "$dirty" >&2
     exit 6
   fi
-fi
+}
+clean_tree
 
 # Refusal 2: a live session of that name, as `claude agents` lists it or as a pane title
 # (Claude shows its --name there behind a status glyph, e.g. "✳ billing-s3").
@@ -205,13 +211,17 @@ running() {
   done < <(tm list-panes -a -F '#{pane_id} #{pane_current_command} #{pane_title}')
   return 1
 }
+no_namesake() { # name: exit 4 when a session of that name runs; run again before a second launch is typed
+  local found
+  if [ "$force" -eq 0 ] && found="$(running "$1")"; then
+    echo "a session named '$1' is already running ($found); pass --force to spawn another" >&2
+    exit 4
+  fi
+}
 if [ "$single" -eq 1 ]; then
   base="$name"; n=2
   while running "$name" >/dev/null; do name="$base-$n"; n=$((n + 1)); done
-elif [ "$force" -eq 0 ] && found="$(running "$name")"; then
-  echo "a session named '$name' is already running ($found); pass --force to spawn another" >&2
-  exit 4
-fi
+else no_namesake "$name"; fi
 
 idle_pane() { # first idle shell pane of a window that is not this pane
   local pid pcmd pdead pmode
@@ -395,22 +405,47 @@ fi
 
 # Types the launch into a pane, then waits up to 15 s until `claude agents` lists a session of
 # that name under the pane's shell and Remote Control has printed its link, 30 s more for the
-# link alone. Prints the link, or "pending". Never types /remote-control: with the flag passed
-# that opens the Remote Control panel, which holds back background-task results while open.
-start() { # pane command session-name
-  local up=0 rcurl="" screen shell_pid pid
-  shell_pid="$(tm display-message -p -t "$1" '#{pane_pid}')"
+# link alone. Sets rcurl to the link, "pending" or "off", and try to 1 or 2: a pane that is a
+# bare shell again within the 15 s with no session of the name listed means claude exited at
+# start-up, so the launch is typed once more into that pane, after refusals 1 and 2 pass again;
+# a second exit is exit 10, the output left in the pane. A pane still running something unlisted
+# at 15 s (a prompt, a slow start) gets the warning, never a second launch. Never types
+# /remote-control: with the flag passed that opens the Remote Control panel, which holds back
+# background-task results while open.
+type_launch() { # pane command
   tm set-option -p -t "$1" @flowkit_born "$(date +%s)" # the story closer leaves a starting pane alone
   tm send-keys -t "$1" C-u # anything half-typed would prefix the command
   tm send-keys -t "$1" "cd '$repo' && $2" Enter
-  for _ in $(seq 1 15); do
-    sleep 1
+}
+start() { # pane command session-name
+  local up=0 seen=0 i=0 screen shell_pid pid pcmd
+  shell_pid="$(tm display-message -p -t "$1" '#{pane_pid}')"
+  rcurl=""; try=1
+  type_launch "$1" "$2"
+  while [ "$i" -lt 15 ]; do
+    i=$((i + 1)); sleep 1
     screen="$(tm capture-pane -p -J -S -80 -t "$1" 2>/dev/null || true)"
     for pid in $(sessions | awk -v n="$3" '$2 == n && $1 != "-" { print $1 }'); do
       [ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$shell_pid" ] && up=1
     done
     rcurl="$(printf '%s' "$screen" | grep -o 'https://claude.ai/code/session_[A-Za-z0-9]*' | head -1 || true)"
     [ "$up" -eq 1 ] && { [ "$rc" -eq 0 ] || [ -n "$rcurl" ]; } && break
+    [ "$up" -eq 0 ] || continue
+    # The shell again, once claude was seen running or from the third second on (right after
+    # Enter the pane can still read as the shell), and the launch no longer on the screen (a
+    # shell slow to start has it typed ahead, unread; `clear` wipes it once it runs).
+    pcmd="$(tm display-message -p -t "$1" '#{pane_current_command}')"
+    if ! is_shell "$pcmd"; then seen=1; continue; fi
+    { [ "$seen" -eq 1 ] || [ "$i" -ge 3 ]; } || continue
+    tm capture-pane -p -J -t "$1" 2>/dev/null | grep -qF -- "--name '$3'" && continue
+    if [ "$try" -eq 2 ]; then
+      echo "session '$3' exited twice at start-up in pane $1; its output is in the pane" >&2
+      exit 10
+    fi
+    agents="$(sessions)"; no_namesake "$3"; clean_tree
+    echo "warning: session '$3' exited at start-up in $1; typed again" >&2
+    try=2; i=0; seen=0
+    type_launch "$1" "$2"
   done
   if [ "$up" -eq 1 ] && [ "$rc" -eq 1 ] && [ -z "$rcurl" ]; then
     for _ in $(seq 1 30); do
@@ -420,19 +455,19 @@ start() { # pane command session-name
     done
   fi
   [ "$up" -eq 1 ] || echo "warning: no session '$3' came up in $1 within 15s; check the pane (a folder trust prompt?)" >&2
-  if [ "$rc" -eq 0 ]; then printf off; else printf %s "${rcurl:-pending}"; fi
+  if [ "$rc" -eq 0 ]; then rcurl=off; else rcurl="${rcurl:-pending}"; fi
 }
 
 # The reporter collects the story's closes from its story file and answers "what is going on".
+# Its line is printed before the session starts: an exit 10 there still says a reporter runs.
+tab="$(tm display-message -p -t "$pane" '#{window_name}')"
 if [ -n "$rpane" ]; then
   stories="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/stories"; mkdir -p "$stories"
   [ -f "$stories/$slug.md" ] || printf '# %s\n' "$slug" > "$stories/$slug.md"
   rprompt="$store/${slug}-report-${stamp}.md"
   sed -e "s/<slug>/$slug/g" "$(dirname "$0")/../scripts/reporter.md" > "$rprompt"
-  rurl="$(start "$rpane" "clear; claude ${base}--model sonnet --name '$slug-report' \"\$(cat $rprompt)\"" "$slug-report")"
+  start "$rpane" "clear; claude ${base}--model sonnet --name '$slug-report' \"\$(cat $rprompt)\"" "$slug-report"
+  echo "REPORTER pane=$(tm display-message -p -t "$rpane" '#{pane_index}') id=$rpane tab=$tab name=$slug-report rc=$rcurl try=$try"
 fi
-rcurl="$(start "$pane" "$launch" "$name")"
-
-tab="$(tm display-message -p -t "$pane" '#{window_name}')"
-[ -n "$rpane" ] && echo "REPORTER pane=$(tm display-message -p -t "$rpane" '#{pane_index}') id=$rpane tab=$tab name=$slug-report rc=$rurl"
-echo "SPAWNED pane=$(tm display-message -p -t "$pane" '#{pane_index}') id=$pane tab=$tab story=$slug name=$name rc=$rcurl prompt=${prompt_copy:--} created=$created"
+start "$pane" "$launch" "$name"
+echo "SPAWNED pane=$(tm display-message -p -t "$pane" '#{pane_index}') id=$pane tab=$tab story=$slug name=$name rc=$rcurl prompt=${prompt_copy:--} created=$created try=$try"
