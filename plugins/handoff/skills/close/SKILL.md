@@ -122,20 +122,32 @@ other session still uses them, and ends with what is ready for the user to try i
       `--story` is this session's `Story:` slug (step 10); leave it out when there is none. Pass
       the model and effort of the prompt as they are, `max` included; leave out what the prompt
       leaves out. The launch driver is `spawn-driver` in `state` (set in
-      `~/.config/flowkit/handoff.conf`); `flowkit-spawn` reads it itself.
+      `~/.config/flowkit/handoff.conf`); `flowkit-spawn` reads it itself. Run it with a
+      5-minute Bash timeout: two launches (the reporter, then the session), each typed once
+      more when claude exits at start-up, and the wait for the Remote Control link add up.
    3. Read its last line and exit code:
-      - `SPAWNED pane=<n> … tab=<tab> … rc=<url|pending>`: started. DONE gets one line: the
-        session's name, its tab and slot, its Remote Control link. A `REPORTER` line before it
-        means the story had no `<slug>-report` running and one was started (slot 1 of a new
-        tab, else a pane of its own; its slot is in the line). Step 10 writes
-        `Next: started <name>`. A `warning: no session … came up` before it means the command
-        was typed but the session did not confirm within 15 s, most often a folder-trust prompt
-        waiting for a yes: still `started`, plus a FOR ME step to look at that tab and slot.
-        Before anything else after that warning, look at `claude agents --json` and the pane
+      - `SPAWNED pane=<n> … tab=<tab> … rc=<url|pending> … try=<1|2>`: started. DONE gets one
+        line: the session's name, its tab and slot, its Remote Control link; with `try=2`
+        (claude exited at start-up once, stderr said `warning: session '<name>' exited at
+        start-up in <pane>; typed again`, and the second launch came up) that line adds
+        "launched at the second try". A `REPORTER` line before it means the story had no
+        `<slug>-report` running and one was started (slot 1 of a new tab, else a pane of its
+        own; its slot is in the line). Step 10 writes `Next: started <name>`. A `warning: no
+        session … came up` before it means the command was typed but the session did not
+        confirm within 15 s, most often a folder-trust prompt waiting for a yes: still
+        `started`, plus a FOR ME step to look at that tab and slot. Before anything else after
+        that warning, look at `claude agents --json` and the pane
         (`tmux capture-pane -p -t <id>`): the session is usually there, starting or at a prompt.
-        Relaunch, if at all, through `flowkit-spawn` again without `--pane`, never a second
-        launch of the same name typed by hand: a window opened by hand carries no story mark, so
-        it gets no labels, no autoclose and no reporter, and the chain runs unreported.
+        A pane at a shell may be relaunched through `flowkit-spawn` again without `--pane`
+        (refusal 2 guards against a namesake); a pane at a prompt is FOR ME; never a launch
+        typed by hand: a window opened by hand carries no story mark, so it gets no labels, no
+        autoclose and no reporter, and the chain runs unreported.
+      - exit 10, stderr `session '<name>' exited twice at start-up in pane <id>; its output is
+        in the pane`: the launch was typed twice and claude exited both times; nothing runs in
+        that pane (a `REPORTER` line before it means the reporter came up and runs). Say so
+        under OPEN, put the launch line under FOR ME naming the tab and slot ("tab <tab> slot
+        <n> is at a shell: claude exited twice, its output is in the pane"), and step 10 writes
+        `Next: pending <name>`.
       - `SPAWNED driver=background id=<id> … rc=<url|pending>`: started in the background.
         DONE gets one line: the session's name, `claude attach <name>` to open it, its Remote
         Control link. A `REPORTER driver=background` line before it means the story's reporter

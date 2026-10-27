@@ -37,6 +37,12 @@ your phone. Two drivers, set once with `/handoff:setup`. The tmux driver:
   EnterWorktree keeps a session's worktrees, does not count);
 - it waits until `claude agents` lists the new session and prints its Remote Control link; a
   session that does not come up in 15 seconds is most often waiting at a folder-trust prompt;
+- a claude that exits at start-up (a bad flag, a broken install: within those 15 seconds the
+  pane is a bare shell again and nothing is listed) gets the launch typed once more into the
+  same pane, after the same refusals, with `warning: session '<name>' exited at start-up in
+  <pane>; typed again` on stderr and `try=2` in the `SPAWNED` line; a second exit ends with exit
+  10, `session '<name>' exited twice at start-up in pane <id>; its output is in the pane`, no
+  session started, and the close records the prompt as pending with that pane under FOR ME;
 - with `reporter=on`, a launch that finds no `<story>-report` running starts one first, so a
   story whose reporter died gets a new one at its next launch: in slot 1 of a new story tab,
   else in a pane split after the last one of the session's window (slot 2 of a one-pane window
