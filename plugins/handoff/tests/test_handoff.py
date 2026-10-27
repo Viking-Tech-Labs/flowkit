@@ -112,6 +112,22 @@ class Handoff(unittest.TestCase):
         self.assertEqual(len(typed), 1, typed)
         self.assertRegex(typed[0], r"-t %7 C-u ; send-keys -t %7 -l closed s1 ; run-shell sleep 0.5 ; send-keys -t %7 Enter$")
 
+    def test_record_says_what_the_doorbell_did(self):
+        def recorded(name):
+            out = self.handoff("record", "my-story", stdin=f"## {name} · 2026-10-27 12:00\nSession: x · Repo: /r\nNext: none\n")
+            self.assertEqual(out.returncode, 0, out.stderr)
+            return out.stdout.splitlines()[1:]
+        self.assertEqual(recorded("s1"), ["reporter: none"])
+        self.agents([{"kind": "interactive", "name": "my-story-report", "pid": os.getpid(), "status": "waiting"}])
+        self.panes(f"{os.getppid()} %7")
+        self.assertEqual(recorded("s2"), ["reporter: waiting"])
+        self.agents([{"kind": "interactive", "name": "my-story-report", "pid": os.getpid(), "status": "idle"}])
+        self.assertEqual(recorded("s3"), ["reporter: rung"])
+        self.agents([{"kind": "background", "name": "my-story-report", "id": "b1", "sessionId": "B1", "status": "idle"}])
+        self.assertEqual(recorded("s4"), ["reporter: background"])
+        out = self.handoff("record", "my-story", stdin="## Final report · 2026-10-27 12:05\nall done\n")
+        self.assertEqual(out.stdout.splitlines()[1:], [], "a final report rings nobody")
+
     def test_nudge_sorts_the_waiting_sessions(self):
         me, shell = os.getpid(), os.getppid()
         self.agents([

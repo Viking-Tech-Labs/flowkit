@@ -123,10 +123,16 @@ other session still uses them, and ends with what is ready for the user to try i
    3. Read its last line and exit code:
       - `SPAWNED pane=<n> … tab=<tab> … rc=<url|pending>`: started. DONE gets one line: the
         session's name, its tab and slot, its Remote Control link. A `REPORTER` line before it
-        means the story's tab is new and its reporter sits in slot 1. Step 10 writes
+        means the story had no `<slug>-report` running and one was started (slot 1 of a new
+        tab, else a pane of its own; its slot is in the line). Step 10 writes
         `Next: started <name>`. A `warning: no session … came up` before it means the command
         was typed but the session did not confirm within 15 s, most often a folder-trust prompt
         waiting for a yes: still `started`, plus a FOR ME step to look at that tab and slot.
+        Before anything else after that warning, look at `claude agents --json` and the pane
+        (`tmux capture-pane -p -t <id>`): the session is usually there, starting or at a prompt.
+        Relaunch, if at all, through `flowkit-spawn` again without `--pane`, never a second
+        launch of the same name typed by hand: a window opened by hand carries no story mark, so
+        it gets no labels, no autoclose and no reporter, and the chain runs unreported.
       - `SPAWNED driver=background id=<id> … rc=<url|pending>`: started in the background.
         DONE gets one line: the session's name, `claude attach <name>` to open it, its Remote
         Control link. A `REPORTER driver=background` line before it means the story's reporter
@@ -160,4 +166,7 @@ other session still uses them, and ends with what is ready for the user to try i
     - `none` only when step 5 drafted nothing: no repo work is left on the story. `Next: none` on the last close, with none of the story's sessions still live,
     is what marks the story done. `handoff.py record` also types `closed <this session's name>`
     into the pane of the story's live `<slug>-report` session, so do not message it yourself;
-    without a reporter, the file is the record.
+    without a reporter, the file is the record. Its second line says what that doorbell did:
+    `reporter: rung`, `background` (woken), `waiting` (at a prompt, not rung) or `none` (no
+    reporter runs). `waiting` or `none` goes into the reply's DONE as one line, so a story
+    running without its reporter is seen; never start one by hand (the next spawn does).

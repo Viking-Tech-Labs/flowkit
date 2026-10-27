@@ -3,8 +3,9 @@
 # the launch driver set in ~/.config/flowkit/handoff.conf (driver=tmux or driver=background).
 #
 # tmux driver: one tab per story, up to 9 sessions tiled in launch order (1 top left, 2 to its
-# right, …), a 10th opens <story>-2. With reporter=on, the launch that opens a story's first tab
-# starts the story's reporter in slot 1 first (reporter.md next to this script's scripts/).
+# right, …), a 10th opens <story>-2. With reporter=on, a launch that finds no `<story>-report`
+# running starts one first (reporter.md next to this script's scripts/): in slot 1 of a new tab,
+# else in a pane split after the last one of the session's window.
 #
 # background driver: `claude --bg`, Claude's own background service; no tmux needed. The session
 # shows in `claude agents`, the board and Remote Control, and `claude attach <name>` opens it.
@@ -23,7 +24,8 @@
 #   --single               a one-off outside any story, in the shared adhoc tab: no reporter,
 #                          no dirty-tree refusal, a taken name gets -2, the prompt is optional
 #   --pane <%id>           use this pane (an idle shell) instead of the story's tab (tmux); a tab
-#                          of its own with no mark becomes the story's next tab, no reporter
+#                          of its own with no mark becomes the story's next tab; a reporter that
+#                          starts takes a pane split after the last one (slot 2 of a one-pane tab)
 #   --new                  always split a new pane instead of reusing an idle shell (tmux)
 #   --force                spawn even when a session of that name runs or the tree is dirty
 #   --dry-run              print the pick and the command, launch nothing
@@ -227,9 +229,11 @@ else
   if [ -z "$pane" ]; then
     part=$((parts + 1)); new_tab="$slug"; [ "$part" -gt 1 ] && new_tab="$slug-$part"
     pane="new"
-    [ "$part" -eq 1 ] && [ "$reporter" -eq 1 ] && ! running "$slug-report" >/dev/null && rpane="new"
   fi
 fi
+# The reporter: whenever the story has none running, not only on its first tab (a chain whose
+# reporter died ran nine slices unreported). Slot 1 of a new tab, else a pane after the last.
+[ "$driver" != background ] && [ "$reporter" -eq 1 ] && ! running "$slug-report" >/dev/null && rpane="new"
 
 # A copy of the prompt under a space-free path: safe to quote, and a record of what each pane
 # was started with.
@@ -318,7 +322,8 @@ sys.exit(0 if any(a.get(sys.argv[1]) == sys.argv[2] for a in json.load(sys.stdin
 fi
 
 if [ "$dry" -eq 1 ]; then
-  echo "story:  $slug${rpane:+ (starts $slug-report in slot 1)}"
+  rwhere="in slot 1"; [ -n "$new_tab" ] || rwhere="in a pane after the last"
+  echo "story:  $slug${rpane:+ (starts $slug-report $rwhere)}"
   echo "tab:    ${new_tab:+new tab $new_tab after the last one}${win:+$(tm display-message -p -t "$win" '#{window_name}')}${claim:+ (becomes tab $part of the story)}"
   echo "pane:   ${pane/#new/<new, tiled after the last pane>}"
   echo "repo:   $repo"
@@ -349,10 +354,12 @@ if [ -n "$new_tab" ]; then
   else pane="$first"; fi
   created=1
 elif [ "$pane" = "new" ]; then
+  [ "$rpane" = "new" ] && rpane="$(split_after_last "$win")"
   pane="$(split_after_last "$win")"
   created=1
-elif [ -n "$claim" ]; then
-  mark_tab "$claim"
+else
+  [ -n "$claim" ] && mark_tab "$claim"
+  [ "$rpane" = "new" ] && rpane="$(split_after_last "$win")"
 fi
 
 # Types the launch into a pane, then waits up to 15 s until `claude agents` lists a session of

@@ -574,19 +574,20 @@ def wake(slug, name, patience=0, sid=None):
 def ring(slug, name):
     """Tell the story's reporter `closed <name>`: a background one is woken with it as its prompt,
     a tmux one gets it typed into its pane when it is live and not waiting on a prompt. The file is
-    the record; this is only the doorbell, so a miss is silent."""
+    the record; this is only the doorbell, so a miss never fails the close. Returns what happened:
+    rung, background (woken), waiting (found, but at a prompt) or none (no reporter runs)."""
     if not shutil.which("claude"):
-        return
+        return "none"
     try:
         agents = agents_json("--all")
         if not isinstance(agents, list):
-            return
+            return "none"
         if any(isinstance(a, dict) and a.get("kind") == "background" and a.get("name") == f"{slug}-report"
                for a in agents):
             wake(slug, name)
-            return
+            return "background"
         if not shutil.which("tmux"):
-            return
+            return "none"
         panes = {}
         for line in tmux("list-panes", "-a", "-F", "#{pane_pid} #{pane_id}").stdout.splitlines():
             pid, pane = line.split()
@@ -594,13 +595,16 @@ def ring(slug, name):
         ps = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
         parents = {int(a): int(b) for a, b in (row.split() for row in ps.splitlines() if row.strip())}
         found = reporter_pane(agents, panes, parents, f"{slug}-report")
-        if found is None or found[1] == "waiting":
-            return
+        if found is None:
+            return "none"
+        if found[1] == "waiting":
+            return "waiting"
         # one tmux call, as continue_session: nothing else typing into panes lands in between
         tmux("send-keys", "-t", found[0], "C-u", ";", "send-keys", "-t", found[0], "-l", f"closed {name}",
              ";", "run-shell", "sleep 0.5", ";", "send-keys", "-t", found[0], "Enter")
+        return "rung"
     except Exception:  # the record is already written; a doorbell never fails the close
-        return
+        return "none"
 
 
 def record(story):
@@ -619,7 +623,7 @@ def record(story):
         f.write(f"{head}\n{text}\n")
     print(path)
     if section.group(1) != "Final report":
-        ring(slug, section.group(1))
+        print(f"reporter: {ring(slug, section.group(1))}")
 
 
 def chain_end_conf():

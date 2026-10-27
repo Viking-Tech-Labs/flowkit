@@ -35,7 +35,11 @@ your phone. Two drivers, set once with `/handoff:setup`. The tmux driver:
 - it refuses when a session of that name already runs or the repo has uncommitted changes, since
   two sessions on one working tree overwrite each other's work;
 - it waits until `claude agents` lists the new session and prints its Remote Control link; a
-  session that does not come up in 15 seconds is most often waiting at a folder-trust prompt.
+  session that does not come up in 15 seconds is most often waiting at a folder-trust prompt;
+- with `reporter=on`, a launch that finds no `<story>-report` running starts one first, so a
+  story whose reporter died gets a new one at its next launch: in slot 1 of a new story tab,
+  else in a pane split after the last one of the session's window (slot 2 of a one-pane window
+  handed over with `--pane`). Each close's record says `reporter: rung`, `waiting` or `none`.
 
 Outside tmux nothing launches: the close prints the launch line under FOR ME and records the
 prompt as pending. After a launch the closing session leaves the repo alone.
@@ -62,7 +66,7 @@ so an update or an uninstall keeps them, and readable by the scripts that run ou
 | Key | Default | Means |
 |---|---|---|
 | `driver` | `tmux` | How the next session starts: `tmux` (a tab per story) or `background` (`claude --bg`). |
-| `reporter` | `off` | `on` starts a `<story>-report` session in slot 1 of each new story tab (in the background with that driver): it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done. Each close rings it: `handoff.py record` types `closed <session>` into its pane, or wakes the background one with it. |
+| `reporter` | `off` | `on` starts a `<story>-report` session whenever a story's launch finds none running (in the background with that driver): it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done. Each close rings it: `handoff.py record` types `closed <session>` into its pane, or wakes the background one with it. |
 | `permission_mode` | empty | The `--permission-mode` of spawned sessions; empty keeps your default. A chain that runs while you are away needs a mode that does not stop to ask. |
 | `autoclose` | `off` | `on` lets the tmux kit's status-bar tick close a finished story's tab on its own (see "The tmux kit"). `/handoff:setup` offers it. |
 | `autoretry` | `off` | `on` lets a session an API error stopped carry on by itself while you are away (see "API errors"). `/handoff:setup` offers it. |
@@ -104,7 +108,8 @@ a pane it typed a launch into, less than 2 minutes ago is left alone, and the ti
 right before it kills (it lists the panes once and decides a `claude agents` later). `tmux
 set-option -w @flowkit_hold 1` in a tab keeps its story open; the adhoc tab and your own windows
 are never closed, except a one-pane window of your own that you hand `flowkit-spawn --pane`: that
-becomes the story's next tab and goes with the story.
+becomes the story's next tab and goes with the story. A reporter started in a window of your own
+(a tab with other panes in it, handed over with `--pane`) stays with that window.
 
 ## Being away
 
