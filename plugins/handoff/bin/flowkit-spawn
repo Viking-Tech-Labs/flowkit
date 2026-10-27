@@ -174,9 +174,10 @@ fi
 [ -n "$slug" ] || { echo "story '$story' has no letters or digits" >&2; exit 2; }
 
 # Refusal 1: the new session shares this working tree; uncommitted changes mean the session
-# spawning it has not landed its work.
+# spawning it has not landed its work. An untracked `.claude/` is not work: EnterWorktree keeps a
+# session's worktrees under `.claude/worktrees/`, and nothing ignores them.
 if [ "$force" -eq 0 ] && [ "$single" -eq 0 ] && git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  dirty="$(git -C "$repo" status --porcelain 2>/dev/null | head -5)"
+  dirty="$(git -C "$repo" status --porcelain 2>/dev/null | grep -v '^?? \.claude/' | head -5 || true)"
   if [ -n "$dirty" ]; then
     printf 'repo has uncommitted changes; commit them first (or --force):\n%s\n' "$dirty" >&2
     exit 6

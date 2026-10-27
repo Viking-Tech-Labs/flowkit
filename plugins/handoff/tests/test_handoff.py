@@ -130,6 +130,37 @@ class Handoff(unittest.TestCase):
         self.assertEqual(spawn("9.9.9"), "fake --dry-run --name s2 p.md reexec=1\n")
         self.assertNotIn("fake", spawn("0.0.1"), "an older install leaves the called copy in charge")
 
+    def spawn_repo(self):
+        """A git repo with one commit, and a conf that picks the background driver, so a --dry-run
+        needs no tmux and gets past the refusals to what it would run."""
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "init"], check=True)
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp)
+        (self.tmp / "flowkit").mkdir()
+        (self.tmp / "flowkit" / "handoff.conf").write_text("driver=background\n")
+        return repo
+
+    def spawn(self, *args):
+        return subprocess.run([str(SPAWN_BIN), "--dry-run", *args], capture_output=True, text=True, env=self.env)
+
+    def test_spawn_overlooks_an_untracked_claude_dir(self):
+        repo = self.spawn_repo()
+        (repo / ".claude" / "worktrees" / "x").mkdir(parents=True)
+        (repo / ".claude" / "worktrees" / "x" / "f").write_text("")
+        prompt = self.tmp / "p.md"
+        prompt.write_text("hi\n")
+        out = self.spawn("--repo", str(repo), "--name", "s2", str(prompt))
+        self.assertEqual((out.returncode, out.stderr), (0, ""))
+        self.assertIn("driver: background\n", out.stdout)
+        (repo / "work.txt").write_text("")
+        out = self.spawn("--repo", str(repo), "--name", "s2", str(prompt))
+        self.assertEqual(out.returncode, 6)
+        self.assertIn("?? work.txt", out.stderr)
+        self.assertNotIn(".claude", out.stderr)
+
     def test_record_says_what_the_doorbell_did(self):
         def recorded(name):
             out = self.handoff("record", "my-story", stdin=f"## {name} · 2026-10-27 12:00\nSession: x · Repo: /r\nNext: none\n")

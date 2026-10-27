@@ -33,7 +33,8 @@ your phone. Two drivers, set once with `/handoff:setup`. The tmux driver:
 - each story gets its own tab, named after the story; its sessions are tiled in launch order, up
   to 9, then a second tab `<story>-2`;
 - it refuses when a session of that name already runs or the repo has uncommitted changes, since
-  two sessions on one working tree overwrite each other's work;
+  two sessions on one working tree overwrite each other's work (an untracked `.claude/`, where
+  EnterWorktree keeps a session's worktrees, does not count);
 - it waits until `claude agents` lists the new session and prints its Remote Control link; a
   session that does not come up in 15 seconds is most often waiting at a folder-trust prompt;
 - with `reporter=on`, a launch that finds no `<story>-report` running starts one first, so a
