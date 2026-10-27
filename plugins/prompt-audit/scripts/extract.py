@@ -18,10 +18,11 @@ session looking typed (a prompt another session or a script wrote for you).
 
 <out-dir> receives prompts.jsonl (one line per user turn, with a `kind`), one <project>.txt per
 project (typed prompts only), projects.tsv (project, typed prompts, working directory) and
-window.json; the files the previous run wrote there are removed first. These files hold your
-prompts verbatim: <out-dir> must be a scratch directory, and the script refuses one inside a
-git repository. The summary never prints a secret: the scan
-reports where one sits, not its value.
+window.json; the files the previous run wrote there are removed first. A session resumed under a
+new id (its transcript ends with a continued-in marker, the new one holds a copy of its history)
+counts once, under the last id of the chain. These files hold your prompts verbatim: <out-dir>
+must be a scratch directory, and the script refuses one inside a git repository. The summary
+never prints a secret: the scan reports where one sits, not its value.
 
 Kinds:
   typed     typed, dictated, pasted or queued by you; the corpus
@@ -158,9 +159,11 @@ def run(a):
         if os.path.basename(name) == name and os.path.isfile(os.path.join(out, name)):
             os.remove(os.path.join(out, name))
 
-    rows, seen, secrets, cwds = [], set(), [], {}
-    for f in glob.glob(os.path.join(source, "*", "*.jsonl")):
+    rows, secrets, cwds, markers, transcripts = [], [], {}, {}, set()
+    for f in sorted(glob.glob(os.path.join(source, "*", "*.jsonl"))):
         proj = project(os.path.basename(os.path.dirname(f)))
+        own = os.path.splitext(os.path.basename(f))[0]
+        transcripts.add(own)
         named, first = False, True
         for line in open(f, encoding="utf-8", errors="replace"):
             try:
@@ -171,6 +174,8 @@ def run(a):
                 continue
             if d.get("type") == "agent-name":
                 named = True
+            elif d.get("type") == "continued-in" and d.get("continuedInSessionId"):
+                markers[d.get("sessionId") or own] = d["continuedInSessionId"]
             if d.get("type") != "user" or d.get("isMeta") or d.get("isSidechain") or d.get("isCompactSummary"):
                 continue
             if d.get("entrypoint") == "sdk-cli" or d.get("promptSource") == "sdk":
@@ -193,16 +198,55 @@ def run(a):
             else:
                 kind = "typed"
             first = first and not human
-            sid = d.get("sessionId", "")
-            if (sid, t) in seen:
-                continue
-            seen.add((sid, t))
-            if SECRET.search(t):
-                secrets.append((ts[:16], proj, sid, kind))
-            if d.get("cwd"):
-                cwds.setdefault(proj, d["cwd"])
-            rows.append({"ts": ts[:19], "project": proj, "session": sid, "kind": kind,
-                         "branch": d.get("gitBranch", ""), "chars": len(t), "text": t})
+            rows.append({"ts": ts[:19], "project": proj, "session": d.get("sessionId", ""), "kind": kind,
+                         "branch": d.get("gitBranch", ""), "chars": len(t), "text": t,
+                         "uuid": d.get("uuid") or f"{ts} {t}", "cwd": d.get("cwd")})
+
+    # A resumed session gets a new id and a copy of its history, and the original's transcript
+    # ends with a continued-in marker: its prompts belong to the last id of the chain whose
+    # transcript exists. Originals go before their continuations, so the original's row wins and
+    # a second row with the same uuid is a continuation's or a fork's copy. The (session, text)
+    # rule then still drops a prompt repeated in one session (a doorbell, an API-error continue).
+    def final(sid):
+        visited = set()
+        while sid in markers and markers[sid] in transcripts and sid not in visited:
+            visited.add(sid)
+            sid = markers[sid]
+        return sid
+
+    origins = {new: old for old, new in markers.items() if new in transcripts}
+
+    def depth(sid):
+        n, visited = 0, set()
+        while sid in origins and sid not in visited:
+            visited.add(sid)
+            sid, n = origins[sid], n + 1
+        return n
+
+    rows.sort(key=lambda r: depth(r["session"]))
+    kept, continued, merged, forks, seen, unique = {}, set(), 0, 0, set(), []
+    for r in rows:
+        sid = final(r["session"])
+        if sid != r["session"]:
+            continued.add(r["session"])
+        if r["uuid"] in kept:
+            if kept[r["uuid"]] == sid:
+                merged += 1
+            else:
+                forks += 1
+            continue
+        kept[r["uuid"]] = sid
+        r["session"] = sid
+        if (sid, r["text"]) in seen:
+            continue
+        seen.add((sid, r["text"]))
+        if SECRET.search(r["text"]):
+            secrets.append((r["ts"][:16], r["project"], sid, r["kind"]))
+        if r["cwd"]:
+            cwds.setdefault(r["project"], r["cwd"])
+        del r["uuid"], r["cwd"]
+        unique.append(r)
+    rows = unique
 
     rows.sort(key=lambda r: r["ts"])
     with open(os.path.join(out, "prompts.jsonl"), "w", encoding="utf-8") as handle:
@@ -236,6 +280,7 @@ def run(a):
     print(f"typed: {len(typed)} prompts, {window['sessions']} sessions, "
           f"median {int(statistics.median([r['chars'] for r in typed])) if typed else 0} chars, "
           f"{sum(r['chars'] < 120 for r in typed)} under 120")
+    print(f"continued sessions: {len(continued)} ({merged} prompts merged), fork copies dropped: {forks}")
     print("typed per project:", ", ".join(f"{p} {len(rs)}" for p, rs in ranked))
     cmds = collections.Counter(r["text"].split()[0] for r in rows if r["kind"] == "command")
     print("commands:", ", ".join(f"{c} {n}" for c, n in cmds.most_common(15)))

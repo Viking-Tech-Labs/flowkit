@@ -46,6 +46,11 @@ proposals back next time.
   when you ask, to a path you name or, with the `brain` plugin's vault, as a page there, and you
   are warned before it lands in a repository. A possible credential in a prompt is reported by
   session and time, never by value.
+- **A resumed session counts once.** Claude Code resumes a session under a new id with a copy of
+  its history and leaves a `continued-in` marker in the old transcript. The extract puts the
+  prompts under the last id of the chain and drops the copies; the summary says how many
+  (`continued sessions: N (M prompts merged), fork copies dropped: K`, the forks being copies that
+  share a prompt without a marker).
 
 ## Machine-drafted prompts
 
