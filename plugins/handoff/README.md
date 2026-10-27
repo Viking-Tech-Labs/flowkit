@@ -91,7 +91,8 @@ each tab that has sessions waiting on you, a one-word state after each story or 
 name (`3:my-story · running`), `prefix a` to list every Claude session and jump to one, and `prefix H` for the one-page cheat sheet (`tmux/cheatsheet.md`). The conf calls the
 helper at `~/.local/bin/flowkit-tmux`, a copy kept at the plugin's version by a session-start
 hook, because the plugin's own directory moves with every version; the hook does nothing until
-you install the kit. Put your own changes below the `source-file` line: a setting there wins.
+you install the kit. The tick answers from a 10-second cache, since tmux reruns a `#()` job at
+every redraw that falls in a new second, not every 15 seconds. Put your own changes below the `source-file` line: a setting there wins.
 Sessions started in the background have no pane and are not counted; `prefix a` lists them.
 
 The tab's word is its most urgent session's state, in this order: **needs you** (a question or a

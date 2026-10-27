@@ -2,6 +2,7 @@
 swaps its command runner for a stub that serves panes, windows and `claude agents`, and records the
 tmux writes, so nothing reaches a real tmux server or the user's files."""
 import contextlib
+import fcntl
 import importlib.machinery
 import io
 import importlib.util
@@ -30,12 +31,14 @@ class Labels(unittest.TestCase):
             (self.tmp / sub).mkdir(parents=True)
         self.ft = load()
         self.ft.CLAUDE = self.tmp
+        self.ft.CACHE = self.tmp / "status.json"
         self.ft.run = self.run_stub
         self.rows, self.pane_list, self.windows, self.writes = [], [], {}, []
-        self.later, self.listed = None, 0  # a second pane list, served from the second list-panes on
+        self.later, self.listed, self.asked = None, 0, 0  # a second pane list, served from the second list-panes on
 
     def run_stub(self, *cmd):
         if cmd[:2] == ("claude", "agents"):
+            self.asked += 1
             return json.dumps(self.rows)
         if cmd[0] == "ps":
             return ""
@@ -154,6 +157,50 @@ class Labels(unittest.TestCase):
     def test_a_label_goes_when_its_sessions_do(self):
         self.window("@1", "st", label="running")
         self.assertIsNone(self.label("@1"))
+
+
+class Cache(Labels):
+    """The status-bar job answers from its cache for 10 seconds, then asks `claude agents` again;
+    a run that overlaps another prints the cache; `list` always asks."""
+
+    def setUp(self):
+        super().setUp()
+        self.window("@1", "st")
+
+    def line(self):
+        self.writes.clear()
+        self.ft.closed.cache_clear()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.ft.status_line()
+        return out.getvalue()
+
+    def test_a_line_younger_than_ten_seconds_comes_from_the_cache(self):
+        self.session(1, status="waiting")
+        first = self.line()
+        self.assertIn("1 needs you", first)
+        self.assertEqual((self.asked, self.line(), self.asked), (1, first, 1))
+        stale = json.loads(self.ft.CACHE.read_text())
+        stale["at"] -= 11
+        self.ft.CACHE.write_text(json.dumps(stale))
+        self.assertEqual((self.line(), self.asked), (first, 2))
+
+    def test_an_overlapping_run_prints_the_cache_and_asks_nothing(self):
+        self.session(1, status="waiting")
+        self.ft.CACHE.write_text(json.dumps({"at": 0, "line": "stale"}))
+        with self.ft.CACHE.with_suffix(".lock").open("w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.assertEqual((self.line(), self.asked), ("stale", 0))
+        self.assertIn("1 needs you", self.line())
+        self.assertEqual(self.asked, 1)
+
+    def test_list_asks_every_time(self):
+        self.session(1, status="waiting")
+        self.line()
+        self.ft.input = lambda prompt="": ""
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.ft.list_sessions()
+            self.ft.list_sessions()
+        self.assertEqual(self.asked, 3)
 
 
 class Closer(Labels):

@@ -13,13 +13,17 @@ The kit's conf calls the copy at ~/.local/bin/flowkit-tmux, which the handoff pl
 its own version at every session start. A session is mapped to its pane through its parent
 processes, up to the pane's shell; background sessions have no pane and are listed apart.
 """
+import contextlib
+import fcntl
 import functools
+import io
 import json
 import os
 import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -41,6 +45,8 @@ BACKFILL = 15 * 60  # an unfinished story this quiet rings its reporter, who rec
 GRACE = 5 * 60  # the story file sits this long after its last write before the tab goes
 RING_EVERY = 5 * 60
 SPAWN_GRACE = 2 * 60  # a pane flowkit-spawn stamped @flowkit_born this recently is still starting its claude
+CACHE = Path(tempfile.gettempdir()) / f"flowkit-tmux-{os.getuid()}.json"  # the last status line and when
+FRESH = 10  # a status line this young is printed again without asking `claude agents`
 
 
 def run(*cmd):
@@ -307,6 +313,37 @@ def waiting():
         print(f"#[reverse] ⚑ {total} need{'s' if total == 1 else ''} you #[noreverse] ", end="")
 
 
+def status_line():
+    """`waiting` for the status bar. tmux reruns a #() job at every redraw that falls in a new
+    second, not every status-interval, so the line comes from the cache while it is younger than
+    FRESH seconds, and a run that overlaps another prints the cache too (the lock is never waited
+    for)."""
+    try:
+        cached = json.loads(CACHE.read_text())
+    except (OSError, ValueError):
+        cached = {}
+    if not isinstance(cached, dict):
+        cached = {}
+    line = cached.get("line", "")
+    if time.time() - cached.get("at", 0) < FRESH:
+        print(line, end="")
+        return
+    with CACHE.with_suffix(".lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print(line, end="")
+            return
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            waiting()
+        line = out.getvalue()
+        fresh = CACHE.with_suffix(".tmp")
+        fresh.write_text(json.dumps({"at": time.time(), "line": line}))
+        os.replace(fresh, CACHE)
+    print(line, end="")
+
+
 def age(started_ms):
     s = int(time.time() - (started_ms or 0) / 1000)
     return f"{s // 60}m" if s < 3600 else f"{s // 3600}h" if s < 172800 else f"{s // 86400}d"
@@ -365,7 +402,7 @@ def help_text():
 def main(argv):
     cmd = argv[0] if argv else ""
     if cmd == "waiting":
-        waiting()
+        status_line()
     elif cmd == "list":
         list_sessions(argv[1] if len(argv) > 1 else "")
     elif cmd == "help":
