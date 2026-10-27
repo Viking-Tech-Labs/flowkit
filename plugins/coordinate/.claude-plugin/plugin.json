@@ -1,6 +1,6 @@
 {
   "name": "coordinate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Turn a session into the coordinator of a story that spans repos or branches: plan the worker sessions from a mission doc, start them through handoff's flowkit-spawn, route their reports, keep one status board, never implement",
   "author": {
     "name": "flowkit"

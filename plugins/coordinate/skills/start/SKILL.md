@@ -85,7 +85,11 @@ Write each brief from `brief-template.md` (next to this file) into
 starts with an empty context and must not need to ask anything back: **what to build · where
 (files, dirs) · what not to touch · what is already decided · how to verify done · who to ask
 what.** Point at the repo's docs by exact path, with a reason each matters; "read the docs" is
-not a brief.
+not a brief. The brief's CHAIN END line is the story's own, word for word from
+`python3 "$(dirname <spawn>)/../scripts/handoff.py" chain-end <slug>` (handoff's script, next
+to the spawner): what the story's last session leaves behind, which every worker's DONE MEANS
+serves and which says whether a worker pushes. `none` means the story has no line yet: write
+`none` and no worker pushes.
 
 Start each worker, in plan order:
 

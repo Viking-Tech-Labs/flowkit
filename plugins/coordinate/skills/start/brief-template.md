@@ -10,6 +10,9 @@ or design doc, each with a few words on why it matters>
 
 MISSION: <the slice, concretely>
 DONE MEANS: <the end state you can observe: change request open, tests green, ...>
+CHAIN END: <the story's own line, word for word from `handoff.py chain-end <slug>`: what the
+story's last session leaves behind; DONE MEANS serves it, and you push only as it says. With
+`none`: no line yet; never push>
 VERIFY BEFORE SAYING DONE: <the exact commands that must pass>
 
 SCOPE

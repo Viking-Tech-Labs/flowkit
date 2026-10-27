@@ -31,6 +31,9 @@ own tracker tools write it into a file first.
   driver puts the workers in the story's tab, the background driver starts them with `claude
   --bg`; Remote Control is on, and the same refusals apply (uncommitted changes, a running
   namesake).
+- Each brief carries the story's `Chain end:` line next to its DONE MEANS, word for word from
+  `handoff.py chain-end <story>` (handoff 0.7.3's line: what the story's last session leaves
+  behind), so a worker pushes only as the story says; `none` when the story has no line yet.
 - Model and effort come from the `## Rung` table of `~/.config/flowkit/ladder.md` when you have
   one (the `ladder` plugin writes one), as a close picks them; without it, your defaults.
 - A worker asks you, in its own session, only what needs a human; everything across workstreams
