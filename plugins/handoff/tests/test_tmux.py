@@ -32,6 +32,7 @@ class Labels(unittest.TestCase):
         self.ft.CLAUDE = self.tmp
         self.ft.run = self.run_stub
         self.rows, self.pane_list, self.windows, self.writes = [], [], {}, []
+        self.later, self.listed = None, 0  # a second pane list, served from the second list-panes on
 
     def run_stub(self, *cmd):
         if cmd[:2] == ("claude", "agents"):
@@ -39,7 +40,9 @@ class Labels(unittest.TestCase):
         if cmd[0] == "ps":
             return ""
         if cmd[:2] == ("tmux", "list-panes"):
-            return "".join(SEP.join(p) + "\n" for p in self.pane_list)
+            self.listed += 1
+            panes = self.later if self.later is not None and self.listed > 1 else self.pane_list
+            return "".join(SEP.join(p) + "\n" for p in panes)
         if cmd[:2] == ("tmux", "list-windows"):
             return "".join(SEP.join([wid, "", label]) + "\n" for wid, label in self.windows.items())
         self.writes.append(cmd[1:])
@@ -175,6 +178,7 @@ class Closer(Labels):
 
     def closes(self):
         self.writes.clear()
+        self.listed = 0
         self.ft.closed.cache_clear()
         with contextlib.redirect_stdout(io.StringIO()):
             self.ft.waiting()
@@ -247,6 +251,19 @@ class Closer(Labels):
         self.shell(4, born=str(int(time.time())))
         self.assertEqual(self.closes(), [])
         self.assertEqual(self.killed, [])
+
+    def test_a_launch_that_landed_since_the_pane_list_keeps_the_story(self):
+        self.finished()
+        self.shell(4)
+        self.later = [list(p) for p in self.pane_list]
+        self.later[-1][13] = str(int(time.time()))  # stamped between the list and the kill
+        self.assertEqual(self.closes(), [])
+        self.later[-1][13] = ""
+        self.later[-1][7] = "2.1.304"  # its claude is up, not yet in claude agents
+        self.assertEqual(self.closes(), [])
+        self.assertEqual(self.killed, [])
+        self.later = None
+        self.assertEqual(self.closes(), ["%4", "%2", "%3", "%1"])
 
     def test_a_session_whose_transcript_or_fork_moved_lately_is_not_killed(self):
         self.finished()

@@ -199,6 +199,12 @@ def ring(pane, now):
          ";", "send-keys", "-t", pane["id"], "C-u", ";", "send-keys", "-t", pane["id"], "report now", "Enter")
 
 
+def starting(pane, now):
+    """flowkit-spawn stamped the pane, or its tab, this recently: its claude is still coming up."""
+    born = pane.get("born") or ""
+    return born.isdigit() and now - int(born) < SPAWN_GRACE
+
+
 def terminate(pid):
     """SIGTERM, then up to 5 s for the process to go; True once it has."""
     try:
@@ -230,7 +236,7 @@ def close_stories(pane_list, found, words):
             continue
         if any(p.get("hold") for p in members):
             continue
-        if any((p.get("born") or "").isdigit() and now - int(p["born"]) < SPAWN_GRACE for p in members):
+        if any(starting(p, now) for p in members):
             continue  # a shell flowkit-spawn just typed a launch into, before claude agents lists it
         if any(p["id"] not in rows and p["cmd"].lstrip("-") not in SHELLS for p in members):
             continue  # a pane runs something else, or a claude that claude agents does not list
@@ -248,6 +254,10 @@ def close_stories(pane_list, found, words):
         if any(r.get("sessionId") not in closed(slug) and (r.get("startedAt") or now * 1000) / 1000 > reported + 60
                for p, r in claudes if p not in report):
             continue  # a session needs its own close, unless it started before a final report that covers it
+        fresh = {p["id"]: p for p in panes()}  # the list is a `claude agents` old: a launch may have landed since
+        if any(starting(fresh.get(p["id"], p), now) or
+               (p["id"] not in rows and fresh.get(p["id"], p)["cmd"].lstrip("-") not in SHELLS) for p in members):
+            continue  # stamped, or no longer a bare shell, since the list
         for p in [p for p in members if p["id"] not in rows] + [p for p, _ in claudes if p not in report] + report:
             if p["id"] in rows and not terminate(int(rows[p["id"]]["pid"])):
                 break  # it would not go: the rest stay, the reporter with them

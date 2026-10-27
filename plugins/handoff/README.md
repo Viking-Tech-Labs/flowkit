@@ -98,8 +98,12 @@ own close either way); while the closes are still missing, the tick types
 story goes at once, every pane in every one of its tabs, the reporter last, and only when nothing
 in it is busy, waiting on you, watching or in error, no pane runs anything but Claude or a bare
 shell, the story file has sat 5 minutes and every session's transcript and forks have been still
-for 5 minutes. A tab whose sessions all exited closes too. `tmux set-option -w @flowkit_hold 1`
-in a tab keeps its story open; the adhoc tab and your own windows are never closed.
+for 5 minutes. A tab whose sessions all exited closes too, but a tab `flowkit-spawn` opened, or
+a pane it typed a launch into, less than 2 minutes ago is left alone, and the tick looks again
+right before it kills (it lists the panes once and decides a `claude agents` later). `tmux
+set-option -w @flowkit_hold 1` in a tab keeps its story open; the adhoc tab and your own windows
+are never closed, except a one-pane window of your own that you hand `flowkit-spawn --pane`: that
+becomes the story's next tab and goes with the story.
 
 ## Being away
 

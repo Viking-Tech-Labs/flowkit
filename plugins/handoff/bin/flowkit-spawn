@@ -22,7 +22,8 @@
 #   --no-rc                do not turn Remote Control on
 #   --single               a one-off outside any story, in the shared adhoc tab: no reporter,
 #                          no dirty-tree refusal, a taken name gets -2, the prompt is optional
-#   --pane <%id>           use this pane (an idle shell) instead of the story's tab (tmux)
+#   --pane <%id>           use this pane (an idle shell) instead of the story's tab (tmux); a tab
+#                          of its own with no mark becomes the story's next tab, no reporter
 #   --new                  always split a new pane instead of reusing an idle shell (tmux)
 #   --force                spawn even when a session of that name runs or the tree is dirty
 #   --dry-run              print the pick and the command, launch nothing
@@ -201,11 +202,19 @@ split_after_last() { # a new pane after the window's last one, so tiling keeps l
 
 # The pane: given; else an idle shell or a free slot in the story's tabs (part order); else a
 # new tab <slug>[-<part>] after the last tab.
-created=0; win=""; new_tab=""; rpane=""; part=1
+created=0; win=""; new_tab=""; rpane=""; part=1; claim=""
 if [ "$driver" = background ]; then :
 elif [ -n "$pane" ]; then
   pcmd="$(tm display-message -p -t "$pane" '#{pane_current_command}')"
   is_shell "$pcmd" || { echo "pane $pane is running '$pcmd', not an idle shell" >&2; exit 5; }
+  # A tab opened by hand for this one pane becomes the story's next tab: the closer may close it
+  # once the story is finished, and the story's next launch finds it. A tab with other panes in
+  # it stays yours: the closer closes whole tabs.
+  read -r win npanes marked <<<"$(tm display-message -p -t "$pane" '#{window_id} #{window_panes} #{@flowkit_story}#{@flowkit_adhoc}')"
+  if [ "$single" -eq 0 ] && [ "$npanes" -eq 1 ] && [ -z "$marked" ]; then
+    parts="$(tm list-windows -t "$sess" -F "#{${key}_part} #{${key}}" | awk -v s="$slug" '$2 == s { print $1 }' | sort -n | tail -1)"
+    part=$(( ${parts:-0} + 1 )); claim="$win"
+  fi
 else
   parts=0
   while IFS=' ' read -r p wid npanes; do
@@ -310,7 +319,7 @@ fi
 
 if [ "$dry" -eq 1 ]; then
   echo "story:  $slug${rpane:+ (starts $slug-report in slot 1)}"
-  echo "tab:    ${new_tab:+new tab $new_tab after the last one}${win:+$(tm display-message -p -t "$win" '#{window_name}')}"
+  echo "tab:    ${new_tab:+new tab $new_tab after the last one}${win:+$(tm display-message -p -t "$win" '#{window_name}')}${claim:+ (becomes tab $part of the story)}"
   echo "pane:   ${pane/#new/<new, tiled after the last pane>}"
   echo "repo:   $repo"
   echo "prompt: ${prompt_copy:-none}"
@@ -320,14 +329,21 @@ if [ "$dry" -eq 1 ]; then
   exit 0
 fi
 
+# Marks a window as the story's tab. The @flowkit_born stamp comes first, in the same command: the
+# story closer (flowkit-tmux waiting) runs at every status-line redraw, and opening a window is
+# one, so it lists the panes within milliseconds and must never see a story tab of bare shells
+# without a stamp. Each pane's top border names its slot, its session and the state the tick sets.
+mark_tab() { # window
+  tm set-option -w -t "$1" @flowkit_born "$(date +%s)" \
+    \; set-option -w -t "$1" "$key" "$slug" \; set-option -w -t "$1" "${key}_part" "$part" \
+    \; set-option -w -t "$1" pane-border-status top \
+    \; set-option -w -t "$1" pane-border-format \
+    ' #{pane_index} #{s/^[^a-zA-Z0-9]+//:pane_title}#{?#{@flowkit_state}, · #{?#{==:#{@flowkit_state},waiting},#[reverse] NEEDS YOU #[noreverse],#{@flowkit_state}},} '
+}
 if [ -n "$new_tab" ]; then
   idx=$(( $(tm list-windows -t "$sess" -F '#{window_index}' | sort -n | tail -1) + 1 ))
   win="$(tm new-window -d -t "$sess:$idx" -n "$new_tab" -c "$repo" -P -F '#{window_id}')"
-  # Each pane's top border names its slot, its session and the state `flowkit-tmux waiting` sets.
-  tm set-option -w -t "$win" "$key" "$slug" \; set-option -w -t "$win" "${key}_part" "$part" \
-    \; set-option -w -t "$win" pane-border-status top \
-    \; set-option -w -t "$win" pane-border-format \
-    ' #{pane_index} #{s/^[^a-zA-Z0-9]+//:pane_title}#{?#{@flowkit_state}, · #{?#{==:#{@flowkit_state},waiting},#[reverse] NEEDS YOU #[noreverse],#{@flowkit_state}},} '
+  mark_tab "$win"
   first="$(tm list-panes -t "$win" -F '#{pane_id}' | head -1)"
   if [ "$rpane" = "new" ]; then rpane="$first"; pane="$(split_after_last "$win")"
   else pane="$first"; fi
@@ -335,6 +351,8 @@ if [ -n "$new_tab" ]; then
 elif [ "$pane" = "new" ]; then
   pane="$(split_after_last "$win")"
   created=1
+elif [ -n "$claim" ]; then
+  mark_tab "$claim"
 fi
 
 # Types the launch into a pane, then waits up to 15 s until `claude agents` lists a session of
