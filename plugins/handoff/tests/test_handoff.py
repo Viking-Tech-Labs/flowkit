@@ -4,6 +4,7 @@ else it was called with, and a stub `tmux` that serves a pane list, so nothing r
 session or the user's files."""
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -160,6 +161,38 @@ class Handoff(unittest.TestCase):
         self.assertEqual(out.returncode, 6)
         self.assertIn("?? work.txt", out.stderr)
         self.assertNotIn(".claude", out.stderr)
+
+    def test_spawn_copies_only_a_prompt_from_outside_the_store(self):
+        repo = self.spawn_repo()
+        store = self.tmp / "claude" / "spawned"
+        store.mkdir()
+        saved = store / "s2.md"
+        saved.write_text("hi\n")
+        out = self.spawn("--repo", str(repo), "--name", "s2", str(saved))
+        self.assertEqual((out.returncode, out.stderr), (0, ""))
+        self.assertIn(f"prompt: {saved}\n", out.stdout)
+        self.assertIn(f'"$(cat {saved})"', out.stdout)
+        self.assertEqual([f.name for f in store.iterdir()], ["s2.md"], "the saved prompt is the record, kept")
+        outside = self.tmp / "p.md"
+        outside.write_text("hi\n")
+        out = self.spawn("--repo", str(repo), "--name", "s2", str(outside))
+        copy = re.search(r"^prompt: (.*)$", out.stdout, re.M).group(1)
+        self.assertRegex(copy, rf"^{re.escape(str(store))}/s2-\d{{8}}-\d{{6}}\.md$")
+        self.assertIn(f'"$(cat {copy})"', out.stdout)
+
+    def test_refresh_prunes_the_old_prompt_copies(self):
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp)  # no installed kit in the sandbox: refresh copies nothing
+        store = self.tmp / "claude" / "spawned"
+        store.mkdir()
+        old = time.time() - 31 * 86400
+        for name in ("s2-20260926-120000.md", "s2-20260926-120000-shared.md", "my-story-report-20260926-120000.md",
+                     "s2.md", "s3-20261027-120000.md"):
+            (store / name).write_text("x\n")
+            os.utime(store / name, (old, old) if name != "s3-20261027-120000.md" else None)
+        out = self.handoff("refresh", str(PLUGIN))
+        self.assertEqual((out.returncode, out.stdout), (0, "spawned: 3 prompt copies older than 30 days removed\n"))
+        self.assertEqual(sorted(f.name for f in store.iterdir()), ["s2.md", "s3-20261027-120000.md"])
+        self.assertEqual(self.handoff("refresh", str(PLUGIN)).stdout, "")
 
     def test_record_says_what_the_doorbell_did(self):
         def recorded(name):

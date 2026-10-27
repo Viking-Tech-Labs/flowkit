@@ -219,8 +219,12 @@ requests hear nothing, and without the status line the hook stays silent.
   `skills/close/pickup-template.md`.
 - **The next session's prompt**, only when repo work is left: repo, session name, story, the
   sections to read, verified facts, today's items with their checks, the fences, the story's
-  Chain end line and the stop condition. Its shape is `skills/close/prompt-template.md`. A prompt that nothing started is
-  saved under `~/.claude/spawned/<name>.md`.
+  Chain end line and the stop condition. Its shape is `skills/close/prompt-template.md`. The
+  prompt is saved under `~/.claude/spawned/<name>.md`, launched or not, and that file is the
+  record of what the session started with: `flowkit-spawn` launches it as it is, and copies
+  into the store only a prompt from elsewhere (a coordinator's brief, a file of yours) and each
+  reporter's prompt, stamped; `handoff.py refresh` (every session start) removes those copies
+  after 30 days and says how many went.
 - **The story file**, `~/.claude/stories/<slug>.md`, when the session's prompt names a `Story:`:
   one section per close with the session id, how to resume it, the four close blocks and a
   `Next:` line: `started <name>`, `pending <name>` (a saved prompt nothing started) or `none`.

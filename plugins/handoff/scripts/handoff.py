@@ -25,7 +25,8 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py usage [--json]                      the plan's usage left (bin/flowkit-usage)
   handoff.py statusline diff|install <root>      the status line that records context and cost
   handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
-  handoff.py refresh <root>                      update an installed status line and tmux kit (SessionStart)
+  handoff.py refresh <root>                      update an installed status line and tmux kit, prune the
+                                                 prompt copies older than 30 days (SessionStart)
 """
 import difflib
 import json
@@ -44,6 +45,8 @@ CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or HOME / ".claude")
 AWAY = CLAUDE / "away"
 AWAY_HOURS = 12
 SPAWNED = CLAUDE / "spawned"
+PRUNE_DAYS = 30
+COPY = re.compile(r"-\d{8}-\d{6}(-shared)?\.md$")  # flowkit-spawn's stamped copies, never a saved <name>.md
 STORIES = CLAUDE / "stories"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "flowkit"
 LADDER = CONFIG / "ladder.md"
@@ -805,9 +808,27 @@ def tmux_kit(action, root):
     print(f"tmux-kit: installed; a running tmux picks it up with: tmux source-file {home_short(conf)}")
 
 
+def prune_spawned():
+    """Drop the copies flowkit-spawn keeps of each prompt from outside the store (and of each
+    reporter prompt) once they are PRUNE_DAYS old. A saved prompt stays: a story file's launch
+    line may still cat it."""
+    cutoff = time.time() - PRUNE_DAYS * 86400
+    gone = 0
+    try:
+        for f in SPAWNED.iterdir():
+            if COPY.search(f.name) and f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+                gone += 1
+    except OSError:
+        pass
+    if gone:
+        print(f"spawned: {gone} prompt {'copy' if gone == 1 else 'copies'} older than {PRUNE_DAYS} days removed")
+
+
 def refresh(root):
-    """Keep an installed status line and tmux kit at the plugin's version. Silent: its output
-    reaches context."""
+    """Keep an installed status line and tmux kit at the plugin's version, and prune the old prompt
+    copies. Its output reaches context, so it says nothing unless something went."""
+    prune_spawned()
     source = Path(root) / "scripts" / "statusline.py"
     try:
         if STATUSLINE.is_file() and STATUSLINE.read_bytes() != source.read_bytes():

@@ -261,13 +261,16 @@ fi
 # reporter died ran nine slices unreported). Slot 1 of a new tab, else a pane after the last.
 [ "$driver" != background ] && [ "$reporter" -eq 1 ] && ! running "$slug-report" >/dev/null && rpane="new"
 
-# A copy of the prompt under a space-free path: safe to quote, and a record of what each pane
-# was started with.
+# The prompt under a space-free path in the store: safe to quote, and a record of what each pane
+# was started with. A prompt already there (`handoff.py save-prompt` writes `<name>.md`) is that
+# record and is launched as it is; one from outside gets a stamped copy, which `handoff.py refresh`
+# prunes after 30 days.
 store="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/spawned"; mkdir -p "$store"
 stamp="$(date +%Y%m%d-%H%M%S)"
-prompt_copy=""; prompt_arg=""
+prompt_copy=""; prompt_arg=""; copied=""
 if [ -n "$prompt" ]; then
-  prompt_copy="$store/${name}-${stamp}.md"; cp "$prompt" "$prompt_copy"
+  if [ "$(dirname "$prompt")" -ef "$store" ]; then prompt_copy="$store/$(basename "$prompt")"
+  else prompt_copy="$store/${name}-${stamp}.md"; cp "$prompt" "$prompt_copy"; copied="$prompt_copy"; fi
   prompt_arg=" \"\$(cat $prompt_copy)\""
 fi
 
@@ -332,7 +335,7 @@ sys.exit(0 if any(a.get(sys.argv[1]) == sys.argv[2] for a in json.load(sys.stdin
     echo "prompt: ${prompt_copy:-none}"
     [ -n "$shared_file" ] && echo "shared: $others"
     echo "run:    cd '$repo' && claude --bg ${flags}--name '$name'${shared_arg}${prompt_arg}"
-    rm -f "$prompt_copy" "$shared_file"
+    [ -z "$copied" ] || rm -f "$copied"; [ -z "$shared_file" ] || rm -f "$shared_file"
     exit 0
   fi
   if [ "$start_reporter" -eq 1 ]; then
@@ -358,7 +361,7 @@ if [ "$dry" -eq 1 ]; then
   echo "prompt: ${prompt_copy:-none}"
   [ -n "$shared_file" ] && echo "shared: $others"
   echo "send:   cd '$repo' && $launch"
-  rm -f "$prompt_copy" "$shared_file"
+  [ -z "$copied" ] || rm -f "$copied"; [ -z "$shared_file" ] || rm -f "$shared_file"
   exit 0
 fi
 
