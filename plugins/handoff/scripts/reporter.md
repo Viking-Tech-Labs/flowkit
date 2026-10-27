@@ -44,8 +44,9 @@ close in the same four blocks:
   line, or "nothing left".
 
 Append it under `## Final report · <YYYY-MM-DD HH:MM>`, print it, and send a push notification
-when that tool exists: `<slug>: all done — <n> for you`. A later section after a final report means
-the story went on: report it like any other, and write a new final report when both hold again.
+when that tool exists: `<slug>: all done — <n> for you` when LEFT is "nothing left", else
+`<slug>: stopped short — <n> for you`. A later section after a final report means the story went
+on: report it like any other, and write a new final report when both hold again.
 
 **When the user asks**: answer from the file and `claude agents --json`; open a doc a section names
 only to answer a question it raises, read-only. "Report now" means the final report as it stands,
