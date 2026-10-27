@@ -22,9 +22,9 @@ Today: <the slice, in order, with the check that proves each item done>
 
 Don't: <scope fences: files or areas not to touch, things already decided>
 
-Keep Today's items in the task list and tick them as you go; check it before ending any
-turn. A text-only message is a progress report, not the end: while an item is open, keep
-working or say what blocks it.
+Keep Today's items as a checklist in your replies and tick them as you go; check it before
+ending any turn. A text-only message is a progress report, not the end: while an item is
+open, keep working or say what blocks it.
 
 [Chain end: <the story's line>[; this slice is the chain's LAST: it does that work, then closes without `spawn`]]
 Stop when: <done condition>, or when a step needs the user's hands; then close with
