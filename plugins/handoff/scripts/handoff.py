@@ -18,6 +18,9 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py away | back | away-status           the ~/.claude/away flag (12 hours); `away` then nudges
                                                  the sessions parked on a question (bin/flowkit-away),
                                                  `back` lists the sessions waiting on the user
+  handoff.py restamp                             an unattended close: the flag's 12 hours start again
+                                                 while it exists (no nudge, no usage), so a chain
+                                                 longer than that stays unattended
   handoff.py question-gate                       PreToolUse hook on AskUserQuestion: denied while away
   handoff.py context                             UserPromptSubmit and PostToolBatch hook: the context line
   handoff.py api-error | api-ok                  StopFailure and Stop hooks: the retry record and line, and
@@ -861,6 +864,13 @@ def main(argv):
         sys.stdout.flush()
         usage()
         reach("nudge")
+    elif cmd == "restamp" and not args:
+        if AWAY.is_file():
+            os.utime(AWAY)
+            print(f"away: since {AWAY.read_text().strip() or 'set'} (re-stamped {time.strftime('%H:%M')}; "
+                  f"clears with back or after {AWAY_HOURS} hours)")
+        else:
+            print("away: off")
     elif cmd == "back" and not args:
         AWAY.unlink(missing_ok=True)
         print("away: off")

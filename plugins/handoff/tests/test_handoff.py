@@ -259,6 +259,20 @@ class Handoff(unittest.TestCase):
         self.assertEqual(out, ["away: off", "s3: waits on permission prompt"])
         self.assertFalse(self.calls.exists())
 
+    def test_restamp_keeps_an_unattended_chain_unattended(self):
+        self.assertEqual(self.handoff("restamp").stdout, "away: off\n")
+        self.assertFalse(self.flag.exists())
+        self.flag.write_text("2026-10-27 01:10\n")
+        old = time.time() - 11 * 3600
+        os.utime(self.flag, (old, old))
+        out = self.handoff("restamp").stdout
+        self.assertRegex(out, r"^away: since 2026-10-27 01:10 \(re-stamped \d\d:\d\d; clears with back or after 12 hours\)\n$")
+        self.assertLess(time.time() - self.flag.stat().st_mtime, 60)
+        self.assertEqual(self.flag.read_text(), "2026-10-27 01:10\n")
+        self.assertEqual(self.handoff("away-status").stdout, "away: since 2026-10-27 01:10\n")
+        self.assertFalse(self.calls.exists(), "no nudge")
+        self.assertFalse((self.tmp / "probes").exists(), "no usage call")
+
     def usage_answer(self, hours=15):
         stamp = datetime.fromtimestamp(time.time() + hours * 3600 + 60, timezone.utc).isoformat()
         limits = [

@@ -34,7 +34,10 @@ the AskUserQuestion tool is not available to you (a headless run). Decide by tho
 never by guessing whether the user is watching. Unattended, never end on a question: take the
 recommended option at every fork, mark it "(auto)" in the decision log and in the close, and
 never reopen an "(auto)" item the user already reviewed. The close must exist even if the run
-failed: a failed run with a clear OPEN is a good handoff, a silent one is not. Unattended, the
+failed: a failed run with a clear OPEN is a good handoff, a silent one is not. Unattended, run
+`handoff.py restamp` before step 9: the away flag counts for 12 hours from its stamp, and the
+re-stamp (no nudge, no usage line) keeps a chain longer than that unattended until the user
+says back; it does nothing once the flag is gone. Unattended, the
 story's last close also stops what its sessions started (simulators, local servers) when no
 other session still uses them, and ends with what is ready for the user to try in the morning.
 

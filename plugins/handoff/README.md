@@ -121,8 +121,10 @@ becomes the story's next tab and goes with the story. A reporter started in a wi
 
 ## Being away
 
-`/handoff:away` writes `~/.claude/away` (the stamp of when; it counts for 12 hours) and makes it
-reach every session, in two ways:
+`/handoff:away` writes `~/.claude/away` (the stamp of when; it counts for 12 hours, and every
+unattended close re-stamps it with `handoff.py restamp` while it exists, so a chain that runs
+longer than that stays unattended until `/handoff:back`) and makes it reach every session, in two
+ways:
 
 - **No session asks you anything.** A PreToolUse hook on AskUserQuestion (`hooks/hooks.json`)
   denies the question while the flag is set, with a reason the session acts on: take the
