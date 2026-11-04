@@ -18,9 +18,9 @@ Or by hand:
 2. Install the plugin: `claude plugin install brain@flowkit`
 3. In Claude Code (a new session, or `/reload-plugins` in a running one): `/brain:init ~/brain`
 
-While this repository is private, step 1 needs access to the Viking-Tech-Labs organisation on
-GitHub plus a logged-in `gh` or an SSH key; the marketplace add then uses those credentials, with
-no prompt. Step 3 creates your vault at `~/brain` (any path works) from the template inside the
+Step 1 needs only git while the repository is public; while it is private it also needs access
+to the Viking-Tech-Labs organisation on GitHub and a logged-in `gh` or an SSH key, which the
+marketplace add uses with no prompt. Step 3 creates your vault at `~/brain` (any path works) from the template inside the
 plugin, starts git there on `main`, and writes the vault's `.claude/settings.json`, which enables
 the plugin for every session opened in the vault. Then fill in `_me.md` in the vault by hand:
 every session there reads it first.
