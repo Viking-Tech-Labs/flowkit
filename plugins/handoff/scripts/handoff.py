@@ -6,7 +6,8 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py pickup-doc <data-dir> <repo> <doc>  remember the repo's pick-up doc
   handoff.py save-prompt <name> [--report-to <session>]
                                                  stdin -> ~/.claude/spawned/<name>.md; with a session,
-                                                 `Report-to: <session>` goes into the prompt's header
+                                                 `Report-to: <session>` goes into the prompt's header; a
+                                                 prompt starting with `/` is a command, one line, saved as is
   handoff.py self                                this session's name (what a helper's Report-to line names)
   handoff.py record <story>                      stdin (first line `## <name> · YYYY-MM-DD HH:MM`) appended
                                                  to ~/.claude/stories/<slug>.md (the story slugified as
@@ -300,6 +301,14 @@ def save_prompt(name, report_to=None):
     SPAWNED.mkdir(parents=True, exist_ok=True)
     path = SPAWNED / f"{safe(name, 'the session name')}.md"
     text = sys.stdin.read().rstrip("\n") + "\n"
+    if text.startswith("/"):
+        # Command-first: Claude Code runs the prompt as the user's own command and hands everything
+        # after its name to the command as arguments, so the brief lives in the pick-up doc instead.
+        if text.count("\n") > 1:
+            fail("a prompt starting with / is the command line alone; put the brief in the pick-up block")
+        if report_to:
+            print(f"command prompt: put Report-to: {report_to} into the brief in the pick-up block", file=sys.stderr)
+        report_to = None
     path.write_text(with_report_to(text, report_to) if report_to else text)
     print(path)
 

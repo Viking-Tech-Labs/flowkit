@@ -294,9 +294,17 @@ if [ "$single" -eq 1 ]; then
     shared_file="$store/${name}-${stamp}-shared.md"
     printf '%s\n' "Shared working tree: another Claude session is working in $repo right now ($others)." \
       "Do not switch branches, commit, stash, reset, rebase, pull or otherwise rewrite the working tree unless the user says so in this session. Reading, investigating and running tests are fine." > "$shared_file"
-    shared_arg=" --append-system-prompt \"\$(cat $shared_file)\""
   fi
 fi
+# A prompt starting with `/` is a command (command-first): Claude Code runs it as the user's own,
+# and hands any text after it to the command as arguments, so the brief waits in the pick-up doc
+# and the system prompt says where.
+if [ -n "$prompt_copy" ] && [ "$(head -c 1 "$prompt_copy")" = / ]; then
+  [ -n "$shared_file" ] || shared_file="$store/${name}-${stamp}-brief.md"
+  printf '%s\n' "This session started from the slash command in its first message, run as the user's own command; the command's arguments are only what that line carries." \
+    "Its slice brief (Session, Story, Chain end, Report-to, Stop when), when it has one, is the Brief: of the WHERE TO PICK UP block in this repo's pick-up doc (grep -rl 'WHERE TO PICK UP' --include='*.md' .). Read it before the command's first step and follow it alongside the command." >> "$shared_file"
+fi
+[ -z "$shared_file" ] || shared_arg=" --append-system-prompt \"\$(cat $shared_file)\""
 
 launch="clear; claude ${flags}--name '$name'${shared_arg}${prompt_arg}"
 
@@ -343,7 +351,7 @@ sys.exit(0 if any(a.get(sys.argv[1]) == sys.argv[2] for a in json.load(sys.stdin
     echo "story:  $slug$([ "$start_reporter" -eq 1 ] && echo " (starts $slug-report first)")"
     echo "repo:   $repo"
     echo "prompt: ${prompt_copy:-none}"
-    [ -n "$shared_file" ] && echo "shared: $others"
+    [ -n "${others:-}" ] && echo "shared: $others"
     echo "run:    cd '$repo' && claude --bg ${flags}--name '$name'${shared_arg}${prompt_arg}"
     [ -z "$copied" ] || rm -f "$copied"; [ -z "$shared_file" ] || rm -f "$shared_file"
     exit 0
@@ -369,7 +377,7 @@ if [ "$dry" -eq 1 ]; then
   echo "pane:   ${pane/#new/<new, tiled after the last pane>}"
   echo "repo:   $repo"
   echo "prompt: ${prompt_copy:-none}"
-  [ -n "$shared_file" ] && echo "shared: $others"
+  [ -n "${others:-}" ] && echo "shared: $others"
   echo "send:   cd '$repo' && $launch"
   [ -z "$copied" ] || rm -f "$copied"; [ -z "$shared_file" ] || rm -f "$shared_file"
   exit 0

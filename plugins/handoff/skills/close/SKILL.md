@@ -86,6 +86,14 @@ other session still uses them, and ends with what is ready for the user to try i
    planning session that settled it in its interview writes it the same way. The slice you draft
    is the chain's last when no repo work is left after it: say so on its Chain end line, end its
    Today with that work, and let its Stop when close without `spawn`.
+   **Command-first.** When the next slice's work starts with a slash command that only the user
+   can start (a skill with `disable-model-invocation: true`, which says "type /x" instead of
+   running), the saved prompt is that command line alone, for example `/implement-story 1526354`:
+   Claude Code runs a first prompt starting with `/` as the user's own command and passes every
+   word after the command's name to it as arguments, which a skill may read as answers. The brief
+   goes, in full, into the pick-up block's `Brief:` line (draft it before writing step 4's block,
+   or amend the block and its commit), with its `Report-to:` when it has one; `flowkit-spawn` tells the new session to read it
+   there. Never put brief text after the command. Every other slice is prompted as before.
    **A helper reports back.** A prompt for a helper beside the chain (a review or investigation
    the user asked for, or the ladder's owed review; never the chain's next slice) carries
    `Report-to: <session>` in its header and the send sentence of its Stop when, when `state`
@@ -113,7 +121,8 @@ other session still uses them, and ends with what is ready for the user to try i
    `prompt-only`, print only that block or that line.
 8. **Peers.** If another session needs to know (one waiting on a contract, a coordinator), put
    the message to send under OPEN. Do not send it unless asked, or unless the prompt this
-   session started from carries a `Report-to:` line naming a session: then send the verdict as
+   session started from (started from a command: its brief) carries a `Report-to:` line naming
+   a session: then send the verdict as
    that line says (SendMessage, loaded with ToolSearch: one line, findings by number with a
    worth-fixing word, the links, at most ten lines), and on any error or delivery notice (held
    for the receiver's approval, not reachable) say so under OPEN; DONE carries the verdict
@@ -172,7 +181,8 @@ other session still uses them, and ends with what is ready for the user to try i
    After a successful spawn this session touches the repo no more: no edits, no commits; the
    next session owns the working tree.
 10. **Record the close in the story file**, as the last tool call before the reply. The story's
-    slug is the `Story:` of the prompt this session started from; with none, skip this step. Pipe
+    slug is the `Story:` of the prompt this session started from (started from a command: of the
+    brief in the pick-up block); with none, skip this step. Pipe
     the record into `handoff.py record <slug>`:
     ```
     ## <this session's name> · <date "+%Y-%m-%d %H:%M">

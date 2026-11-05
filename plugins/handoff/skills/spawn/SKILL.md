@@ -37,6 +37,12 @@ file:
    place): it puts `Report-to: <session>` into the prompt's header, on the `Repo:` line of a
    brief or as a first line of its own, and leaves a prompt whose header already names a
    `Report-to:`, or that carries a coordinator's `REPORTING` line, as it is.
+   **A command** (the prompt's first line starts with `/`, a skill only the user can start, as in
+   the close's "Command-first"): the prompt is that one line, nothing after it, since every word
+   after the command reaches it as arguments; `save-prompt` refuses more lines and adds no
+   `Report-to:` (it says so on stderr). The brief, with any `Report-to:`, goes into the `Brief:`
+   line of the repo's pick-up block, where `flowkit-spawn` tells the new session to read it; the
+   one-line rule above does not apply.
 2. **Launch**, absolute paths, no `cd`:
    ```sh
    "${CLAUDE_PLUGIN_ROOT}/bin/flowkit-spawn" --repo <repo> --name <name> [--single] \

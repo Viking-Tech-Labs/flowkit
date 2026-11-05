@@ -13,4 +13,5 @@ Decisions taken: <numbered; "(auto)" where taken unattended; where each is writt
 Not done / next: <ordered; the first item is what the next session starts on>
 Needs you: <steps only the user can do: devices, consoles, secrets, approvals>
 Known traps: <anything that cost time this session>
+[Brief: <only for a command-first next slice (close step 5): its brief from prompt-template.md, in full, in a fenced block>]
 ```

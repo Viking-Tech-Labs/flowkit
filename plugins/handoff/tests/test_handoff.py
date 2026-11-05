@@ -126,6 +126,16 @@ class Handoff(unittest.TestCase):
         self.handoff("save-prompt", "s5", stdin=brief)
         self.assertEqual((store / "s5.md").read_text(), brief, "without the option, nothing is added")
 
+    def test_save_prompt_keeps_a_command_prompt_to_its_one_line(self):
+        store = self.tmp / "claude" / "spawned"
+        out = self.handoff("save-prompt", "s2", "--report-to", "billing-hub", stdin="/implement-story 1526354\n")
+        self.assertEqual((out.returncode, out.stdout), (0, f"{store / 's2.md'}\n"))
+        self.assertEqual((store / "s2.md").read_text(), "/implement-story 1526354\n", "no Report-to line in a command")
+        self.assertIn("Report-to: billing-hub into the brief", out.stderr)
+        out = self.handoff("save-prompt", "s3", stdin="/implement-story 1526354\n\nRepo: /r   Session: s3\n")
+        self.assertNotEqual(out.returncode, 0, "a brief after the command would reach it as arguments")
+        self.assertFalse((store / "s3.md").exists())
+
     def test_chain_end_lives_in_the_story_header(self):
         story = self.tmp / "claude" / "stories" / "my-story.md"
         self.assertEqual(self.handoff("chain-end", "My Story").stdout, "none\n")
@@ -222,6 +232,20 @@ class Handoff(unittest.TestCase):
         copy = re.search(r"^prompt: (.*)$", out.stdout, re.M).group(1)
         self.assertRegex(copy, rf"^{re.escape(str(store))}/s2-\d{{8}}-\d{{6}}\.md$")
         self.assertIn(f'"$(cat {copy})"', out.stdout)
+
+    def test_spawn_points_a_command_prompt_at_its_brief(self):
+        repo = self.spawn_repo()
+        store = self.tmp / "claude" / "spawned"
+        store.mkdir()
+        (store / "s2.md").write_text("/implement-story 1526354\n")
+        out = self.spawn("--repo", str(repo), "--name", "s2", str(store / "s2.md"))
+        self.assertEqual((out.returncode, out.stderr), (0, ""))
+        self.assertRegex(out.stdout, r'--append-system-prompt "\$\(cat \S+/s2-\d{8}-\d{6}-brief\.md\)" "\$\(cat '
+                         + re.escape(str(store / "s2.md")))
+        self.assertNotIn("shared:", out.stdout)
+        (store / "s3.md").write_text("Repo: /r   Session: s3\n\nToday: /implement-story is next\n")
+        out = self.spawn("--repo", str(repo), "--name", "s3", str(store / "s3.md"))
+        self.assertNotIn("--append-system-prompt", out.stdout, "a brief prompt is launched as before")
 
     def spawn_in_tmux(self, exits):
         """A throwaway tmux server whose one pane runs bash with a fake `claude` first on its PATH:

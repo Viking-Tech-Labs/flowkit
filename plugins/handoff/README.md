@@ -260,6 +260,20 @@ The line lives in the story file's header (`handoff.py chain-end <story>` prints
 or words sets it) and in the pick-up block. The close itself still never pushes: the slices do, as
 the line says.
 
+## A slice that starts with a command
+
+New in 0.7.7. Some skills only you can start: one with `disable-model-invocation: true` answers
+"type /x" instead of running, so a spawned slice whose work begins with it stopped until you typed
+the command yourself. Claude Code runs a first prompt that starts with `/` as your own command, so
+when the next slice is driven by such a command the close (or `/handoff:spawn`) saves the command
+line alone as the prompt, for example `/implement-story 1526354`, and `flowkit-spawn` launches it
+as `claude … "/implement-story 1526354"`. Every word after the command's name reaches the skill as
+its arguments, which a skill may read as answers to its own questions, so the brief never rides
+along: it goes, in full, into the `Brief:` line of the repo's pick-up block, and `flowkit-spawn`
+appends one system-prompt note telling the new session to read it there and follow its Chain end,
+Report-to and Stop when. `handoff.py save-prompt` refuses a command prompt with more lines and
+puts no `Report-to:` line into one. Every other prompt is launched as before.
+
 ## A helper reports back
 
 New in 0.7.6. A review or investigation launched beside a story's chain used to end in its own
