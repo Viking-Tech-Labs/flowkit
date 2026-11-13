@@ -15,7 +15,7 @@ useful with that plugin; a file in the same format from anywhere else works too.
 |---|---|
 | **NEEDS YOU** | a session of the story waits on you (a question, a permission), or the last close left a launch pending (`Next: pending <name>`) or a free-text `Next:` |
 | **STALLED** | no session of the story is working or waiting, and a session any close promised (`Next: started …`) never wrote its own close: it never came up, ended, or sits idle at its prompt. A new session gets 10 minutes to come up first; a stalled story nobody touches for seven days folds into the "more" line |
-| **running** | a session of the story is working, or the promised one is still starting |
+| **running** | a session of the story is working, or the promised one is still starting, or the last close queued its successor (`Next: queued <name>`: it waits for a slot, not for you, until a session of that name comes up; one that then ends without a close stalls the story) |
 | **done** | a `## Final report` newer than the last close, or the last close says `Next: none` with nothing working |
 
 A story's sessions are the names in its file: every close's section name and every name a `Next:`
@@ -40,6 +40,8 @@ a step of theirs is still open), fold into one line that unfolds.
   status-line offer writes them; a session without the file shows without the numbers.
 
 - `~/.claude/stories/<story>.tests.md`, when it exists: the story's test queue (below).
+- `~/.claude/capacity/status.json`, when it exists: the [`handoff`](../handoff/README.md) capacity
+  gate's snapshot, for the CAPACITY block (below).
 
 Nothing is written outside the plugin's own store (the ticks).
 
@@ -67,6 +69,23 @@ Blank lines and `#` lines are skipped, a leading `- ` is dropped, and a missing 
 The writer rewrites the whole file whenever a line changes and deletes it when the queue is empty.
 `/board` lists it on the story's card under TEST QUEUE, `/where` under the story's row; a story
 without the file shows nothing.
+
+## Capacity
+
+With the `handoff` capacity gate in use, `/where` prints a CAPACITY block above STORIES and the
+Pane a CAPACITY line under its heading, both from `status.json`:
+
+```
+CAPACITY  slots 3/3 · queued 2 (next ~16:40) · simulator: demo-s2 since 14:10 (take)
+          emulator free · backend: you, test hold until 15:30 · stalled: side-s1
+```
+
+Slots used of the machine's (`?` while `claude agents` did not answer), the queue with its first
+launch's forecast start, each resource with who holds it, since when and why, and the sessions
+shown as stalled. The board computes nothing: the file is written by `capacity.py` on every take,
+release, launch and drain, and a file older than five minutes adds `as of HH:MM`. A `status.json`
+of another version prints only that. Without the file there is no block.
+`tests/fixtures/capacity-status.ts` is the shape both sides test against.
 
 ## Surfaces
 

@@ -334,9 +334,11 @@ coordinator_growth = 300k   # context tokens a coordinator may add per day
 slots = 2                   # optional: at most 2 of the machine's slots for this repo
 resource simulator = install a build, run a device check, hand over a test
 resource backend   = start the local stack; release once it is stopped
+audit simulator    = xcrun simctl (install|launch)|maestro test   # optional: the audit hook's pattern
 ```
 
-Resource names are machine-wide: two repos that both declare `simulator` share one lease.
+Resource names are machine-wide: two repos that both declare `simulator` share one lease. So are
+`audit` patterns (Python regular expressions, searched in a Bash command).
 
 **Slots are counted, never leased.** A slot is a working tree with a live story session in it, read
 from `claude agents --json --all` and the story files each time it is asked, so a crashed or resumed
@@ -359,6 +361,8 @@ shape it does not know, the count is unknown, never zero: nothing is reclaimed.
 | `flowkit-capacity waves a=/Users/me/app:2:simulator b=/Users/me/lib [--story s --write]` | Plans a batch (`NAME=TREE[:SLICES[:NEEDS]]`, needs joined by `+`, in launch order): each item's wave, start and ready times, and one plan line. See "Waves" below. |
 | `flowkit-capacity testq <story> [set\|drop <item>] [--state …] [--eta HH:MM] [--mr …] [--device …] [--launch name]` | The story's test queue, `<story>.tests.md`, one line at a time under the lock, each change logged as `test`. The file goes once its last line does. `--launch` ties a line to a queued launch: its drain sets it `running` with its ready time. |
 | `flowkit-capacity limit /Users/me/app -1 [--hours 12]` | The repo runs one slot fewer (never under one) for the hours given; `0` ends it. Logged as `limit`. |
+| `flowkit-capacity report [--since 7d] [--until …] [--baseline] [--against base.json] [--json]` | The numbers of a week under the gate: see "Report" below. |
+| `flowkit-capacity note collision "two installs on the simulator"` | A line for the report, from any session or by hand, when two things met on one resource. |
 
 A lease goes free on its own when the holder's close is recorded, when the holder has no pid, or
 when it has been not busy with its transcript untouched for 30 minutes; never while `claude agents`
@@ -417,13 +421,46 @@ the last part counting the story's test-queue lines whose state says `to test`. 
 every item that does not start now gets a test-queue line (`queued, wave 2, needs simulator`, its
 ready time) tied to its launch name.
 
+**The audit hook.** A `PreToolUse` hook on Bash (`capacity.py audit`) logs `audit` when a command
+matches a resource's `audit` pattern and the session running it does not hold that resource: the
+resource, the session, who holds it (or nobody) and the command's first 200 characters. It never
+denies and prints nothing; with no `capacity.conf`, or no `audit` line, it costs one file check.
+
+**Report.** `flowkit-capacity report --since 7d` reads the log and the transcripts for a window:
+
+- launch holds (launches that sat in a load hold first) and their minutes;
+- queued launches, the minutes they waited, the median launch ETA error (the queued line's time
+  against the drain) and the median ready ETA error (a test-queue line's first ETA against the
+  moment its state first says `to test`);
+- resource waits per resource (queued launches whose reason names it) and their minutes;
+- reclaims and over-cap launches;
+- idle with a queue: a drain that launched an entry logs `gap`, the time since the drain before it
+  (which could not start it), so the gap bounds how long the entry sat startable. Gaps over 10
+  minutes count, split by day and by night (22:00 to 08:00, keyed by the evening's date);
+- collisions: `audit` lines and `note collision` lines;
+- batches: `waves --write` runs, those of 4 items or more;
+- from the transcripts (`projects/*/*.jsonl` touched in the window): the peak of sessions at once
+  and the minutes over the machine's slots (a session counts while it wrote within 30 minutes),
+  and per coordinator (a name like `*-coord`, or on a coordination board) per day: its context
+  growth (the coordinate plugin's `growth()`, the 24 hours up to that midnight, or to now on the
+  last day; it needs that plugin installed beside this one), its compactions, the prompts typed to
+  it (Remote Control included; a peer session's message, a hook's text or a task notification is
+  not typed) and those asking for status.
+
+It ends with the battle test's pass line: enough batches (3 of 4+), no night idle with a queue over
+an hour, median ready ETA error at most 30 minutes, every coordinator day under
+`coordinator_growth`, status asks per day at most half the baseline's, no collision. `--baseline`
+reads the transcripts and story files only, for a week before the gate ran; save its `--json` and
+pass it as `--against` to the battle test's report.
+
 State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/capacity/`: `resources/<name>.json` (the
 leases), `launching/<pid>.json` (an in-flight launch, counted while its pid lives), `queue/<id>.json`
 (a queued launch: its arguments, prompt, story, tree, needs, left, by, queued-at), `log.jsonl`
-(one line per take, release, free, reclaim, hold, launch, queue, dequeue, repoint, over-cap, test
-and limit; `reclaim` when the holder died; launch, queue and dequeue carry the repo, `Left:` and,
-for a gate call, the launcher and its load-hold seconds), `limits.json`, `testq.json` (test-queue
-lines tied to queued launches) and
+(one line per take, release, free, reclaim, hold, launch, queue, dequeue, repoint, over-cap, test,
+limit, waves, audit and note; `reclaim` when the holder died; launch, queue and dequeue carry the
+repo, `Left:` and, for a gate call, the launcher and its load-hold seconds; dequeue its `gap`),
+`drained` (the last drain of a non-empty queue), `limits.json`, `testq.json` (test-queue lines tied
+to queued launches) and
 `status.json`, rewritten on every change with a `version` field
 (`../board/tests/fixtures/capacity-status.ts` shows its shape). Every change runs under one lock that is
 tried for 10 seconds and then gone on without, with one stderr line, so a stuck holder never
