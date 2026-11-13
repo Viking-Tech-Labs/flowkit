@@ -14,9 +14,25 @@ from unittest import mock
 
 PLUGIN = Path(__file__).resolve().parent.parent
 CAPACITY = PLUGIN / "scripts" / "capacity.py"
+FIXTURE = PLUGIN / "tests" / "fixtures" / "capacity-status.json"  # the board's tests read it too
 spec = importlib.util.spec_from_file_location("capacity", CAPACITY)
 capacity = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(capacity)
+
+
+def shape(value):
+    """The keys of a JSON value, all the way down, with every list's items merged."""
+    if isinstance(value, dict):
+        return {k: shape(v) for k, v in value.items()}
+    if isinstance(value, list):
+        merged = {}
+        for item in value:
+            item = shape(item)
+            if isinstance(item, dict):
+                for k, v in item.items():
+                    merged[k] = v if merged.get(k) in (None, "*") else merged[k]
+        return [merged]
+    return "*"
 
 
 def git(*args):
@@ -282,6 +298,50 @@ class Capacity(unittest.TestCase):
         holder.kill()
         holder.wait()
         holder.stdout.close()
+
+
+    def test_status_and_status_json(self):
+        app = self.devices()
+        self.conf.write_text(self.conf.read_text() + "slots = 1\n")
+        tree = self.tmp / "app-wt"
+        git("-C", str(app), "worktree", "add", "-q", str(tree), "-b", "s2")
+        lib = self.repo("lib")
+        s2, review = "a" * 8 + "-5555-5555-5555-" + "5" * 12, "b" * 8 + "-5555-5555-5555-" + "5" * 12
+        self.story("demo", "> launched demo-s2\n> launched demo-review\n")
+        self.agents([self.row("demo-s2", s2, tree), self.row("demo-review", review, tree, "idle")])
+        launching = self.claude / "capacity" / "launching"
+        launching.mkdir(parents=True)
+        (launching / f"{os.getpid()}.json").write_text(json.dumps({"tree": str(lib), "story": "side"}))
+        t = time.time()
+        self.assertEqual(self.cli("take", "simulator", "--session", s2, at=t).returncode, 0)
+        self.assertEqual(self.cli("hold", "emulator", "--for", "me", "--minutes", "30", at=t).returncode, 0)
+        r = self.cli("status", at=t)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        hm = time.strftime("%H:%M", time.localtime(t))
+        until = time.strftime("%H:%M", time.localtime(t + 30 * 60))
+        self.assertEqual(r.stdout.splitlines(), [
+            "slots 2/3",
+            f"repo {app} · 1/1",
+            f"chain demo · running · {tree} · demo-s2 (busy), demo-review (idle)",
+            f"chain side · launching · {lib} · flowkit-spawn pid {os.getpid()}",
+            f"resource emulator · held for you until {until} (test hold)",
+            f"resource simulator · held by demo-s2 (demo) since {hm} (take)"])
+        data = json.loads((self.claude / "capacity" / "status.json").read_text())
+        self.assertEqual(data["version"], capacity.STATUS_VERSION)
+        self.assertEqual((data["agents"], data["used"], data["slots"]), ("known", 2, 3))
+        self.assertEqual([(c["story"], c["state"]) for c in data["chains"]], [("demo", "running"), ("side", "launching")])
+        self.assertEqual({r["name"]: r["session"] for r in data["resources"]}, {"simulator": s2, "emulator": "me"})
+        self.assertEqual(json.loads(self.cli("status", "--json", at=t).stdout), data)
+        fixture = json.loads(FIXTURE.read_text())
+        self.assertEqual(fixture["version"], capacity.STATUS_VERSION)
+        self.assertEqual(shape(fixture), shape(data))  # change the fixture with the schema, and the board with it
+        self.assertEqual([e["event"] for e in self.log_events()], ["take", "hold"])
+        self.agents([], "fail")
+        r = self.cli("status", at=t)
+        self.assertTrue(r.stdout.startswith("slots ?/3 · claude agents did not answer"))
+        data = json.loads((self.claude / "capacity" / "status.json").read_text())
+        self.assertEqual((data["agents"], data["used"], data["chains"]), ("unknown", None, []))
+        self.assertEqual(len(data["resources"]), 2)
 
 
 if __name__ == "__main__":

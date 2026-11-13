@@ -22,6 +22,7 @@ DEFAULTS = {"slots": 3, "slice_minutes": 50, "coordinator_growth": 300_000}
 STALL = 2 * 3600  # a story session idle this long with no close is shown as stalled and stops counting
 IDLE = 30 * 60  # a holder not busy with its transcript untouched this long gives its resources back
 ME = "me"  # the holder of the user's test hold
+STATUS_VERSION = 1  # status.json's schema; the board reads it, tests/fixtures/capacity-status.json shows it
 SESSION_LINE = re.compile(r"^Session: ([0-9a-f-]{36})\b", re.M)  # a recorded close names its session
 HEADING = re.compile(r"^## (.+?) · \d{4}-\d\d-\d\d", re.M)  # a close section, or the reporter's final report
 PROMISED = re.compile(r"^Next: (?:spawned|started) (.*)$", re.M)  # the sessions a close launched
@@ -242,7 +243,7 @@ def chains(rows, t=None):
         touched = last_touch(row)
         tree = toplevel(row["cwd"])
         chain = trees.setdefault(tree, {"tree": tree, "repo": main_checkout(tree), "story": members[name],
-                                        "sessions": []})
+                                        "sessions": [], "pid": None})
         chain["sessions"].append({"name": name, "session": sid, "status": row.get("status") or "",
                                   "stalled": not busy and touched is not None and t - touched > STALL})
     for chain in trees.values():
@@ -385,6 +386,7 @@ def take(rows, sid, names, why="take", t=None):
             write_json(state_dir() / "resources" / f"{name}.json",
                        {"session": sid, **who, "taken": t, "why": why})
             log("take", t, resource=name, session=sid, holder=who["name"], why=why)
+        write_status(rows, t)
     return 0, f"took {', '.join(sorted(names))}"
 
 
@@ -399,6 +401,7 @@ def release(rows, sid, names=None, t=None):
             lease = held[name]
             (state_dir() / "resources" / f"{name}.json").unlink(missing_ok=True)
             log("release", t, resource=name, session=sid, holder=lease.get("name", ""), since=lease.get("taken"))
+        write_status(rows, t)
     return 0, f"released {', '.join(gone)}" if gone else "held nothing"
 
 
@@ -417,7 +420,65 @@ def hold(rows, names, minutes, t=None):
                        {"session": ME, "name": ME, "story": "", "tree": "",
                         "taken": held.get(name, {}).get("taken", t), "why": "test hold", "until": t + minutes * 60})
             log("hold", t, resource=name, minutes=minutes)
+        write_status(rows, t)
     return 0, f"held {', '.join(sorted(names))} for you until {time.strftime('%H:%M', time.localtime(t + minutes * 60))}"
+
+
+def status_data(rows, t):
+    """The snapshot status.json holds: slots, chains and resources (queue from the gate, later)."""
+    cfg = load_config()
+    found = chains(rows, t)
+    used = slots(cfg, found)
+    held = leases()
+    resources = []
+    for name in sorted(declared(cfg) | set(held)):
+        lease = held.get(name)
+        resources.append({"name": name, "session": lease and lease["session"], "holder": lease and lease.get("name"),
+                          "story": lease and lease.get("story"), "since": lease and lease.get("taken"),
+                          "why": lease and lease.get("why"), "until": lease and lease.get("until")})
+    return {"version": STATUS_VERSION, "at": t, "agents": "unknown" if rows is None else "known",
+            "slots": cfg["slots"], "used": used and used["used"],
+            "repos": [{"path": path, **counts} for path, counts in sorted(used["repos"].items())] if used else [],
+            "chains": found or [], "resources": resources, "queue": []}
+
+
+def write_status(rows, t):
+    write_json(state_dir() / "status.json", status_data(rows, t))
+
+
+def clock(t):
+    return time.strftime("%H:%M", time.localtime(t))
+
+
+def status_lines(data):
+    """One line for the slots, then one per repo limit, chain and resource."""
+    if data["agents"] == "unknown":
+        lines = [f"slots ?/{data['slots']} · claude agents did not answer: nothing is reclaimed, no new chain starts"]
+    else:
+        lines = [f"slots {data['used']}/{data['slots']}"]
+    lines += [f"repo {r['path']} · {r['used']}/{r['slots']}" for r in data["repos"]]
+    for c in data["chains"]:
+        who = ", ".join(f"{s['name']} ({'stalled' if s['stalled'] else s['status']})" for s in c["sessions"])
+        lines.append(f"chain {c['story'] or '-'} · {c['state']} · {c['tree']}" +
+                     (f" · {who}" if who else f" · flowkit-spawn pid {c['pid']}"))
+    for r in data["resources"]:
+        if not r["session"]:
+            lines.append(f"resource {r['name']} · free")
+        elif r["session"] == ME:
+            lines.append(f"resource {r['name']} · held for you until {clock(r['until'])} (test hold)")
+        else:
+            lines.append(f"resource {r['name']} · held by {r['holder'] or r['session']}"
+                         f"{' (' + r['story'] + ')' if r['story'] else ''} since {clock(r['since'])} ({r['why']})")
+    return lines
+
+
+def status(rows, t=None):
+    """Drop what is over, write status.json and return it."""
+    t = now() if t is None else t
+    with lock():
+        refresh(rows, t)
+        write_status(rows, t)
+    return status_data(rows, t)
 
 
 def resolve_session(rows):
@@ -449,6 +510,8 @@ def names_arg(values):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="flowkit-capacity", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("status", help="slots, chains and resources, one line each")
+    p.add_argument("--json", action="store_true", help="print status.json instead")
     p = sub.add_parser("take", help="lease resources to this session, all or none")
     p.add_argument("names", nargs="+")
     p.add_argument("--session", help="the holder's session id (default: this session)")
@@ -465,6 +528,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     rows = snapshot()  # before the lock, never under it
+    if args.cmd == "status":
+        data = status(rows)
+        print(json.dumps(data, indent=2) if args.json else "\n".join(status_lines(data)))
+        return 0
     names = names_arg(getattr(args, "names", []))
     undeclared = names - declared(load_config())
     if undeclared:

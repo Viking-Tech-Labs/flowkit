@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "at": 1786700000.0,
+  "agents": "known",
+  "slots": 3,
+  "used": 2,
+  "repos": [
+    {
+      "path": "/Users/me/app",
+      "slots": 1,
+      "used": 1
+    }
+  ],
+  "chains": [
+    {
+      "tree": "/Users/me/app-wt",
+      "repo": "/Users/me/app",
+      "story": "demo",
+      "sessions": [
+        {
+          "name": "demo-s2",
+          "session": "aaaaaaaa-5555-5555-5555-555555555555",
+          "status": "busy",
+          "stalled": false
+        },
+        {
+          "name": "demo-review",
+          "session": "bbbbbbbb-5555-5555-5555-555555555555",
+          "status": "idle",
+          "stalled": false
+        }
+      ],
+      "pid": null,
+      "state": "running"
+    },
+    {
+      "tree": "/Users/me/lib",
+      "repo": "/Users/me/lib",
+      "story": "side",
+      "sessions": [],
+      "state": "launching",
+      "pid": "4242"
+    }
+  ],
+  "resources": [
+    {
+      "name": "emulator",
+      "session": "me",
+      "holder": "me",
+      "story": "",
+      "since": 1786700000.0,
+      "why": "test hold",
+      "until": 1786701800.0
+    },
+    {
+      "name": "simulator",
+      "session": "aaaaaaaa-5555-5555-5555-555555555555",
+      "holder": "demo-s2",
+      "story": "demo",
+      "since": 1786700000.0,
+      "why": "take",
+      "until": null
+    },
+    {
+      "name": "backend",
+      "session": null,
+      "holder": null,
+      "story": null,
+      "since": null,
+      "why": null,
+      "until": null
+    }
+  ],
+  "queue": []
+}
