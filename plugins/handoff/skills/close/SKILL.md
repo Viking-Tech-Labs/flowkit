@@ -174,6 +174,12 @@ other session still uses them, and ends with what is ready for the user to try i
         DONE gets one line: the session's name, `claude attach <name>` to open it, its Remote
         Control link. A `REPORTER driver=background` line before it means the story's reporter
         was started too. Step 10 writes `Next: started <name>`.
+      - exit 11, `QUEUED #<n>, ~<HH:MM> · id=<id> · <why>`: the capacity gate queued the
+        launch (the machine's slots are all used by other chains, or a resource in its `Needs:`
+        is held); it starts by itself when a slot or the resource frees, and this close's own
+        record is one of the moments that checks. Nothing is held for it meanwhile. DONE gets
+        one line: the session's name, `queued #<n>, starts ~<HH:MM>`, and why. Step 10 writes
+        `Next: queued <name>`. Never relaunch with `--over-cap` unless the user says "over cap".
       - exit 3 (not inside tmux), 4 (a session of that name runs), 6 (uncommitted changes),
         7 (driver not available), 8 (the folder was never trusted: FOR ME is to run `claude` in
         the repo once and accept the prompt, then the launch line) or 9 (`claude --bg` failed,
@@ -191,13 +197,14 @@ other session still uses them, and ends with what is ready for the user to try i
     ## <this session's name> · <date "+%Y-%m-%d %H:%M">
     Session: ${CLAUDE_SESSION_ID} · Repo: <path>
     Resume: cd <path> && claude -r ${CLAUDE_SESSION_ID}
-    Next: started <name> | pending <name> | none
+    Next: started <name> | queued <name> | pending <name> | none
     [Prompt: <saved path> — launch: <launch line>]
     <the DONE / FOR ME / OPEN / LEFT of step 7, verbatim>
     ```
     This session's name is the `Session:` of its prompt; with none, `<repo>-<branch>`. `Next` says
     what follows:
     - `started <name>` when a session was launched;
+    - `queued <name>` when the capacity gate queued it (exit 11): it starts by itself;
     - `pending <name>` when step 5 drafted a prompt and nothing launched it. The prompt must be
       saved: if step 9 did not save it, run `handoff.py save-prompt <name>` now, and add the
       `Prompt:` line with the path it printed and the launch line of step 9.1;

@@ -3,12 +3,16 @@ for a launch. Lines in [brackets] appear only when they apply. Name sections to 
 whole files; carry what this session verified so the next one does not look it up again. The
 Chain end line is the story's own (`handoff.py chain-end <slug>`), repeated by every brief.
 `Report-to:` names the session a helper beside the chain sends its verdict to (step 5), never a
-chain successor.
+chain successor. `Needs:` names the resources of `capacity.conf` the slice will use (a simulator,
+a local backend), which `flowkit-spawn` takes for it before the launch; `Left:` is how many slices
+of the plan remain after this one. Both stay in the header, before its first blank line.
 
 ```
 Repo: <absolute path>   Session: <next session's name>[   Story: <slug>][   Report-to: <session>]
 [Model: <model>   Effort: <effort>]
 [Why this model: <the reason the ladder gave>]
+[Needs: <resource>, <resource>]
+[Left: <slices after this one>]
 
 Read first, ONLY these sections: <doc → section>, <doc → section>. Don't read the
 whole files; don't re-derive what the docs already carry.

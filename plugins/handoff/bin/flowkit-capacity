@@ -4,4 +4,5 @@
 #   flowkit-capacity take <names> [--session <id>]      all or none, refused while holding others
 #   flowkit-capacity release [<names>] [--session <id> | --for me]
 #   flowkit-capacity hold <names> --for me [--minutes 60]
+#   flowkit-capacity drain                              launch what the queue holds that can start now
 exec python3 "$(dirname "$0")/../scripts/capacity.py" "$@"

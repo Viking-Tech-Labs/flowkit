@@ -13,7 +13,7 @@ the story appends its close there at `/handoff:close` as a section:
     ## <session name> · <YYYY-MM-DD HH:MM>
     Session: <session id> · Repo: <path>
     Resume: cd <path> && claude -r <session id>
-    Next: started <name> | pending <name> | none
+    Next: started <name> | queued <name> | pending <name> | none
     [Prompt: <saved path> — launch: <launch line>]
     <its DONE / FOR ME / OPEN / LEFT, verbatim>
 
@@ -23,8 +23,8 @@ messages can go missing, so always read the file, never answer from the message 
 **On a message.** Read the file and print one line per section you have not reported yet:
 `<name> — <what landed, a few words> · FOR ME <n> · Next <…>`. Nothing else; keep the turn short.
 
-**The final report.** Write it when both hold: every name in a `Next: started …` line has its own
-section, and no session of the story is busy or waiting (`claude agents --json` lists each
+**The final report.** Write it when both hold: every name in a `Next: started …` or `Next: queued …`
+line has its own section, and no session of the story is busy or waiting (`claude agents --json` lists each
 session's `name` and `status`; the story's sessions are the names in the file). The session that
 sent the doorbell is still busy for a few seconds after it: when it is the only one, look again
 30 seconds apart, up to three times, before you decide. Wait with the Monitor tool (a command that

@@ -317,9 +317,10 @@ and DONE carry the verdict too, and a held or failed send loses nothing but the 
 
 ## Capacity
 
-New, not wired into launches yet. A machine runs a few chains at once, and some things a repo has
-only one of: an iOS simulator, an Android emulator, a local backend, a dev-server port. `flowkit-capacity`
-(`bin/`, over `scripts/capacity.py`) counts the first and leases the second.
+A machine runs a few chains at once, and some things a repo has only one of: an iOS simulator, an
+Android emulator, a local backend, a dev-server port. `flowkit-capacity` (`bin/`, over
+`scripts/capacity.py`) counts the first and leases the second, and `flowkit-spawn` is the gate that
+holds every story launch to both.
 
 The numbers live in `${XDG_CONFIG_HOME:-~/.config}/flowkit/capacity.conf`; with no file a machine
 runs 3 chains and declares no resources:
@@ -354,14 +355,52 @@ shape it does not know, the count is unknown, never zero: nothing is reclaimed.
 | `flowkit-capacity take simulator,backend` | Leases the set to this session, or nothing if any of it is held; refused while the session holds something outside the set (release first: nobody waits for more while holding some). |
 | `flowkit-capacity release [names]` | Gives back what this session holds, all of it without names. |
 | `flowkit-capacity hold simulator --for me --minutes 60` | Your test hold: no slice takes it until the minutes run out or `release --for me`; run it again to renew. |
+| `flowkit-capacity drain` | Launches what the queue holds that can start now (it also runs on its own, see below). |
 
 A lease goes free on its own when the holder's close is recorded, when the holder has no pid, or
 when it has been not busy with its transcript untouched for 30 minutes; never while `claude agents`
 is unknown (a test hold still runs out on the clock).
 
+**The gate.** Every story launch through `flowkit-spawn` (`--single` excepted) asks it first,
+after the refusals and before anything is typed:
+
+- A launch that opens a **new chain** while the machine's slots, or its repo's, are all used, or
+  while `claude agents` does not answer, is not launched but queued: `flowkit-spawn` prints
+  `QUEUED #<position>, ~<HH:MM> · id=<id> · <why>`, writes `> queued <name> · …` into the story
+  file and exits 11. The time is rough (a slice per slot ahead of it). `--over-cap` launches it
+  anyway, logged as `over-cap`.
+- A chain's **own next slice** never waits for a slot: the launching session belongs to the same
+  story (or runs in the tree the launch goes to, a first slice started by hand). A coordinator's or
+  a reporter's launch is always a new chain. A launch into a tree that already holds a counted
+  chain (a review beside the next slice) needs no slot either.
+- The prompt's header (the lines before its first blank one) may carry `Needs: simulator, backend`
+  and `Left: 2` (slices left after this one, for ETAs). What `Needs:` names is taken all or none
+  for the launch, before anything waits; a name no section declares is ignored with one stderr
+  line. A continuation's closer hands over what it holds only when every need is free at once;
+  otherwise it gives back everything it holds and the launch is queued holding nothing, so two
+  closers crossing over a simulator and a backend never wait on each other.
+- The queue is first in, first out: a launch never passes an earlier one waiting for a slot, or
+  for a resource it needs too.
+- The launch's holds go to the new session once `flowkit-spawn` prints `SPAWNED`, and back on any
+  other exit (a refusal, a failed start, a kill: an EXIT trap, and the `launching/` marker goes
+  with the pid). Every story launch writes `> launched <name> · <time>` into the story file,
+  which is what makes the new session count before its first close.
+
+**The queue drains itself.** `capacity.py drain` launches, under the lock and oldest first,
+every queued launch whose slot and needs are free, unless a load hold is set, as a detached
+`flowkit-spawn --from-queue <id>` with the arguments it was queued with (its tmux server and
+session included; output in `capacity/launched/<id>.log`). It runs on every recorded close
+(`handoff.py record`, which counts the closing session as gone though it is still busy), every
+release, every launch that ends, and the tmux status tick (`flowkit-tmux waiting`, detached, at
+most every `FLOWKIT_CAPACITY_POLL` seconds, 15 by default). An empty queue costs one directory
+read. With the background driver and no tmux there is no tick: the queue drains on those events
+only.
+
 State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/capacity/`: `resources/<name>.json` (the
-leases), `launching/<pid>.json` (an in-flight launch, counted while its pid lives), `log.jsonl`
-(one line per take, release, free, reclaim and hold; `reclaim` when the holder died) and
+leases), `launching/<pid>.json` (an in-flight launch, counted while its pid lives), `queue/<id>.json`
+(a queued launch: its arguments, prompt, story, tree, needs, left, by, queued-at), `log.jsonl`
+(one line per take, release, free, reclaim, hold, launch, queue, dequeue, repoint and over-cap;
+`reclaim` when the holder died) and
 `status.json`, rewritten on every change with a `version` field
 (`tests/fixtures/capacity-status.json` shows its shape). Every change runs under one lock that is
 tried for 10 seconds and then gone on without, with one stderr line, so a stuck holder never
