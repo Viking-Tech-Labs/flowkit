@@ -410,11 +410,13 @@ class Capacity(unittest.TestCase):
     def test_over_cap_launches_anyway(self):
         app, rows, _ = self.full_machine()
         pid = str(self.sleeper())
-        code, msg = capacity.gate(rows, pid, app, "demo", "demo-s1", self.prompt("Needs: simulator"), [], {}, over_cap=True)
+        code, msg = capacity.gate(rows, pid, app, "demo", "demo-s1", self.prompt("Needs: simulator"), [], {}, over_cap=True,
+                                  held=90)
         self.assertEqual((code, msg), (0, "new chain"))
         self.assertEqual(self.held(), {"simulator": f"launch:{pid}"})
         self.assertEqual([m["pid"] for m in capacity.markers()], [pid])
         self.assertEqual([e["event"] for e in self.log_events()], ["over-cap", "take", "launch"])
+        self.assertEqual(self.log_events()[-1]["held"], 90, "the load-hold seconds, not the leases")
 
     def test_a_continuation_never_waits_for_a_slot(self):
         app, rows, _ = self.full_machine()

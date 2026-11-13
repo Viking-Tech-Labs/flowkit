@@ -763,11 +763,11 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
                     log("over-cap", t, name=name, story=story, tree=tree, why=room)
             else:
                 why = room
-        held = leases()
-        mine = {n for n, lease in held.items() if sid and lease["session"] == sid}
+        leased = leases()
+        mine = {n for n, lease in leased.items() if sid and lease["session"] == sid}
         wanted = {n for e in waiting for n in e.get("needs", [])}
-        busy = {n: held[n] for n in needs if n in held and not (cont and n in mine)}
-        later = sorted(n for n in needs - set(held) if n in wanted)
+        busy = {n: leased[n] for n in needs if n in leased and not (cont and n in mine)}
+        later = sorted(n for n in needs - set(leased) if n in wanted)
         if not why and (busy or later):
             why = "; ".join(filter(None, [busy and f"busy: {busy_line(busy)}",
                                           later and f"{', '.join(later)} wanted by an earlier launch"]))
@@ -780,8 +780,8 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
             if cont and mine:
                 for n in sorted(mine):
                     (state_dir() / "resources" / f"{n}.json").unlink(missing_ok=True)
-                    log("release", t, resource=n, session=sid, holder=held[n].get("name", ""),
-                        since=held[n].get("taken"), why="queued successor")
+                    log("release", t, resource=n, session=sid, holder=leased[n].get("name", ""),
+                        since=leased[n].get("taken"), why="queued successor")
             seq_path = state_dir() / "queue" / ".seq"
             try:
                 seq = int(seq_path.read_text()) + 1
