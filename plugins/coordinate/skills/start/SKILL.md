@@ -11,7 +11,8 @@ Control on, so the user can answer one in its pane or on the phone.
 The helper is `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/coordinate.py"` (`coordinate.py` below).
 Workers start through handoff's `flowkit-spawn`. Run `coordinate.py spawner` once and use the
 path it prints (`<spawn>` below), not the bare name: a PATH inherited from an older session can
-put an older handoff's copy first. While `~/.claude/load-hold` exists a launch waits until it is
+put an older handoff's copy first. Handoff's capacity script sits next to it:
+`python3 "$(dirname <spawn>)/../scripts/capacity.py"` (`<cap>` below). While `~/.claude/load-hold` exists a launch waits until it is
 gone: run `<spawn>` with `run_in_background: true` then. If it fails, say that coordinate needs `handoff` installed
 (`claude plugin install handoff@flowkit`) and stop.
 
@@ -67,6 +68,10 @@ coordinate from the confirmed doc, saved next to the story's other docs. Away, w
   the worker runs at the user's defaults. A model or effort the user names wins.
 - Your own name: `coordinate.py self`. Workers message that name. If it prints that this session
   is not listed, ask the user to `/rename` it (away: stop and say so, nothing launched).
+- Capacity: the machine runs a few chains at once and has one of some resources (a simulator, a
+  local backend). With more workers than free slots, or any worker that needs a resource, plan
+  the batch with `/coordinate:waves` (its "Plan the batch"): it gives each worker its wave and
+  times, and sheds what needs no resource to a chain of its own.
 
 ## 3. Confirm the plan
 
@@ -92,7 +97,10 @@ to the spawner): what the story's last session leaves behind, which every worker
 serves and which says whether a worker pushes. `none` means the story has no line yet: write
 `none` and no worker pushes.
 
-Start each worker, in plan order:
+Every brief's header carries the worker's resources and the slices left after its first one,
+which the gate reads: `Needs: simulator, backend   Left: 2` (`Needs: none` for none).
+
+Start each worker, in plan order, all of them: the gate decides what starts now.
 
 ```sh
 <spawn> --story <slug> --repo <path or worktree> --name <worker> \
@@ -104,13 +112,17 @@ header of a handoff prompt) is what makes the worker's `/handoff:close` record i
 and the board show the story. The script takes the launch driver and permission
 mode from handoff's settings, refuses a repo with uncommitted changes (exit 6: give the worker a
 worktree, or `--force` only on the user's word) or a running namesake (exit 4), and prints
-`SPAWNED … name=<worker> rc=<link>`. Exit 3 means the tmux driver and no tmux here: say so (run
+`SPAWNED … name=<worker> rc=<link>`. **Exit 11 is not a failure**: it prints `QUEUED #<n>,
+~<HH:MM> · id=<id> · <why>` and the launch waits in the machine's queue, which starts it by itself
+once its slot and resources are free; the board's State is `queued ~HH:MM`, and you go on with the
+next worker. Never retry a queued launch; `--over-cap` only on the user's word. Exit 3 means the tmux driver and no tmux here: say so (run
 this session inside tmux, or `/handoff:setup` for the background driver) and stop. Exit 8 means a
 folder never trusted: the user runs `claude` there once. Put each worker's Remote Control link on
 the board.
 
-Then `coordinate.py workers <worker> ...`: each should read `live`. Never type into a worker's
-pane; everything travels by SendMessage.
+Then `coordinate.py workers <worker> ...`: each started one should read `live`. Never type into
+a worker's pane; everything travels by SendMessage. Then tell the user the plan line
+(`/coordinate:waves`, "Tell"), no question.
 
 ## 5. The loop
 
@@ -134,10 +146,16 @@ Coordinator: <name> · Mission: <path or "pasted"> · Updated: <date time>
 ```
 
 - **DONE**: update the board, start or brief what was held on it, tell the user what moved.
-- **The test queue**: whenever an item becomes testable, or its state or ETA moves, rewrite
-  `${CLAUDE_CONFIG_DIR:-~/.claude}/stories/<slug>.tests.md`, one line per item: `item · MR · device ·
-  state · ETA as a clock time` (format: the board plugin's README, "The test queue"). `/board`
-  and `/where` show it under the story.
+  While anything is queued (`<cap> status` lists `queue` lines), tell the worker to `/handoff:close` now: an idle worker holds its slot, and its close
+  starts the next launch.
+- **The test queue**: whenever an item becomes testable, or its state or ETA moves, set its line
+  in `${CLAUDE_CONFIG_DIR:-~/.claude}/stories/<slug>.tests.md` with `<cap> testq <slug> set
+  "<item>" --mr … --device … --state … --eta HH:MM` (`/coordinate:waves`, "The test queue"),
+  never by hand: the drain writes the same file. One line per item, `item · MR · device · state ·
+  ETA` (the board plugin's README, "The test queue"); `/board` and `/where` show it under the
+  story.
+- **Status replies** read `<cap> status` with the board, and run the self-check
+  (`/coordinate:waves`, "Self-check"). Never poll the queue: it drains itself.
 - **BLOCKED**: record it. Blocked on the user: say so plainly, with the worker's name and its
   Remote Control link.
 - **To reach a worker**, `coordinate.py workers <worker>` first. `live`: SendMessage to its name;

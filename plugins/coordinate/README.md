@@ -12,6 +12,7 @@ coordinate@flowkit`. It needs `handoff`, whose `flowkit-spawn` starts every work
 | Skill | What it does |
 |---|---|
 | `/coordinate:start <mission>` | Makes this session the coordinator: reads the mission, plans the workers, shows the plan and starts nothing before your yes, briefs and starts each worker, then runs the loop below. |
+| `/coordinate:waves` | Runs a batch within what the machine can hold: plans it in waves, hands every launch to `flowkit-spawn`'s gate, tells you the plan in one line, keeps the test queue and the coordinator's own growth in check (see "Waves" below). The coordinator reaches for it on its own. |
 
 ## The mission
 
@@ -52,6 +53,29 @@ Workers sit idle by design, waiting for the next message. In tmux they wait as l
 is open. A background session that sits idle for hours is stopped by Claude, its conversation
 kept; the coordinator checks before each message (`coordinate.py workers`) and wakes a stopped
 worker with the message as its prompt (`coordinate.py wake`), under its own id and settings.
+
+## Waves
+
+A machine runs a few chains at once and has one of some things (a simulator, a local backend):
+handoff's README, "Capacity", says how `flowkit-spawn` counts and holds both. The coordinator
+plans a batch with `capacity.py waves` (each item's wave, start and ready times as `~HH:MM`, from
+each repo's median slice time in the log), sheds every item that needs no resource to a chain of
+its own, and launches everything in order: the gate starts what fits and queues the rest (exit
+11, `QUEUED #2, ~16:40`), and the queue starts it by itself as slots free up. You get one line:
+
+```
+Plan: 3 of 7 now (A, B, C) · 2 queued (D ~16:40, E ~18:10) · 2 shed (F, G) · slots 3/3 · 4 wait on your testing
+```
+
+- Briefs carry `Needs:` and `Left:` in their header, which the gate reads.
+- A worker's DONE while anything is queued gets told to close at once: an idle worker holds its
+  slot.
+- The test queue (`<story>.tests.md`) is written only through `capacity.py testq`, locked and
+  logged, so planned and actual ready times can be compared; queued items get their lines from
+  `waves --write` and move to `running` when they start.
+- At each status reply the coordinator checks its own context growth over the last 24 hours
+  (`coordinate.py self --growth`); over `coordinator_growth` it says so, sheds what it can and runs
+  one repo slot fewer for a while (`capacity.py limit <repo> -1`).
 
 While you are away (`/handoff:away`) the coordinator asks nothing: it takes the recommended
 option at each fork and marks it "(auto)" on the board.
