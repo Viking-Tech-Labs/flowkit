@@ -687,6 +687,26 @@ def record(story):
     print(path)
     if section.group(1) != "Final report":
         print(f"reporter: {ring(slug, section.group(1))}")
+    drain(text)
+
+
+def drain(text):
+    """A close can free a slot or a resource: `capacity.py drain` launches what the capacity queue
+    holds that can start now, the closing session counted as gone though it is still busy. An
+    empty queue costs one directory read; a failure never fails the close."""
+    try:
+        if not any(e.name.endswith(".json") for e in os.scandir(CLAUDE / "capacity" / "queue")):
+            return
+    except OSError:
+        return
+    sid = re.search(r"^Session: ([0-9a-f-]{36})\b", text, re.M)
+    try:
+        out = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "capacity.py"), "drain",
+                              *(["--closed", sid.group(1)] if sid else [])], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return
+    for line in out.stdout.splitlines():
+        print(f"capacity: {line}")
 
 
 def chain_end_conf():

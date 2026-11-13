@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -253,7 +254,7 @@ class Handoff(unittest.TestCase):
         agents` lists. Returns the running process, the flag and the story file."""
         repo = self.spawn_repo()
         stub = self.tmp / "bin" / "claude"
-        stub.write_text(f"#!/bin/sh\nif [ \"$1\" = agents ]; then echo '[{{\"id\":\"abc123\"}}]'; "
+        stub.write_text(f"#!/bin/sh\nif [ \"$1\" = agents ]; then echo '[{{\"id\":\"abc123\",\"sessionId\":\"abc12300-0000-0000-0000-000000000000\"}}]'; "
                         f"else echo \"$@\" >> {self.calls}; echo 'backgrounded · abc123'; fi\n")
         flag = self.tmp / "claude" / "load-hold"
         if flag_lines is not None:
@@ -295,14 +296,14 @@ class Handoff(unittest.TestCase):
         out, err = proc.communicate(timeout=10)
         self.assertEqual(proc.returncode, 0, err)
         self.assertEqual(err, "launch hold ignored, FLOWKIT_IGNORE_HOLD is set: free memory 9%\n")
-        self.assertFalse(story.exists(), "nothing to say in the story")
+        self.assertRegex(story.read_text(), r"^# st\n> launched s2 · [\d :-]+\n$", "nothing to say but the launch")
         self.assertIn("SPAWNED driver=background", out)
 
     def test_spawn_without_a_load_hold_says_nothing(self):
         proc, _, story = self.held_spawn(None)
         out, err = proc.communicate(timeout=10)
         self.assertEqual((proc.returncode, err), (0, ""))
-        self.assertFalse(story.exists())
+        self.assertRegex(story.read_text(), r"^# st\n> launched s2 · \d{4}-\d\d-\d\d \d\d:\d\d\n$")
         self.assertIn("SPAWNED driver=background", out)
 
     def test_spawn_dry_run_reports_the_load_hold_without_waiting(self):
@@ -371,6 +372,108 @@ class Handoff(unittest.TestCase):
         self.assertEqual(out.stderr, f"warning: session 's2' exited at start-up in {pane}; typed again\n"
                          f"session 's2' exited twice at start-up in pane {pane}; its output is in the pane\n")
         self.assertEqual(launches.read_text(), "launch\nlaunch\n")
+
+    def capacity_state(self):
+        """What the capacity state holds: resource -> holder, the launching pids, the log's events."""
+        state = self.tmp / "claude" / "capacity"
+        log = state / "log.jsonl"
+        return ({p.stem: json.loads(p.read_text())["session"] for p in (state / "resources").glob("*.json")},
+                sorted(p.stem for p in (state / "launching").glob("*.json")),
+                [json.loads(line)["event"] for line in log.read_text().splitlines()] if log.exists() else [])
+
+    def test_spawn_gives_back_what_it_took_when_the_launch_fails(self):
+        repo = self.spawn_repo()
+        (self.tmp / "flowkit" / "capacity.conf").write_text(f"[{repo}]\nresource simulator = a device check\n")
+        stub = self.tmp / "bin" / "claude"
+        stub.write_text("#!/bin/sh\nif [ \"$1\" = agents ]; then echo '[]'; else echo boom; exit 1; fi\n")
+        prompt = self.tmp / "p.md"
+        prompt.write_text("Repo: /r   Session: s2\nNeeds: simulator\n\nToday: x\n")
+        out = subprocess.run([str(SPAWN_BIN), "--no-rc", "--repo", str(repo), "--name", "s2", "--story", "st", str(prompt)],
+                             capture_output=True, text=True, env=self.env)
+        self.assertEqual(out.returncode, 9, out.stderr)
+        self.assertEqual(self.capacity_state(), ({}, [], ["take", "launch", "release"]), "taken, then given back")
+        self.assertRegex((self.tmp / "claude" / "stories" / "st.md").read_text(), r"> launched s2 · ")
+
+    @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+    def test_a_full_machine_queues_and_a_close_drains_it(self):
+        """slots = 1, held by a live chain `other`; a new chain is queued, and the close of other-s1
+        launches it into a throwaway tmux server, its simulator handed to the new session."""
+        repo = self.spawn_repo()
+        (self.tmp / "flowkit" / "handoff.conf").write_text("driver=tmux\nreporter=off\n")
+        (self.tmp / "flowkit" / "capacity.conf").write_text(f"slots = 1\n[{repo}]\nresource simulator = s\n")
+        (self.tmp / "bin" / "tmux").unlink()
+        other = self.tmp / "other"
+        other.mkdir()
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        sleeper = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(sleeper.wait)
+        self.addCleanup(sleeper.kill)
+        sid = "0" * 8 + "-1111-1111-1111-" + "1" * 12
+        fake = self.tmp / "fake"
+        fake.mkdir()
+        (fake / "rows.json").write_text(json.dumps([{"sessionId": sid, "name": "other-s1", "pid": sleeper.pid,
+                                                      "cwd": str(other), "status": "busy", "kind": "interactive"}]))
+        stories = self.tmp / "claude" / "stories"
+        stories.mkdir(parents=True)
+        (stories / "other.md").write_text("# other\n> launched other-s1 · 2026-11-13 14:00\n")
+        claude = self.tmp / "bin" / "claude"
+        claude.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys, time, uuid\n"
+            f"fake = {str(fake)!r}\n"
+            "if sys.argv[1:2] == ['agents']:\n"
+            "    rows = json.load(open(fake + '/rows.json'))\n"
+            "    for f in os.listdir(fake):\n"
+            "        if f.startswith('live-'):\n"
+            "            rows.append(json.load(open(os.path.join(fake, f))))\n"
+            "    print(json.dumps(rows))\n"
+            "    sys.exit(0)\n"
+            "name = sys.argv[sys.argv.index('--name') + 1]\n"
+            "row = {'sessionId': str(uuid.uuid4()), 'name': name, 'pid': os.getpid(), 'cwd': os.getcwd(),\n"
+            "       'status': 'busy', 'kind': 'interactive', 'startedAt': int(time.time() * 1000)}\n"
+            "open(os.path.join(fake, f'live-{os.getpid()}.json'), 'w').write(json.dumps(row))\n"
+            "time.sleep(30)\n")
+        claude.chmod(0o755)
+        env = {k: v for k, v in self.env.items() if k not in ("TMUX", "TMUX_PANE", "CLAUDE_PID")}
+        env["TMUX_TMPDIR"] = str(self.tmp)  # a server of its own: nothing reaches the user's tmux
+        sock = f"ft-{os.getpid()}"
+        real = lambda *a: subprocess.run(["tmux", "-L", sock, *a], capture_output=True, text=True, env=env)
+        self.addCleanup(real, "kill-server")
+        # every pane a bare bash with the fake claude first on its PATH: never the user's shell rc
+        shell = f"env PATH={self.tmp / 'bin'}:/usr/bin:/bin /bin/bash --noprofile --norc"
+        real("-f", "/dev/null", "new-session", "-d", "-s", "main", "-x", "200", "-y", "50", shell)
+        real("set-option", "-g", "default-shell", "/bin/sh")
+        real("set-option", "-g", "default-command", shell)
+        prompt = self.tmp / "p.md"
+        prompt.write_text("Repo: /r   Session: demo-s1\nNeeds: simulator\n\nToday: x\n")
+        out = subprocess.run([str(SPAWN_BIN), "--tmux-socket", sock, "--tmux-session", "main", "--no-rc", "--repo", str(repo),
+                              "--name", "demo-s1", "--story", "demo", str(prompt)], capture_output=True, text=True, env=env)
+        self.assertEqual(out.returncode, 11, out.stderr)
+        self.assertRegex(out.stdout, r"^QUEUED #1, ~\d\d:\d\d · id=1 · slots 1/1\n$")
+        self.assertEqual(self.capacity_state()[:2], ({}, []), "a queued launch holds nothing")
+        entry = json.loads((self.tmp / "claude" / "capacity" / "queue" / "1.json").read_text())
+        self.assertIn("--tmux-socket", entry["argv"])
+        self.assertEqual(entry["argv"][entry["argv"].index("--tmux-session") + 1], "main")
+        self.assertEqual(list((fake).glob("live-*")), [], "nothing launched")
+        close = f"## other-s1 · 2026-11-13 15:00\nSession: {sid}\n\nDONE\n- landed\n"
+        rec = subprocess.run(["python3", str(HANDOFF), "record", "other"], input=close, capture_output=True, text=True, env=env)
+        self.assertEqual(rec.returncode, 0, rec.stderr)
+        self.assertRegex(rec.stdout, r"capacity: launched #1 demo-s1 \(flowkit-spawn pid \d+\)\n")
+        log = self.tmp / "claude" / "capacity" / "launched" / "1.log"
+        deadline = time.time() + 30
+        while time.time() < deadline and "SPAWNED" not in (log.read_text() if log.exists() else ""):
+            time.sleep(0.2)
+        self.assertRegex(log.read_text(), r"SPAWNED pane=\d+ id=%\d+ tab=demo story=demo name=demo-s1 rc=off ")
+        (live,) = fake.glob("live-*")
+        new = json.loads(live.read_text())
+        self.addCleanup(lambda: subprocess.run(["kill", str(new["pid"])], capture_output=True))
+        while time.time() < deadline and self.capacity_state()[1]:
+            time.sleep(0.2)
+        held, launching, events = self.capacity_state()
+        self.assertEqual((held, launching), ({"simulator": new["sessionId"]}, []), "handed to the new session")
+        self.assertEqual(events, ["queue", "take", "dequeue", "repoint"])
+        story = (stories / "demo.md").read_text()
+        self.assertRegex(story, r"> queued demo-s1 · [\d :-]+ · #1, ~\d\d:\d\d · id=1 · slots 1/1\n> launched demo-s1 · ")
 
     def test_refresh_prunes_the_old_prompt_copies(self):
         self.env["XDG_CONFIG_HOME"] = str(self.tmp)  # no installed kit in the sandbox: refresh copies nothing

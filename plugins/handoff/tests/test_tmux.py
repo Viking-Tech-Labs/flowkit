@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "flowkit-tmux"
 SEP = "\x1f"
@@ -173,6 +174,28 @@ class Cache(Labels):
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.ft.status_line()
         return out.getvalue()
+
+    def test_the_tick_drains_the_capacity_queue(self):
+        queue = self.tmp / "capacity" / "queue"
+        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
+            self.line()
+            queue.mkdir(parents=True)
+            (queue / ".seq").write_text("1\n")
+            self.ft.CACHE.unlink()
+            self.line()
+            self.assertEqual(popen.call_count, 0, "an empty queue costs one directory read")
+            (queue / "1.json").write_text("{}")
+            self.ft.CACHE.unlink()
+            self.line()
+            self.assertEqual(popen.call_count, 1)
+            self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "capacity.py"), "drain"])
+            self.ft.CACHE.unlink()
+            self.line()
+            self.assertEqual(popen.call_count, 1, "at most every FLOWKIT_CAPACITY_POLL seconds")
+            with mock.patch.dict(os.environ, {"FLOWKIT_CAPACITY_POLL": "0"}):
+                self.ft.CACHE.unlink()
+                self.line()
+            self.assertEqual(popen.call_count, 2)
 
     def test_a_line_younger_than_ten_seconds_comes_from_the_cache(self):
         self.session(1, status="waiting")

@@ -30,6 +30,8 @@
 #                          starts takes a pane split after the last one (slot 2 of a one-pane tab)
 #   --new                  always split a new pane instead of reusing an idle shell (tmux)
 #   --force                spawn even when a session of that name runs or the tree is dirty
+#   --over-cap             start a new chain even when the machine's slots are all used (the gate)
+#   --from-queue <id>      set by `capacity.py drain` for a queued launch: the gate already passed
 #   --dry-run              print the pick and the command, launch nothing
 #   --tmux-socket <name>   the tmux server (tmux -L); needed when not run inside tmux
 #   --tmux-session <name>  the tmux session there (default: the current one, else the first)
@@ -39,7 +41,8 @@
 #       7 the driver is not available · 8 the folder is not trusted yet (background: run
 #       `claude` there once and accept the prompt) · 9 `claude --bg` failed (its output printed) ·
 #       10 claude exited twice at start-up (tmux: the launch is typed once more when the pane is
-#       a bare shell again within the 15 s; its output is in the pane)
+#       a bare shell again within the 15 s; its output is in the pane) · 11 queued by the gate
+#       (see "The gate" below; its one line: QUEUED #<n>, ~<HH:MM> · id=<id> · <why>)
 # Last lines, machine-readable (try=2 when the launch was typed a second time):
 #   REPORTER pane=<n> id=<%id> tab=<tab> name=<slug>-report rc=<url|pending> try=<1|2>   (reporter only)
 #   SPAWNED pane=<n> id=<%id> tab=<tab> story=<slug> name=<name> rc=<url|pending> prompt=<file> created=<0|1> try=<1|2>
@@ -80,7 +83,7 @@ reporter_on="$(setting reporter || true)"
 perm="$(setting permission_mode || true)"
 
 repo="$PWD"; name=""; story=""; model=""; effort=""; submodel=""
-rc=1; single=0; pane=""; force_new=0; force=0; dry=0; prompt=""
+rc=1; single=0; pane=""; force_new=0; force=0; dry=0; prompt=""; over_cap=0; from_queue=""
 socket="${FLOWKIT_TMUX_SOCKET:-}"; sess="${FLOWKIT_TMUX_SESSION:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -97,9 +100,11 @@ while [ $# -gt 0 ]; do
     --new) force_new=1; shift ;;
     --force) force=1; shift ;;
     --dry-run) dry=1; shift ;;
+    --over-cap) over_cap=1; shift ;;
+    --from-queue) from_queue="$2"; shift 2 ;;
     --tmux-socket) socket="$2"; shift 2 ;;
     --tmux-session) sess="$2"; shift 2 ;;
-    -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,51p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) prompt="$1"; shift ;;
   esac
@@ -336,6 +341,51 @@ if [ -n "$prompt" ]; then
   prompt_arg=" \"\$(cat $prompt_copy)\""
 fi
 
+# The gate (scripts/capacity.py; the README's "Capacity"): a story launch that would open a new
+# chain while the machine's slots are all used, or while `claude agents` does not answer, is not
+# launched but queued (QUEUED, exit 11), and `capacity.py drain` starts it later with the same
+# arguments. A chain's own next slice never waits for a slot. What the prompt's `Needs:` line
+# names is taken all or none for this launch before anything waits, handed to the new session
+# after SPAWNED and given back on any other exit; a successor whose needs are not all free is
+# queued too, its closer's resources given back. A broken gate never stops a launch.
+cap="$me/scripts/capacity.py"
+give_back() { python3 "$cap" launched --pid $$ >/dev/null 2>&1 || true; }
+if [ "$single" -eq 0 ] && [ -z "$from_queue" ]; then
+  again=(--repo "$repo" --name "$name" --story "$slug")
+  [ -n "$model" ] && again+=(--model "$model")
+  [ -n "$effort" ] && again+=(--effort "$effort")
+  [ -n "$submodel" ] && again+=(--subagent-model "$submodel")
+  [ -n "$perm" ] && again+=(--permission "$perm")
+  [ "$rc" -eq 0 ] && again+=(--no-rc)
+  [ "$force_new" -eq 1 ] && again+=(--new)
+  [ "$force" -eq 1 ] && again+=(--force)
+  [ "$driver" = tmux ] && again+=(--tmux-socket "${socket:-$(basename "${TMUX%%,*}")}" --tmux-session "$sess")
+  [ -n "$prompt_copy" ] && again+=("$prompt_copy")
+  gate=(gate --pid $$ --tree "$repo" --story "$slug" --name "$name" --prompt "$prompt_copy")
+  [ "$over_cap" -eq 1 ] && gate+=(--over-cap)
+  [ "$dry" -eq 1 ] && gate+=(--dry-run)
+  verdict=""; code=0
+  verdict="$(python3 "$cap" "${gate[@]}" -- "${again[@]}")" || code=$?
+  if [ "$code" -eq 11 ]; then
+    echo "$verdict"
+    story_note "> queued $name · $(date '+%Y-%m-%d %H:%M') · ${verdict#QUEUED }"
+    exit 11
+  elif [ "$code" -ne 0 ]; then
+    echo "capacity gate failed (exit $code); launching without it" >&2
+  elif [ "$dry" -eq 1 ]; then
+    echo "gate:   $verdict"
+  else
+    trap give_back EXIT
+  fi
+elif [ -n "$from_queue" ]; then
+  trap give_back EXIT
+fi
+trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+spawned() { # after the SPAWNED line: the launch's resources go to the new session
+  trap - EXIT
+  python3 "$cap" launched --pid $$ --name "$name" >/dev/null 2>&1 || true
+}
+
 # A single session shares the tree with any Claude already running in the repo: its system
 # prompt says so.
 shared_arg=""; shared_file=""
@@ -408,6 +458,7 @@ sys.exit(0 if any(a.get(sys.argv[1]) == sys.argv[2] for a in json.load(sys.stdin
     [ -z "$copied" ] || rm -f "$copied"; [ -z "$shared_file" ] || rm -f "$shared_file"
     exit 0
   fi
+  story_note "> launched $name · $(date '+%Y-%m-%d %H:%M')"
   if [ "$start_reporter" -eq 1 ]; then
     stories="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/stories"; mkdir -p "$stories"
     [ -f "$stories/$slug.md" ] || printf '# %s\n' "$slug" > "$stories/$slug.md"
@@ -418,6 +469,7 @@ sys.exit(0 if any(a.get(sys.argv[1]) == sys.argv[2] for a in json.load(sys.stdin
   fi
   bg_start "${flags}--name '$name'${shared_arg}${prompt_arg}" "$name"
   echo "SPAWNED driver=background id=$bg_id story=$slug name=$name rc=$bg_rc prompt=${prompt_copy:--}"
+  spawned
   exit 0
 fi
 
@@ -434,6 +486,7 @@ if [ "$dry" -eq 1 ]; then
   [ -z "$copied" ] || rm -f "$copied"; [ -z "$shared_file" ] || rm -f "$shared_file"
   exit 0
 fi
+story_note "> launched $name · $(date '+%Y-%m-%d %H:%M')"
 
 # Marks a window as the story's tab. The @flowkit_born stamp comes first, in the same command: the
 # story closer (flowkit-tmux waiting) runs at every status-line redraw, and opening a window is
@@ -531,3 +584,4 @@ if [ -n "$rpane" ]; then
 fi
 start "$pane" "$launch" "$name"
 echo "SPAWNED pane=$(tm display-message -p -t "$pane" '#{pane_index}') id=$pane tab=$tab story=$slug name=$name rc=$rcurl prompt=${prompt_copy:--} created=$created try=$try"
+spawned
