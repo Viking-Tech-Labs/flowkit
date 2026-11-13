@@ -16,13 +16,19 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 DEFAULTS = {"slots": 3, "slice_minutes": 50, "coordinator_growth": 300_000}
 STALL = 2 * 3600  # a story session idle this long with no close is shown as stalled and stops counting
 IDLE = 30 * 60  # a holder not busy with its transcript untouched this long gives its resources back
 ME = "me"  # the holder of the user's test hold
-STATUS_VERSION = 1  # status.json's schema; the board reads it, tests/fixtures/capacity-status.json shows it
+LAUNCH = "launch:"  # holder prefix of what an in-flight flowkit-spawn holds: launch:<its pid>
+QUEUED = 11  # the gate's exit code when a launch is queued, which flowkit-spawn exits with
+HOLD_STALE = 2 * 3600  # a load hold this old is ignored, as flowkit-spawn ignores it
+STATUS_VERSION = 2  # status.json's schema; the board reads it, tests/fixtures/capacity-status.json shows it
+NEEDS = re.compile(r"(?:^|\s{2,})Needs:\s*(.*?)\s*(?=\s{2,}\S+:|$)", re.M)  # a prompt header's resources
+LEFT = re.compile(r"(?:^|\s{2,})Left:\s*(\d+)", re.M)  # a prompt header's slices left after this one
 SESSION_LINE = re.compile(r"^Session: ([0-9a-f-]{36})\b", re.M)  # a recorded close names its session
 HEADING = re.compile(r"^## (.+?) · \d{4}-\d\d-\d\d", re.M)  # a close section, or the reporter's final report
 PROMISED = re.compile(r"^Next: (?:spawned|started) (.*)$", re.M)  # the sessions a close launched
@@ -219,10 +225,10 @@ def markers():
     return out
 
 
-def chains(rows, t=None):
+def chains(rows, t=None, ending=()):
     """The working trees with a live story session in them, or None when liveness is unknown. A
     reporter or coordinator does not count, nor a session whose close is recorded unless it is busy
-    again (a hand resume); a tree whose sessions all sat 2 h with no close is `stalled` and does not
+    again (a hand resume), nor one in ending (a close being recorded right now: still busy); a tree whose sessions all sat 2 h with no close is `stalled` and does not
     count. A live launching/ marker holds its tree as `launching`. Sessions sharing a tree (a review
     beside the next slice) share its slot."""
     if rows is None:
@@ -238,7 +244,7 @@ def chains(rows, t=None):
         if name.endswith("-report") or COORD_NAME.search(name) or name in coords:
             continue
         busy = row.get("status") == "busy"
-        if sid in closed and not busy:
+        if (sid in closed and not busy) or sid in ending:
             continue
         touched = last_touch(row)
         tree = toplevel(row["cwd"])
@@ -325,6 +331,8 @@ def why_free(lease, rows, closed, t):
     the holder's close recorded, no pid (reclaimed) or not busy with its transcript untouched 30 min."""
     if lease["session"] == ME:
         return "expired" if t >= lease.get("until", 0) else None
+    if lease["session"].startswith(LAUNCH):
+        return None if pid_alive(lease["session"][len(LAUNCH):]) else "dead"
     if rows is None:
         return None
     if lease["session"] in closed:
@@ -425,7 +433,7 @@ def hold(rows, names, minutes, t=None):
 
 
 def status_data(rows, t):
-    """The snapshot status.json holds: slots, chains and resources (queue from the gate, later)."""
+    """The snapshot status.json holds: slots, chains, resources and the queue, oldest first."""
     cfg = load_config()
     found = chains(rows, t)
     used = slots(cfg, found)
@@ -439,7 +447,11 @@ def status_data(rows, t):
     return {"version": STATUS_VERSION, "at": t, "agents": "unknown" if rows is None else "known",
             "slots": cfg["slots"], "used": used and used["used"],
             "repos": [{"path": path, **counts} for path, counts in sorted(used["repos"].items())] if used else [],
-            "chains": found or [], "resources": resources, "queue": []}
+            "chains": found or [], "resources": resources,
+            "queue": [{"id": e["id"], "name": e.get("name", ""), "story": e.get("story", ""), "tree": e.get("tree", ""),
+                       "needs": sorted(e.get("needs", [])), "left": e.get("left"), "queued": e.get("queued"),
+                       "by": e.get("by", ""), "continuation": bool(e.get("continuation")), "why": e.get("why", ""),
+                       "eta": e.get("eta")} for e in entries()]}
 
 
 def write_status(rows, t):
@@ -469,6 +481,10 @@ def status_lines(data):
         else:
             lines.append(f"resource {r['name']} · held by {r['holder'] or r['session']}"
                          f"{' (' + r['story'] + ')' if r['story'] else ''} since {clock(r['since'])} ({r['why']})")
+    for n, q in enumerate(data["queue"], 1):
+        lines.append(f"queue #{n} {q['name']}{' (' + q['story'] + ')' if q['story'] else ''} · {q['why']}"
+                     f"{' · needs ' + ', '.join(q['needs']) if q['needs'] else ''} · queued {clock(q['queued'])} by {q['by']}"
+                     f" · ~{clock(q['eta'])}")
     return lines
 
 
@@ -481,13 +497,270 @@ def status(rows, t=None):
     return status_data(rows, t)
 
 
+def prompt_header(path):
+    """The resources a prompt's `Needs:` line names (`none` is none) and the slices its `Left:`
+    line says are left after this one (None without one), read from the header only: the lines
+    before the prompt's first blank one."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return set(), None
+    head = []
+    for line in text.splitlines():
+        if not line.strip():
+            break
+        head.append(line)
+    head = "\n".join(head)
+    needs = NEEDS.search(head)
+    left = LEFT.search(head)
+    return (names_arg([needs.group(1)]) - {"none", "-"} if needs else set()), (int(left.group(1)) if left else None)
+
+
+def entries():
+    """The queued launches, oldest first: queue/<id>.json with its id."""
+    out = []
+    for path in (state_dir() / "queue").glob("*.json"):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if path.stem.isdigit() and isinstance(data, dict):
+            out.append({**data, "id": int(path.stem)})
+    return sorted(out, key=lambda e: e["id"])
+
+
+def queued():
+    """Whether anything is queued: one directory read, so an empty queue costs nothing."""
+    try:
+        return any(e.name.endswith(".json") for e in os.scandir(state_dir() / "queue"))
+    except OSError:
+        return False
+
+
+def load_held():
+    """Whether ~/.claude/load-hold is set and younger than 2 hours (its first line's ISO time, else
+    the file's own), as flowkit-spawn reads it; FLOWKIT_IGNORE_HOLD skips it there and here."""
+    path = claude_dir() / "load-hold"
+    if os.environ.get("FLOWKIT_IGNORE_HOLD"):
+        return False
+    try:
+        at = path.stat().st_mtime
+        first = path.read_text(errors="replace").splitlines()[:1]
+    except OSError:
+        return False
+    try:
+        at = datetime.fromisoformat(first[0].strip().replace("Z", "+00:00")).timestamp()
+    except (IndexError, ValueError):
+        pass
+    return time.time() - at < HOLD_STALE
+
+
+def full(cfg, found, tree):
+    """Why a new chain in tree has no slot, or None: the machine's slots, or its repo's, are all
+    used. A tree that already holds a counted chain (a review beside a slice) needs no slot."""
+    counted = [c for c in found if c["state"] != "stalled"]
+    if any(c["tree"] == tree for c in counted):
+        return None
+    if len(counted) >= cfg["slots"]:
+        return f"slots {len(counted)}/{cfg['slots']}"
+    repo = main_checkout(tree)
+    section = cfg["repos"].get(repo) or {}
+    used = sum(c["repo"] == repo for c in counted)
+    if "slots" in section and used >= section["slots"]:
+        return f"repo slots {used}/{section['slots']}"
+    return None
+
+
+def eta(cfg, position, t):
+    """A rough start time for the position-th queued launch: one slice per slot ahead of it."""
+    return t + -(-position // max(cfg["slots"], 1)) * cfg["slice_minutes"] * 60
+
+
+def continues(me, story, tree):
+    """Whether a launch by session me continues its own chain: me is a session of that story, or
+    runs in the tree the launch goes to (a first slice started by hand that no story file names
+    yet). A coordinator or a reporter never continues: what it launches is a chain of its own."""
+    name = me.get("name") or ""
+    if not name or name.endswith("-report") or COORD_NAME.search(name) or name in coordinators():
+        return False
+    return stories()[0].get(name) == story or bool(me.get("cwd")) and toplevel(me["cwd"]) == tree
+
+
+def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=False, t=None):
+    """flowkit-spawn's gate, before it types anything: (exit code, message). A launch that opens a
+    new chain on a full machine (or while liveness is unknown) is queued, as is one whose needs
+    are not all free, or one that would pass an earlier waiter; a chain's own next slice never
+    waits for a slot, and --over-cap skips the slot count. Resources are taken all or none, for
+    `launch:<pid>`, before anything waits: a continuation's closer hands over what it holds only
+    when every need is free at once; otherwise it gives back all it holds and the launch is queued
+    holding nothing, so two closers never wait on each other. A launch that passes leaves the
+    launching/<pid>.json marker for its slot until `launched` re-points or gives back."""
+    t = now() if t is None else t
+    cfg = load_config()
+    tree = toplevel(tree)
+    needs, left = prompt_header(prompt) if prompt else (set(), None)
+    stray = needs - declared(cfg)
+    if stray:
+        print(f"capacity: Needs names {', '.join(sorted(stray))}, not declared in {config_path()}: ignored",
+              file=sys.stderr)
+        needs -= stray
+    sid = me.get("sessionId")
+    cont = continues(me, story, tree)
+    by = "chain" if cont else "coordinator" if me.get("name") and (
+        COORD_NAME.search(me["name"]) or me["name"] in coordinators()) else "user"
+    with lock():
+        if not dry:
+            refresh(rows, t)
+        found = chains(rows, t)
+        waiting = entries()
+        why = None
+        if not cont:
+            room = "claude agents did not answer" if found is None else full(cfg, found, tree)
+            if room is None and any(not e.get("continuation") for e in waiting):
+                room = "behind the queue"
+            if room and over_cap:
+                if not dry:
+                    log("over-cap", t, name=name, story=story, tree=tree, why=room)
+            else:
+                why = room
+        held = leases()
+        mine = {n for n, lease in held.items() if sid and lease["session"] == sid}
+        wanted = {n for e in waiting for n in e.get("needs", [])}
+        busy = {n: held[n] for n in needs if n in held and not (cont and n in mine)}
+        later = sorted(n for n in needs - set(held) if n in wanted)
+        if not why and (busy or later):
+            why = "; ".join(filter(None, [busy and f"busy: {busy_line(busy)}",
+                                          later and f"{', '.join(later)} wanted by an earlier launch"]))
+        if why:
+            position = len(waiting) + 1
+            start = eta(cfg, position, t)
+            if dry:
+                return 0, f"QUEUED #{position}, ~{clock(start)} · {why} (dry run: nothing queued)"
+            if cont and mine:
+                for n in sorted(mine):
+                    (state_dir() / "resources" / f"{n}.json").unlink(missing_ok=True)
+                    log("release", t, resource=n, session=sid, holder=held[n].get("name", ""),
+                        since=held[n].get("taken"), why="queued successor")
+            seq_path = state_dir() / "queue" / ".seq"
+            try:
+                seq = int(seq_path.read_text()) + 1
+            except (OSError, ValueError):
+                seq = max([e["id"] for e in waiting], default=0) + 1
+            write_json(seq_path, seq)
+            write_json(state_dir() / "queue" / f"{seq}.json",
+                       {"name": name, "story": story, "tree": tree, "prompt": prompt, "argv": argv,
+                        "needs": sorted(needs), "left": left, "continuation": cont, "queued": t, "by": by,
+                        "over_cap": over_cap, "launcher": me.get("name") or "", "why": why, "eta": start})
+            log("queue", t, id=seq, name=name, story=story, tree=tree, needs=sorted(needs), why=why, by=by)
+            write_status(rows, t)
+            return QUEUED, f"QUEUED #{position}, ~{clock(start)} · id={seq} · {why}"
+        kind = "continuation" if cont else "new chain"
+        if dry:
+            return 0, f"{kind}{', takes ' + ', '.join(sorted(needs)) if needs else ''}"
+        reserve(pid, tree, story, name, needs, t, sid if cont else None)
+        log("launch", t, name=name, story=story, tree=tree, needs=sorted(needs), kind=kind, by=by)
+        write_status(rows, t)
+    return 0, kind
+
+
+def reserve(pid, tree, story, name, needs, t, closer=None):
+    """Under the lock: the launching/<pid>.json marker, and needs leased to launch:<pid> (the
+    closer's own leases among them handed over)."""
+    write_json(state_dir() / "launching" / f"{pid}.json", {"tree": tree, "story": story, "name": name})
+    for n in sorted(needs):
+        write_json(state_dir() / "resources" / f"{n}.json",
+                   {"session": f"{LAUNCH}{pid}", "name": name, "story": story, "tree": tree, "taken": t, "why": "launch"})
+        log("take", t, resource=n, session=f"{LAUNCH}{pid}", holder=name, why="launch",
+            **({"from": closer} if closer else {}))
+
+
+def launched(rows, pid, name=None, t=None):
+    """After flowkit-spawn: with the new session's name (it printed SPAWNED), what launch:<pid>
+    holds goes to that session's id; without, or when `claude agents` does not list it, it goes
+    back. The launching/ marker goes either way: the session, once listed, holds its own slot."""
+    t = now() if t is None else t
+    holder_id = f"{LAUNCH}{pid}"
+    row = next((r for r in sorted(rows or [], key=lambda r: r.get("startedAt") or 0, reverse=True)
+                if name and r.get("name") == name and r.get("pid")), None)
+    with lock():
+        held = {n: lease for n, lease in leases().items() if lease["session"] == holder_id}
+        for n, lease in sorted(held.items()):
+            if row:
+                write_json(state_dir() / "resources" / f"{n}.json", {**lease, "session": row["sessionId"]})
+                log("repoint", t, resource=n, session=row["sessionId"], holder=name)
+            else:
+                (state_dir() / "resources" / f"{n}.json").unlink(missing_ok=True)
+                log("release", t, resource=n, session=holder_id, holder=lease.get("name", ""),
+                    since=lease.get("taken"), why="launch failed" if not name else "session not listed")
+        (state_dir() / "launching" / f"{pid}.json").unlink(missing_ok=True)
+        write_status(rows, t)
+    return 0, (f"{'handed ' + ', '.join(sorted(held)) + ' to ' + name if row else 'released ' + ', '.join(sorted(held))}"
+               if held else "held nothing")
+
+
+def spawn(entry):
+    """Launches a queued entry as a detached flowkit-spawn with its argv; its output goes to
+    capacity/launched/<id>.log. Returns the pid."""
+    out = state_dir() / "launched" / f"{entry['id']}.log"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tool = Path(__file__).resolve().parent.parent / "bin" / "flowkit-spawn"
+    with open(out, "a") as f:
+        proc = subprocess.Popen([str(tool), "--from-queue", str(entry["id"]), *entry["argv"]],
+                                stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
+                                cwd=entry["tree"] if os.path.isdir(entry.get("tree") or "") else None,
+                                start_new_session=True)
+    return proc.pid
+
+
+def drain(rows, t=None, ending=()):
+    """Under the lock, oldest first: launches every queued entry whose slot (a continuation needs
+    none) and needs are free, unless a load hold is set. An entry never passes an earlier one that
+    waits for a slot, or for a resource it needs too. Its marker and leases are written for the
+    new flowkit-spawn's pid before the lock goes, so the next gate counts them. ending: session
+    ids whose close is being recorded right now (still busy). Returns the launched entries."""
+    t = now() if t is None else t
+    if not queued() or load_held():
+        return []
+    cfg = load_config()
+    started = []
+    with lock():
+        refresh(rows, t)
+        found = chains(rows, t, ending)
+        held = set(leases())
+        slot_wait, wanted = False, set()
+        for e in entries():
+            needs = set(e.get("needs", []))
+            room = e.get("continuation") or e.get("over_cap") or (found is not None and not slot_wait and full(cfg, found, e["tree"]) is None)
+            if room and not needs & (held | wanted):
+                pid = spawn(e)
+                reserve(pid, e["tree"], e.get("story", ""), e.get("name", ""), needs, t)
+                (state_dir() / "queue" / f"{e['id']}.json").unlink(missing_ok=True)
+                log("dequeue", t, id=e["id"], name=e.get("name", ""), story=e.get("story", ""), pid=pid,
+                    waited=round(t - (e.get("queued") or t)))
+                held |= needs
+                if found is not None:
+                    found.append({"tree": e["tree"], "repo": main_checkout(e["tree"]), "state": "launching"})
+                started.append({**e, "pid": pid})
+            else:
+                slot_wait = slot_wait or not room
+                wanted |= needs
+        write_status(rows, t)
+    return started
+
+
 def resolve_session(rows):
     """This session's id: ~/.claude/sessions/$CLAUDE_PID.json, else the `claude agents` row of the
     nearest parent pid (the Bash tool's shell is a child of the claude process, maybe nested)."""
+    return self_session(rows)["sessionId"]
+
+
+def self_session(rows):
+    """This session's id, name and cwd, as resolve_session finds it; the sessions file needs no
+    snapshot, so a launch tells a continuation even while `claude agents` is unknown."""
     try:
         data = json.loads((claude_dir() / "sessions" / f"{os.environ.get('CLAUDE_PID', '')}.json").read_text())
         if isinstance(data, dict) and data.get("sessionId"):
-            return data["sessionId"]
+            return {"sessionId": data["sessionId"], "name": data.get("name") or "", "cwd": data.get("cwd") or ""}
     except (OSError, ValueError):
         pass
     by_pid = {r["pid"]: r for r in rows or [] if r.get("pid")}
@@ -496,11 +769,12 @@ def resolve_session(rows):
     pid = os.getppid()
     for _ in range(8):
         if pid in by_pid:
-            return by_pid[pid]["sessionId"]
+            row = by_pid[pid]
+            return {"sessionId": row["sessionId"], "name": row.get("name") or "", "cwd": row.get("cwd") or ""}
         pid = parents.get(pid, 0)
         if pid <= 1:
             break
-    return None
+    return {"sessionId": None, "name": "", "cwd": ""}
 
 
 def names_arg(values):
@@ -525,9 +799,39 @@ def main(argv=None):
     p.add_argument("names", nargs="+")
     p.add_argument("--for", dest="for_", choices=[ME], required=True)
     p.add_argument("--minutes", type=int, default=60)
+    p = sub.add_parser("gate", help="flowkit-spawn's gate: launch, or queue (exit 11)")
+    p.add_argument("--pid", required=True, help="the flowkit-spawn pid the launch holds for")
+    p.add_argument("--tree", required=True)
+    p.add_argument("--story", required=True)
+    p.add_argument("--name", required=True)
+    p.add_argument("--prompt", default="")
+    p.add_argument("--over-cap", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("argv", nargs="*", help="after --: flowkit-spawn's arguments for a queued launch")
+    p = sub.add_parser("launched", help="after flowkit-spawn: hand its holds to the new session, or give them back")
+    p.add_argument("--pid", required=True)
+    p.add_argument("--name", help="the session it started (it printed SPAWNED); without: give back")
+    p = sub.add_parser("drain", help="launch every queued launch that can start now")
+    p.add_argument("--closed", action="append", default=[], help="a session whose close is being recorded")
     args = parser.parse_args(argv)
 
+    if args.cmd == "drain" and not queued():
+        return 0  # an empty queue costs one directory read: no snapshot, no lock
     rows = snapshot()  # before the lock, never under it
+    if args.cmd == "drain":
+        for e in drain(rows, ending=set(args.closed)):
+            print(f"launched #{e['id']} {e.get('name', '')} (flowkit-spawn pid {e['pid']})")
+        return 0
+    if args.cmd == "gate":
+        code, msg = gate(rows, args.pid, args.tree, args.story, args.name, args.prompt, args.argv,
+                         self_session(rows), args.over_cap, args.dry_run)
+        print(msg)
+        return code
+    if args.cmd == "launched":
+        code, msg = launched(rows, args.pid, args.name)
+        print(msg, file=sys.stderr)
+        drain(rows)
+        return code
     if args.cmd == "status":
         data = status(rows)
         print(json.dumps(data, indent=2) if args.json else "\n".join(status_lines(data)))
@@ -546,6 +850,8 @@ def main(argv=None):
             return 4
         code, msg = take(rows, sid, names, args.why) if args.cmd == "take" else release(rows, sid, names)
     print(msg, file=sys.stderr if code else sys.stdout)
+    if args.cmd == "release":
+        drain(rows)
     return code
 
 

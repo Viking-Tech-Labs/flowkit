@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "at": 1786700000.0,
   "agents": "known",
   "slots": 3,
@@ -71,5 +71,21 @@
       "until": null
     }
   ],
-  "queue": []
+  "queue": [
+    {
+      "id": 7,
+      "name": "next-s1",
+      "story": "next",
+      "tree": "/Users/me/lib",
+      "needs": [
+        "simulator"
+      ],
+      "left": 2,
+      "queued": 1786700100.0,
+      "by": "coordinator",
+      "continuation": false,
+      "why": "slots 2/3",
+      "eta": 1786703100.0
+    }
+  ]
 }

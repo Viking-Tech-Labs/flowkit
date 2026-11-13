@@ -315,6 +315,11 @@ class Capacity(unittest.TestCase):
         t = time.time()
         self.assertEqual(self.cli("take", "simulator", "--session", s2, at=t).returncode, 0)
         self.assertEqual(self.cli("hold", "emulator", "--for", "me", "--minutes", "30", at=t).returncode, 0)
+        (self.claude / "capacity" / "queue").mkdir()
+        (self.claude / "capacity" / "queue" / "7.json").write_text(json.dumps(
+            {"name": "next-s1", "story": "next", "tree": str(lib), "prompt": "/p.md", "argv": ["/p.md"],
+             "needs": ["simulator"], "left": 2, "continuation": False, "queued": t, "by": "coordinator",
+             "why": "slots 2/3", "eta": t + 3000}))
         r = self.cli("status", at=t)
         self.assertEqual(r.returncode, 0, r.stderr)
         hm = time.strftime("%H:%M", time.localtime(t))
@@ -325,7 +330,9 @@ class Capacity(unittest.TestCase):
             f"chain demo · running · {tree} · demo-s2 (busy), demo-review (idle)",
             f"chain side · launching · {lib} · flowkit-spawn pid {os.getpid()}",
             f"resource emulator · held for you until {until} (test hold)",
-            f"resource simulator · held by demo-s2 (demo) since {hm} (take)"])
+            f"resource simulator · held by demo-s2 (demo) since {hm} (take)",
+            f"queue #1 next-s1 (next) · slots 2/3 · needs simulator · queued {hm} by coordinator · "
+            f"~{time.strftime('%H:%M', time.localtime(t + 3000))}"])
         data = json.loads((self.claude / "capacity" / "status.json").read_text())
         self.assertEqual(data["version"], capacity.STATUS_VERSION)
         self.assertEqual((data["agents"], data["used"], data["slots"]), ("known", 2, 3))
@@ -342,6 +349,172 @@ class Capacity(unittest.TestCase):
         data = json.loads((self.claude / "capacity" / "status.json").read_text())
         self.assertEqual((data["agents"], data["used"], data["chains"]), ("unknown", None, []))
         self.assertEqual(len(data["resources"]), 2)
+
+    def sleeper(self):
+        """A live pid that is not this process: a launch's flowkit-spawn stand-in."""
+        proc = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        return proc.pid
+
+    def prompt(self, header):
+        path = self.tmp / f"p{len(list(self.tmp.glob('p*.md')))}.md"
+        path.write_text(header + "\n\nToday: the slice.\nNeeds: not-in-the-header\n")
+        return str(path)
+
+    def queue(self):
+        return [(e["name"], e["why"]) for e in capacity.entries()]
+
+    def test_the_prompt_header(self):
+        self.assertEqual(capacity.prompt_header(self.prompt("Repo: /r   Session: s2\nNeeds: simulator, backend\nLeft: 2")),
+                         ({"simulator", "backend"}, 2))
+        self.assertEqual(capacity.prompt_header(self.prompt("Repo: /r\nModel: opus   Needs: emulator   Left: 0")),
+                         ({"emulator"}, 0))
+        self.assertEqual(capacity.prompt_header(self.prompt("Repo: /r\nNeeds: none")), (set(), None))
+        self.assertEqual(capacity.prompt_header(self.prompt("Repo: /r")), (set(), None), "the body is not the header")
+        self.assertEqual(capacity.prompt_header(self.tmp / "missing.md"), (set(), None))
+
+    def full_machine(self):
+        """slots = 1, taken by a live chain `other` in its own repo; app declares the devices."""
+        app = self.devices()
+        self.conf.write_text("slots = 1\n" + self.conf.read_text())
+        other = self.repo("other")
+        sid = "0" * 8 + "-1111-1111-1111-" + "1" * 12
+        self.story("other", "> launched other-s1\n")
+        rows = [self.row("other-s1", sid, other, pid=os.getpid())]
+        self.agents(rows)
+        return app, rows, sid
+
+    def test_a_full_machine_queues_a_new_chain(self):
+        app, rows, _ = self.full_machine()
+        prompt = self.prompt("Repo: /r\nNeeds: simulator\nLeft: 1")
+        code, msg = capacity.gate(rows, "4242", app, "demo", "demo-s1", prompt, ["--name", "demo-s1", prompt], {})
+        self.assertEqual(code, capacity.QUEUED)
+        self.assertRegex(msg, r"^QUEUED #1, ~\d\d:\d\d · id=1 · slots 1/1$")
+        (entry,) = capacity.entries()
+        self.assertEqual({k: entry[k] for k in ("name", "story", "tree", "prompt", "argv", "needs", "left", "continuation", "by")},
+                         {"name": "demo-s1", "story": "demo", "tree": str(app), "prompt": prompt,
+                          "argv": ["--name", "demo-s1", prompt], "needs": ["simulator"], "left": 1,
+                          "continuation": False, "by": "user"})
+        self.assertEqual((self.held(), capacity.markers()), ({}, []), "a queued launch holds nothing")
+        code, msg = capacity.gate(rows, "4243", self.repo("lib"), "side", "side-s1", "", [], {})
+        self.assertEqual((code, self.queue()[1]), (capacity.QUEUED, ("side-s1", "slots 1/1")))
+        self.assertIn("QUEUED #2,", msg)
+        code, msg = capacity.gate(rows, "4244", app, "demo", "demo-s1", prompt, [], {}, dry=True)
+        self.assertEqual(code, 0)
+        self.assertIn("QUEUED #3, ", msg)
+        self.assertIn("(dry run: nothing queued)", msg)
+        self.assertEqual(len(capacity.entries()), 2, "a dry run queues nothing")
+        self.assertEqual([e["event"] for e in self.log_events()], ["queue", "queue"])
+
+    def test_over_cap_launches_anyway(self):
+        app, rows, _ = self.full_machine()
+        pid = str(self.sleeper())
+        code, msg = capacity.gate(rows, pid, app, "demo", "demo-s1", self.prompt("Needs: simulator"), [], {}, over_cap=True)
+        self.assertEqual((code, msg), (0, "new chain"))
+        self.assertEqual(self.held(), {"simulator": f"launch:{pid}"})
+        self.assertEqual([m["pid"] for m in capacity.markers()], [pid])
+        self.assertEqual([e["event"] for e in self.log_events()], ["over-cap", "take", "launch"])
+
+    def test_a_continuation_never_waits_for_a_slot(self):
+        app, rows, _ = self.full_machine()
+        self.story("demo", "> launched demo-s1\n")
+        me = {"sessionId": "d" * 8 + "-1111-1111-1111-" + "1" * 12, "name": "demo-s1", "cwd": str(app)}
+        rows.append(self.row("demo-s1", me["sessionId"], app))
+        self.agents(rows)
+        self.assertEqual(capacity.gate(rows, str(self.sleeper()), app, "demo", "demo-s2", "", [], me), (0, "continuation"))
+        # while `claude agents` is unknown no new chain starts, but a chain goes on
+        self.assertEqual(capacity.gate(None, "4250", self.repo("lib"), "side", "side-s1", "", [], {})[0], capacity.QUEUED)
+        self.assertEqual(self.queue(), [("side-s1", "claude agents did not answer")])
+        self.assertEqual(capacity.gate(None, str(self.sleeper()), app, "demo", "demo-s2", "", [], me), (0, "continuation"))
+        # a first slice started by hand, in the tree it launches into, is not in any story file yet
+        hand = {"sessionId": "e" * 8 + "-1111-1111-1111-" + "1" * 12, "name": "app-main", "cwd": str(app)}
+        self.assertTrue(capacity.continues(hand, "demo", str(app)))
+        self.assertFalse(capacity.continues({**hand, "name": "demo-coord"}, "demo", str(app)), "a coordinator starts chains")
+
+    def test_two_closers_crossing_resources_never_deadlock(self):
+        app = self.devices()
+        self.conf.write_text(f"[{app}]\nresource simulator = s\nresource backend = b\n")
+        a, b = "a" * 8 + "-1111-1111-1111-" + "1" * 12, "b" * 8 + "-1111-1111-1111-" + "1" * 12
+        self.story("sa", "> launched sa-s1\n")
+        self.story("sb", "> launched sb-s1\n")
+        tree_a, tree_b = self.tmp / "wt-a", self.tmp / "wt-b"
+        git("-C", str(app), "worktree", "add", "-q", str(tree_a), "-b", "a")
+        git("-C", str(app), "worktree", "add", "-q", str(tree_b), "-b", "b")
+        rows = [self.row("sa-s1", a, tree_a), self.row("sb-s1", b, tree_b)]
+        self.agents(rows)
+        self.assertEqual(capacity.take(rows, a, {"simulator"})[0], 0)
+        self.assertEqual(capacity.take(rows, b, {"backend"})[0], 0)
+        me_a = {"sessionId": a, "name": "sa-s1", "cwd": str(tree_a)}
+        me_b = {"sessionId": b, "name": "sb-s1", "cwd": str(tree_b)}
+        both = self.prompt("Needs: simulator, backend")
+        code, msg = capacity.gate(rows, "5001", tree_a, "sa", "sa-s2", both, ["a"], me_a)
+        self.assertEqual(code, capacity.QUEUED)
+        self.assertIn("busy: backend is held by sb-s1", msg)
+        self.assertEqual(self.held(), {"backend": b}, "the closer gave back what it held: no hold-and-wait")
+        code, msg = capacity.gate(rows, "5002", tree_b, "sb", "sb-s2", both, ["b"], me_b)
+        self.assertEqual(code, capacity.QUEUED)
+        self.assertIn("simulator wanted by an earlier launch", msg)
+        self.assertEqual(self.held(), {}, "nobody holds anything while waiting")
+        pids = iter([self.sleeper(), self.sleeper()])
+        with mock.patch.object(capacity, "spawn", side_effect=lambda e: next(pids)):
+            first = capacity.drain(rows)
+            self.assertEqual([e["name"] for e in first], ["sa-s2"])
+            self.assertEqual(set(self.held().values()), {f"launch:{first[0]['pid']}"})
+            self.assertEqual(capacity.drain(rows), [], "the second waits for both")
+            capacity.launched(rows, first[0]["pid"])  # its launch gave back (or its session closed)
+            self.assertEqual([e["name"] for e in capacity.drain(rows)], ["sb-s2"])
+        self.assertEqual(capacity.entries(), [])
+
+    def test_drain_is_first_in_first_out(self):
+        app, rows, sid = self.full_machine()
+        for n in (1, 2):
+            capacity.gate(rows, str(4300 + n), self.repo(f"r{n}"), f"q{n}", f"q{n}-s1", "", [f"q{n}"], {})
+        launched = []
+        with mock.patch.object(capacity, "spawn", side_effect=lambda e: launched.append(e["name"]) or self.sleeper()):
+            self.assertEqual(capacity.drain(rows), [])
+            (self.claude / "load-hold").write_text("free memory 9%\n")
+            self.assertEqual(capacity.drain(rows, ending={sid}), [], "a load hold stops the drain")
+            (self.claude / "load-hold").unlink()
+            started = capacity.drain(rows, ending={sid})  # other-s1's close is being recorded
+        self.assertEqual(launched, ["q1-s1"], "one slot: the oldest, and the next one waits")
+        self.assertEqual([c["state"] for c in capacity.chains(rows)], ["running", "launching"])
+        self.assertEqual(self.queue(), [("q2-s1", "slots 1/1")])
+        self.assertEqual(started[0]["argv"], ["q1"])
+        self.assertEqual([e["event"] for e in self.log_events()][-1], "dequeue")
+        status = json.loads((self.claude / "capacity" / "status.json").read_text())
+        self.assertEqual([q["name"] for q in status["queue"]], ["q2-s1"])
+
+    def test_spawn_runs_the_entry_detached(self):
+        self.assertTrue(capacity.queued() is False)
+        entry = {"id": 3, "tree": str(self.tmp), "argv": ["--help"]}
+        pid = capacity.spawn(entry)
+        deadline = time.time() + 10
+        out = self.claude / "capacity" / "launched" / "3.log"
+        while time.time() < deadline and capacity.pid_alive(pid):
+            time.sleep(0.05)
+        self.assertIn("Usage: flowkit-spawn", out.read_text())
+
+    def test_an_empty_queue_drains_in_one_read(self):
+        self.agents([], "hang")
+        start = time.monotonic()
+        r = self.cli("drain")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertLess(time.monotonic() - start, 0.9, "no `claude agents` call")
+        self.assertFalse((self.claude / "capacity" / "status.json").exists())
+
+    def test_launched_hands_over_or_gives_back(self):
+        app = self.devices()
+        new = "c" * 8 + "-1111-1111-1111-" + "1" * 12
+        rows = [self.row("demo-s2", new, app)]
+        for pid, name, want in ((self.sleeper(), "demo-s2", {"simulator": new}), (self.sleeper(), None, {})):
+            for f in (self.claude / "capacity" / "resources").glob("*.json"):
+                f.unlink()
+            with capacity.lock():
+                capacity.reserve(pid, str(app), "demo", "demo-s2", {"simulator"}, time.time())
+            capacity.launched(rows, pid, name)
+            self.assertEqual((self.held(), capacity.markers()), (want, []))
+        self.assertEqual([e["event"] for e in self.log_events()], ["take", "repoint", "take", "release"])
 
     def test_the_wrapper_runs_status_with_nothing_configured(self):
         r = subprocess.run([str(PLUGIN / "bin" / "flowkit-capacity"), "status"], capture_output=True, text=True)
