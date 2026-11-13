@@ -48,6 +48,8 @@ file:
    "${CLAUDE_PLUGIN_ROOT}/bin/flowkit-spawn" --repo <repo> --name <name> [--single] \
      [--story <slug>] [--model <model>] [--effort <effort>] [<saved path>]
    ```
+   When `~/.claude/load-hold` exists the launch waits until it is gone, which can outlast any
+   timeout: run it with `run_in_background: true` and relay its notification.
 3. **Relay its last line** in plain words: `SPAWNED …` gives the tab, the slot and the Remote
    Control link (a `REPORTER` line before it means a new story tab with its reporter in slot 1);
    with `try=2` (claude exited at start-up once, stderr said `warning: session '<name>' exited at

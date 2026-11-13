@@ -11,7 +11,8 @@ Control on, so the user can answer one in its pane or on the phone.
 The helper is `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/coordinate.py"` (`coordinate.py` below).
 Workers start through handoff's `flowkit-spawn`. Run `coordinate.py spawner` once and use the
 path it prints (`<spawn>` below), not the bare name: a PATH inherited from an older session can
-put an older handoff's copy first. If it fails, say that coordinate needs `handoff` installed
+put an older handoff's copy first. While `~/.claude/load-hold` exists a launch waits until it is
+gone: run `<spawn>` with `run_in_background: true` then. If it fails, say that coordinate needs `handoff` installed
 (`claude plugin install handoff@flowkit`) and stop.
 
 The user is **away** when the file `${CLAUDE_CONFIG_DIR:-~/.claude}/away` exists and is younger

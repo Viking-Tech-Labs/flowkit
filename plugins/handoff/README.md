@@ -48,6 +48,16 @@ your phone. Two drivers, set once with `/handoff:setup`. The tmux driver:
   else in a pane split after the last one of the session's window (slot 2 of a one-pane window
   handed over with `--pane`). Each close's record says `reporter: rung`, `waiting` or `none`.
 
+Both drivers first honour a **launch hold**: while `~/.claude/load-hold` exists, `flowkit-spawn`
+waits before anything else, checking every 30 seconds, and launches once the file is gone. Any
+guard of your own can write it (a memory watchdog, say): two lines, an ISO time (`2026-11-13T16:30:00+01:00`)
+then the reason. The launch says once, on stderr and as `> held <name> · <time> · <reason>` in the
+story file, that it is held and why, and `launch hold lifted after <n> min` on stderr when it goes.
+A flag whose time is more than 2 hours old is stale: it is ignored, with a line saying so (a guard
+that holds longer rewrites the time). `FLOWKIT_IGNORE_HOLD=1` skips the wait; `--dry-run` only
+says the launch would wait. A close or `/handoff:spawn` that finds the file runs the launch as a
+background task, since the wait can outlast the Bash tool's timeout.
+
 Outside tmux nothing launches: the close prints the launch line under FOR ME and records the
 prompt as pending. After a launch the closing session leaves the repo alone.
 

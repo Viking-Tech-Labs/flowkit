@@ -11,6 +11,8 @@
 # shows in `claude agents`, the board and Remote Control, and `claude attach <name>` opens it.
 # With reporter=on, a story with no `<story>-report` session yet gets one first.
 #
+# Either driver first waits while ~/.claude/load-hold exists (see "The launch hold" below).
+#
 # Usage: flowkit-spawn [options] <prompt-file>
 #   --repo <path>          working directory of the new session (default: the current one)
 #   --name <name>          session name (default: the prompt file's name without .md)
@@ -97,7 +99,7 @@ while [ $# -gt 0 ]; do
     --dry-run) dry=1; shift ;;
     --tmux-socket) socket="$2"; shift 2 ;;
     --tmux-session) sess="$2"; shift 2 ;;
-    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) prompt="$1"; shift ;;
   esac
@@ -174,6 +176,56 @@ else
   [ -n "$slug" ] || slug="$(slugify "$name")"
 fi
 [ -n "$slug" ] || { echo "story '$story' has no letters or digits" >&2; exit 2; }
+
+# The launch hold: a guard outside flowkit writes ~/.claude/load-hold (an ISO time, then the reason)
+# while the machine is short of memory and removes it on recovery. A launch waits for it to go,
+# checking every 30 s (FLOWKIT_HOLD_POLL), and says once, on stderr and in the story file, that it
+# is held and why. A flag older than 2 hours is stale and ignored; FLOWKIT_IGNORE_HOLD=1 skips the
+# wait. It comes before the refusals, so they look at the tree and the sessions as they are at launch.
+hold="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/load-hold"
+hold_info() { # "<age in s><tab><reason>" of the flag, nothing when there is none
+  [ -f "$hold" ] || return 0
+  python3 - "$hold" <<'EOF' 2>/dev/null || true
+import os, sys, time
+from datetime import datetime
+try:
+    lines = open(sys.argv[1], errors="replace").read().splitlines()
+    at = os.stat(sys.argv[1]).st_mtime
+except OSError:
+    sys.exit()
+try:
+    at = datetime.fromisoformat(lines[0].strip().replace("Z", "+00:00")).timestamp()
+except (IndexError, ValueError):
+    pass  # no readable time: the file's own
+print(f"{max(0, int(time.time() - at))}\t{' '.join(' '.join(lines[1:]).split())[:200] or 'no reason given'}")
+EOF
+}
+story_note() { # line: appended to the story's file; a single session has none
+  [ "$single" -eq 0 ] || return 0
+  local stories="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/stories"
+  mkdir -p "$stories"; [ -f "$stories/$slug.md" ] || printf '# %s\n' "$slug" > "$stories/$slug.md"
+  printf '%s\n' "$1" >> "$stories/$slug.md"
+}
+held=0; held_at="$(date +%s)"
+while info="$(hold_info)" && [ -n "$info" ]; do
+  age="${info%%$'\t'*}"; why="${info#*$'\t'}"
+  if [ -n "${FLOWKIT_IGNORE_HOLD:-}" ]; then
+    echo "launch hold ignored, FLOWKIT_IGNORE_HOLD is set: $why" >&2; break
+  elif [ "$age" -ge 7200 ]; then
+    echo "launch hold ignored, stale: set $((age / 60)) min ago ($why)" >&2
+    [ "$dry" -eq 1 ] || story_note "> hold ignored $name · $(date '+%Y-%m-%d %H:%M') · stale, set $((age / 60)) min ago · $why"
+    break
+  elif [ "$dry" -eq 1 ]; then
+    echo "launch held: $why; a launch would wait until $hold is gone" >&2; break
+  fi
+  if [ "$held" -eq 0 ]; then
+    echo "launch held: $why; waiting until $hold is gone, checking every ${FLOWKIT_HOLD_POLL:-30} s" >&2
+    story_note "> held $name · $(date '+%Y-%m-%d %H:%M') · $why"
+    held=1
+  fi
+  sleep "${FLOWKIT_HOLD_POLL:-30}"
+done
+[ "$held" -eq 0 ] || echo "launch hold lifted after $(( ($(date +%s) - held_at) / 60 )) min; launching" >&2
 
 # Refusal 1: the new session shares this working tree; uncommitted changes mean the session
 # spawning it has not landed its work. An untracked `.claude/` is not work: EnterWorktree keeps a

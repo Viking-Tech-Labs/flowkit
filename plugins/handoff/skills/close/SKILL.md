@@ -144,6 +144,9 @@ other session still uses them, and ends with what is ready for the user to try i
       `~/.config/flowkit/handoff.conf`); `flowkit-spawn` reads it itself. Run it with a
       5-minute Bash timeout: two launches (the reporter, then the session), each typed once
       more when claude exits at start-up, and the wait for the Remote Control link add up.
+      When `~/.claude/load-hold` exists the launch waits until it is gone, which can outlast any
+      timeout: run it with `run_in_background: true` instead and read its notification; DONE
+      says the launch was held and why (its stderr).
    3. Read its last line and exit code:
       - `SPAWNED pane=<n> … tab=<tab> … rc=<url|pending> … try=<1|2>`: started. DONE gets one
         line: the session's name, its tab and slot, its Remote Control link; with `try=2`

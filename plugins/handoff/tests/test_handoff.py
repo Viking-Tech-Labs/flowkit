@@ -247,6 +247,74 @@ class Handoff(unittest.TestCase):
         out = self.spawn("--repo", str(repo), "--name", "s3", str(store / "s3.md"))
         self.assertNotIn("--append-system-prompt", out.stdout, "a brief prompt is launched as before")
 
+    def held_spawn(self, flag_lines, **env):
+        """A background-driver launch (no --dry-run) with ~/.claude/load-hold holding flag_lines,
+        or no flag for None, polling every 0.1 s; `claude --bg` answers with an id that `claude
+        agents` lists. Returns the running process, the flag and the story file."""
+        repo = self.spawn_repo()
+        stub = self.tmp / "bin" / "claude"
+        stub.write_text(f"#!/bin/sh\nif [ \"$1\" = agents ]; then echo '[{{\"id\":\"abc123\"}}]'; "
+                        f"else echo \"$@\" >> {self.calls}; echo 'backgrounded · abc123'; fi\n")
+        flag = self.tmp / "claude" / "load-hold"
+        if flag_lines is not None:
+            flag.write_text("".join(line + "\n" for line in flag_lines))
+        prompt = self.tmp / "p.md"
+        prompt.write_text("hi\n")
+        proc = subprocess.Popen([str(SPAWN_BIN), "--no-rc", "--repo", str(repo), "--name", "s2", "--story", "st",
+                                 str(prompt)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                env={**self.env, "FLOWKIT_HOLD_POLL": "0.1", **env})
+        return proc, flag, self.tmp / "claude" / "stories" / "st.md"
+
+    def test_spawn_waits_while_the_load_hold_is_set(self):
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        proc, flag, story = self.held_spawn([now, "free memory 9%"])
+        time.sleep(1)
+        self.assertIsNone(proc.poll(), "held")
+        self.assertFalse(self.calls.exists(), "nothing launched while held")
+        self.assertRegex(story.read_text(), r"^# st\n> held s2 · \d{4}-\d\d-\d\d \d\d:\d\d · free memory 9%\n$")
+        flag.unlink()
+        out, err = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertRegex(out, r"SPAWNED driver=background id=abc123 story=st name=s2 ")
+        self.assertRegex(err, r"^launch held: free memory 9%; waiting until \S+/load-hold is gone, checking every "
+                         r"0\.1 s\nlaunch hold lifted after 0 min; launching\n$")
+        self.assertEqual(story.read_text().count("> held"), 1, "said once")
+        self.assertIn("--bg", self.calls.read_text())
+
+    def test_spawn_ignores_a_stale_load_hold(self):
+        proc, _, story = self.held_spawn(["2026-01-01T00:00:00+00:00", "swap 9 GB"])
+        out, err = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertRegex(err, r"^launch hold ignored, stale: set \d+ min ago \(swap 9 GB\)\n$")
+        self.assertRegex(story.read_text(), r"> hold ignored s2 · .* · stale, set \d+ min ago · swap 9 GB\n")
+        self.assertIn("SPAWNED driver=background", out)
+
+    def test_spawn_skips_the_load_hold_on_the_override(self):
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        proc, _, story = self.held_spawn([now, "free memory 9%"], FLOWKIT_IGNORE_HOLD="1")
+        out, err = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual(err, "launch hold ignored, FLOWKIT_IGNORE_HOLD is set: free memory 9%\n")
+        self.assertFalse(story.exists(), "nothing to say in the story")
+        self.assertIn("SPAWNED driver=background", out)
+
+    def test_spawn_without_a_load_hold_says_nothing(self):
+        proc, _, story = self.held_spawn(None)
+        out, err = proc.communicate(timeout=10)
+        self.assertEqual((proc.returncode, err), (0, ""))
+        self.assertFalse(story.exists())
+        self.assertIn("SPAWNED driver=background", out)
+
+    def test_spawn_dry_run_reports_the_load_hold_without_waiting(self):
+        repo = self.spawn_repo()
+        (self.tmp / "claude" / "load-hold").write_text(datetime.now().isoformat() + "\nfree memory 9%\n")
+        prompt = self.tmp / "p.md"
+        prompt.write_text("hi\n")
+        out = self.spawn("--repo", str(repo), "--name", "s2", "--story", "st", str(prompt))
+        self.assertEqual(out.returncode, 0)
+        self.assertRegex(out.stderr, r"^launch held: free memory 9%; a launch would wait until \S+ is gone\n$")
+        self.assertFalse((self.tmp / "claude" / "stories" / "st.md").exists())
+
     def spawn_in_tmux(self, exits):
         """A throwaway tmux server whose one pane runs bash with a fake `claude` first on its PATH:
         the first `exits` launches exit 1 at once, the next writes its pid and sleeps; `claude
