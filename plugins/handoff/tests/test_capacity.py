@@ -52,6 +52,23 @@ class Capacity(unittest.TestCase):
         return {"id": sid[:8], "sessionId": sid, "name": name, "cwd": str(cwd), "kind": "interactive",
                 "status": status, "pid": pid, "startedAt": int(time.time() * 1000)}
 
+    def cli(self, *args, at=None):
+        env = {**os.environ, **({"FLOWKIT_CAPACITY_NOW": str(at)} if at else {})}
+        return subprocess.run(["python3", str(CAPACITY), *args], capture_output=True, text=True, env=env)
+
+    def log_events(self):
+        path = self.claude / "capacity" / "log.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def held(self):
+        return {p.stem: json.loads(p.read_text())["session"]
+                for p in (self.claude / "capacity" / "resources").glob("*.json")}
+
+    def devices(self):
+        app = self.repo("app")
+        self.conf.write_text(f"[{app}]\nresource simulator = a device check\nresource emulator = a device check\n")
+        return app
+
     def story(self, slug, text):
         (self.claude / "stories" / f"{slug}.md").write_text(text)
 
@@ -168,6 +185,103 @@ class Capacity(unittest.TestCase):
         (launching / f"{dead.pid}.json").write_text(json.dumps({"tree": str(self.repo("lib")), "story": "x"}))
         found = capacity.chains(capacity.snapshot())
         self.assertEqual([(c["tree"], c["state"], c["story"]) for c in found], [(str(app), "launching", "demo")])
+
+
+    def test_two_processes_taking_at_once(self):
+        app = self.devices()
+        ids = [f"{i:08x}-1111-1111-1111-111111111111" for i in range(6)]
+        self.agents([self.row(f"s{i}", sid, app) for i, sid in enumerate(ids)])
+        env = {**os.environ}
+        procs = [subprocess.Popen(["python3", str(CAPACITY), "take", "simulator,emulator", "--session", sid],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env) for sid in ids]
+        codes = [p.wait() for p in procs]
+        for p in procs:
+            p.stdout.close()
+            p.stderr.close()
+        self.assertEqual(sorted(codes), [0, 1, 1, 1, 1, 1])
+        winner = ids[codes.index(0)]
+        self.assertEqual(self.held(), {"simulator": winner, "emulator": winner})
+        self.assertEqual([e["event"] for e in self.log_events()], ["take", "take"])
+
+    def test_all_or_nothing_and_the_union_rule(self):
+        app = self.devices()
+        a, b = "a" * 8 + "-2222-2222-2222-" + "2" * 12, "b" * 8 + "-2222-2222-2222-" + "2" * 12
+        self.agents([self.row("demo-s1", a, app), self.row("demo-s2", b, app)])
+        self.assertEqual(self.cli("take", "simulator", "--session", a).returncode, 0)
+        r = self.cli("take", "simulator", "emulator", "--session", b)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("simulator is held by demo-s1", r.stderr)
+        self.assertEqual(self.held(), {"simulator": a})  # b got nothing, not even the free emulator
+        r = self.cli("take", "emulator", "--session", a)
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("holding simulator outside the set", r.stderr)
+        self.assertEqual(self.cli("take", "simulator,emulator", "--session", a).returncode, 0)
+        self.assertEqual(self.held(), {"simulator": a, "emulator": a})
+        self.assertEqual(self.cli("take", "printer", "--session", a).returncode, 2)
+        self.assertEqual(self.cli("release", "emulator", "--session", a).returncode, 0)
+        self.assertEqual(self.held(), {"simulator": a})
+        self.cli("release", "--session", a)
+        self.assertEqual(self.held(), {})
+        self.assertEqual([e["event"] for e in self.log_events()], ["take", "take", "release", "release"])
+
+    def test_free_rules(self):
+        app = self.devices()
+        idle, closed, dead, other = (f"{c * 8}-3333-3333-3333-333333333333" for c in "abcd")
+        rows = [self.row("demo-s1", idle, app, "idle"), self.row("demo-s2", closed, app, "idle"),
+                self.row("x", dead, app), self.row("y", other, app)]
+        self.agents(rows)
+        t = time.time()
+        self.assertEqual(self.cli("take", "simulator", "--session", idle, at=t).returncode, 0)
+        self.assertEqual(self.cli("take", "emulator", "--session", closed, at=t).returncode, 0)
+        self.assertEqual(self.cli("take", "simulator", "--session", other, at=t + 10 * 60).returncode, 1)
+        self.story("demo", f"## demo-s2 · 2026-11-13 10:00\nSession: {closed}\n")
+        self.agents([], "fail")  # liveness unknown: nothing goes, not even the closed holder's
+        self.assertEqual(self.cli("take", "simulator,emulator", "--session", other, at=t + 5 * 3600).returncode, 1)
+        self.assertEqual(self.held(), {"simulator": idle, "emulator": closed})
+        self.agents(rows)
+        self.assertEqual(self.cli("take", "simulator,emulator", "--session", other, at=t + 31 * 60).returncode, 0)
+        frees = {e["resource"]: e["reason"] for e in self.log_events() if e["event"] == "free"}
+        self.assertEqual(frees, {"simulator": "idle", "emulator": "closed"})
+        self.agents(rows[:3])  # other's pid is gone
+        self.assertEqual(self.cli("take", "simulator", "--session", dead, at=t + 32 * 60).returncode, 0)
+        reclaim = [e for e in self.log_events() if e["event"] == "reclaim"]
+        self.assertEqual([(e["resource"], e["session"], e["holder"]) for e in reclaim],
+                         [("emulator", other, "y"), ("simulator", other, "y")])
+
+    def test_the_users_test_hold(self):
+        app = self.devices()
+        a = "a" * 8 + "-4444-4444-4444-" + "4" * 12
+        self.agents([self.row("demo-s1", a, app)])
+        t = time.time()
+        r = self.cli("hold", "simulator", "--for", "me", "--minutes", "60", at=t)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.cli("take", "simulator", "--session", a, at=t + 59 * 60).returncode, 1)
+        self.cli("hold", "simulator", "--for", "me", "--minutes", "60", at=t + 59 * 60)  # renewed
+        self.agents([], "hang")  # a test hold runs out on the clock alone
+        self.assertEqual(self.cli("take", "simulator", "--session", a, at=t + 100 * 60).returncode, 1)
+        self.assertEqual(self.cli("take", "simulator", "--session", a, at=t + 120 * 60).returncode, 0)
+        self.assertEqual([(e["event"], e.get("reason")) for e in self.log_events()],
+                         [("hold", None), ("hold", None), ("free", "expired"), ("take", None)])
+        self.assertEqual(self.cli("hold", "simulator", "--for", "me").returncode, 1)
+        self.assertEqual(self.cli("release", "--for", "me").stdout.strip(), "held nothing")
+
+    def test_a_busy_lock_is_waited_for_then_gone_on_without(self):
+        self.devices()
+        (self.claude / "capacity").mkdir(parents=True)
+        holder = subprocess.Popen(["python3", "-c", "import fcntl,sys,time; f=open(sys.argv[1],'a');"
+                                   "fcntl.flock(f, fcntl.LOCK_EX); print('locked', flush=True); time.sleep(30)",
+                                   str(self.claude / "capacity" / ".lock")], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.kill)
+        holder.stdout.readline()
+        started = time.time()
+        r = subprocess.run(["python3", str(CAPACITY), "take", "simulator", "--session", "x" * 36], capture_output=True,
+                           text=True, env={**os.environ, "FLOWKIT_CAPACITY_LOCK_WAIT": "1"})
+        self.assertGreaterEqual(time.time() - started, 1)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("going on without it", r.stderr)
+        holder.kill()
+        holder.wait()
+        holder.stdout.close()
 
 
 if __name__ == "__main__":

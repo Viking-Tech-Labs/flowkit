@@ -6,6 +6,9 @@ back. Resources (a simulator, a dev-server port) are leased to a session id and 
 holder's recorded close, its death or half an hour idle. The numbers live in
 `${XDG_CONFIG_HOME:-~/.config}/flowkit/capacity.conf`; with no file a machine runs 3 chains and
 declares no resources. State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/capacity/`."""
+import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -17,6 +20,8 @@ from pathlib import Path
 
 DEFAULTS = {"slots": 3, "slice_minutes": 50, "coordinator_growth": 300_000}
 STALL = 2 * 3600  # a story session idle this long with no close is shown as stalled and stops counting
+IDLE = 30 * 60  # a holder not busy with its transcript untouched this long gives its resources back
+ME = "me"  # the holder of the user's test hold
 SESSION_LINE = re.compile(r"^Session: ([0-9a-f-]{36})\b", re.M)  # a recorded close names its session
 HEADING = re.compile(r"^## (.+?) · \d{4}-\d\d-\d\d", re.M)  # a close section, or the reporter's final report
 PROMISED = re.compile(r"^Next: (?:spawned|started) (.*)$", re.M)  # the sessions a close launched
@@ -259,3 +264,223 @@ def slots(cfg, found):
     repos = {path: {"slots": section["slots"], "used": sum(c["repo"] == path for c in counted)}
              for path, section in cfg["repos"].items() if "slots" in section}
     return {"slots": cfg["slots"], "used": len(counted), "repos": repos}
+
+
+def state_dir():
+    return claude_dir() / "capacity"
+
+
+@contextlib.contextmanager
+def lock():
+    """capacity/.lock, tried without blocking for FLOWKIT_CAPACITY_LOCK_WAIT (10 s), then gone on
+    without, with one stderr line: a stuck holder must never stall every launch."""
+    state_dir().mkdir(parents=True, exist_ok=True)
+    fd = os.open(state_dir() / ".lock", os.O_RDWR | os.O_CREAT, 0o644)
+    deadline = time.monotonic() + float(os.environ.get("FLOWKIT_CAPACITY_LOCK_WAIT") or 10)
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    print("capacity: the lock stayed busy, going on without it", file=sys.stderr)
+                    break
+                time.sleep(0.1)
+        yield
+    finally:
+        os.close(fd)
+
+
+def write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
+def log(event, t=None, **fields):
+    """One line in capacity/log.jsonl: take, release, free, reclaim, hold."""
+    state_dir().mkdir(parents=True, exist_ok=True)
+    with open(state_dir() / "log.jsonl", "a") as f:
+        f.write(json.dumps({"t": round(now() if t is None else t, 3), "event": event, **fields}) + "\n")
+
+
+def leases():
+    """Resource name -> its lease: session, name, story, tree, taken, why (and until for a test hold)."""
+    out = {}
+    for path in sorted((state_dir() / "resources").glob("*.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("session"):
+            out[path.stem] = data
+    return out
+
+
+def why_free(lease, rows, closed, t):
+    """Why a lease is over, or None: a test hold past its minutes; else, only while liveness is known,
+    the holder's close recorded, no pid (reclaimed) or not busy with its transcript untouched 30 min."""
+    if lease["session"] == ME:
+        return "expired" if t >= lease.get("until", 0) else None
+    if rows is None:
+        return None
+    if lease["session"] in closed:
+        return "closed"
+    row = next((r for r in rows if r.get("sessionId") == lease["session"] and r.get("pid")), None)
+    if row is None:
+        return "dead"
+    touched = last_touch(row)
+    if row.get("status") != "busy" and touched is not None and t - touched > IDLE:
+        return "idle"
+    return None
+
+
+def refresh(rows, t):
+    """Under the lock: drop the leases that are over and the markers whose flowkit-spawn is gone. A
+    dead holder's lease and a dead marker are logged as `reclaim`, the rest as `free`."""
+    _, closed = stories()
+    for name, lease in leases().items():
+        reason = why_free(lease, rows, closed, t)
+        if reason:
+            (state_dir() / "resources" / f"{name}.json").unlink(missing_ok=True)
+            log("reclaim" if reason == "dead" else "free", t, resource=name, reason=reason,
+                session=lease["session"], holder=lease.get("name", ""), since=lease.get("taken"))
+    for mark in markers():
+        if not mark["alive"]:
+            mark["path"].unlink(missing_ok=True)
+            log("reclaim", t, launching=mark["pid"], tree=mark.get("tree", ""), story=mark.get("story", ""))
+
+
+def holder(rows, sid):
+    """The name, story and tree a session id has, as far as the snapshot tells."""
+    row = next((r for r in rows or [] if r.get("sessionId") == sid), {})
+    name = row.get("name") or ""
+    return {"name": name, "story": stories()[0].get(name, ""),
+            "tree": toplevel(row["cwd"]) if row.get("cwd") else ""}
+
+
+def busy_line(held):
+    return "; ".join(f"{n} is held by {l.get('name') or l['session']} since "
+                     f"{time.strftime('%H:%M', time.localtime(l.get('taken', 0)))}" for n, l in sorted(held.items()))
+
+
+def take(rows, sid, names, why="take", t=None):
+    """All of names for sid, or none of them: (exit code, message). Refused while sid holds anything
+    outside names, so a session never waits for more while holding some (no hold-and-wait)."""
+    t = now() if t is None else t
+    with lock():
+        refresh(rows, t)
+        held = leases()
+        mine = {n for n, lease in held.items() if lease["session"] == sid}
+        if mine - names:
+            return 3, (f"holding {', '.join(sorted(mine - names))} outside the set: release it first, "
+                       f"then take {','.join(sorted(mine | names))} holding nothing")
+        others = {n: lease for n, lease in held.items() if n in names and lease["session"] != sid}
+        if others:
+            return 1, f"busy: {busy_line(others)}"
+        who = holder(rows, sid)
+        for name in sorted(names - mine):
+            write_json(state_dir() / "resources" / f"{name}.json",
+                       {"session": sid, **who, "taken": t, "why": why})
+            log("take", t, resource=name, session=sid, holder=who["name"], why=why)
+    return 0, f"took {', '.join(sorted(names))}"
+
+
+def release(rows, sid, names=None, t=None):
+    """Give back what sid holds (all of it without names): (exit code, message)."""
+    t = now() if t is None else t
+    with lock():
+        refresh(rows, t)
+        held = leases()
+        gone = sorted(n for n, lease in held.items() if lease["session"] == sid and (not names or n in names))
+        for name in gone:
+            lease = held[name]
+            (state_dir() / "resources" / f"{name}.json").unlink(missing_ok=True)
+            log("release", t, resource=name, session=sid, holder=lease.get("name", ""), since=lease.get("taken"))
+    return 0, f"released {', '.join(gone)}" if gone else "held nothing"
+
+
+def hold(rows, names, minutes, t=None):
+    """The user's test hold: names for `me` for minutes from now, all or none; a hold already the
+    user's is renewed."""
+    t = now() if t is None else t
+    with lock():
+        refresh(rows, t)
+        held = leases()
+        others = {n: lease for n, lease in held.items() if n in names and lease["session"] != ME}
+        if others:
+            return 1, f"busy: {busy_line(others)}"
+        for name in sorted(names):
+            write_json(state_dir() / "resources" / f"{name}.json",
+                       {"session": ME, "name": ME, "story": "", "tree": "",
+                        "taken": held.get(name, {}).get("taken", t), "why": "test hold", "until": t + minutes * 60})
+            log("hold", t, resource=name, minutes=minutes)
+    return 0, f"held {', '.join(sorted(names))} for you until {time.strftime('%H:%M', time.localtime(t + minutes * 60))}"
+
+
+def resolve_session(rows):
+    """This session's id: ~/.claude/sessions/$CLAUDE_PID.json, else the `claude agents` row of the
+    nearest parent pid (the Bash tool's shell is a child of the claude process, maybe nested)."""
+    try:
+        data = json.loads((claude_dir() / "sessions" / f"{os.environ.get('CLAUDE_PID', '')}.json").read_text())
+        if isinstance(data, dict) and data.get("sessionId"):
+            return data["sessionId"]
+    except (OSError, ValueError):
+        pass
+    by_pid = {r["pid"]: r for r in rows or [] if r.get("pid")}
+    ps = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True).stdout
+    parents = {int(a): int(b) for a, b in (line.split() for line in ps.splitlines() if len(line.split()) == 2)}
+    pid = os.getppid()
+    for _ in range(8):
+        if pid in by_pid:
+            return by_pid[pid]["sessionId"]
+        pid = parents.get(pid, 0)
+        if pid <= 1:
+            break
+    return None
+
+
+def names_arg(values):
+    return {n for v in values for n in re.split(r"[,\s]+", v) if n}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="flowkit-capacity", description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("take", help="lease resources to this session, all or none")
+    p.add_argument("names", nargs="+")
+    p.add_argument("--session", help="the holder's session id (default: this session)")
+    p.add_argument("--why", default="take")
+    p = sub.add_parser("release", help="give back resources this session holds (all without names)")
+    p.add_argument("names", nargs="*")
+    who = p.add_mutually_exclusive_group()
+    who.add_argument("--session")
+    who.add_argument("--for", dest="for_", choices=[ME], help="give back the user's test hold")
+    p = sub.add_parser("hold", help="the user's test hold")
+    p.add_argument("names", nargs="+")
+    p.add_argument("--for", dest="for_", choices=[ME], required=True)
+    p.add_argument("--minutes", type=int, default=60)
+    args = parser.parse_args(argv)
+
+    rows = snapshot()  # before the lock, never under it
+    names = names_arg(getattr(args, "names", []))
+    undeclared = names - declared(load_config())
+    if undeclared:
+        print(f"not declared in {config_path()}: {', '.join(sorted(undeclared))}", file=sys.stderr)
+        return 2
+    if args.cmd == "hold":
+        code, msg = hold(rows, names, args.minutes)
+    else:
+        sid = ME if getattr(args, "for_", None) else args.session or resolve_session(rows)
+        if not sid:
+            print("this session is not listed by `claude agents`; pass --session <id>", file=sys.stderr)
+            return 4
+        code, msg = take(rows, sid, names, args.why) if args.cmd == "take" else release(rows, sid, names)
+    print(msg, file=sys.stderr if code else sys.stdout)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
