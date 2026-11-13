@@ -343,6 +343,11 @@ class Capacity(unittest.TestCase):
         self.assertEqual((data["agents"], data["used"], data["chains"]), ("unknown", None, []))
         self.assertEqual(len(data["resources"]), 2)
 
+    def test_the_wrapper_runs_status_with_nothing_configured(self):
+        r = subprocess.run([str(PLUGIN / "bin" / "flowkit-capacity"), "status"], capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "slots 0/3\n", ""))
+        self.assertTrue((self.claude / "capacity" / "status.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

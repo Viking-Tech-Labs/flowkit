@@ -315,6 +315,58 @@ sessions of different permission modes waits for the receiver's approval, one to
 on a question waits with it, and a stopped background session gets none; so the helper's close
 and DONE carry the verdict too, and a held or failed send loses nothing but the ring.
 
+## Capacity
+
+New, not wired into launches yet. A machine runs a few chains at once, and some things a repo has
+only one of: an iOS simulator, an Android emulator, a local backend, a dev-server port. `flowkit-capacity`
+(`bin/`, over `scripts/capacity.py`) counts the first and leases the second.
+
+The numbers live in `${XDG_CONFIG_HOME:-~/.config}/flowkit/capacity.conf`; with no file a machine
+runs 3 chains and declares no resources:
+
+```
+slots = 3                   # chains at once on this machine
+slice_minutes = 50          # ETA fallback until the log has history
+coordinator_growth = 300k   # context tokens a coordinator may add per day
+
+[/Users/me/app]             # a repo's main checkout; its worktrees inherit the section
+slots = 2                   # optional: at most 2 of the machine's slots for this repo
+resource simulator = install a build, run a device check, hand over a test
+resource backend   = start the local stack; release once it is stopped
+```
+
+Resource names are machine-wide: two repos that both declare `simulator` share one lease.
+
+**Slots are counted, never leased.** A slot is a working tree with a live story session in it, read
+from `claude agents --json --all` and the story files each time it is asked, so a crashed or resumed
+session cannot leak one. A session belongs to a story when the story file names it (a close
+heading, a `Next:` line, a `> launched <name>` line). Reporters (`<story>-report`) and coordinators
+do not count, nor a session whose close is recorded (by its `Session:` id) unless it is busy again;
+a review in the same tree as the next slice shares its slot; a tree whose sessions sat 2 hours with
+no close shows as `stalled` and stops counting. When `claude agents` fails, hangs or answers in a
+shape it does not know, the count is unknown, never zero: nothing is reclaimed.
+
+**Resources are leased to a session id**, all of a set or none:
+
+| Command | What it does |
+|---|---|
+| `flowkit-capacity status [--json]` | One line for the slots, then one per repo limit, chain and resource. |
+| `flowkit-capacity take simulator,backend` | Leases the set to this session, or nothing if any of it is held; refused while the session holds something outside the set (release first: nobody waits for more while holding some). |
+| `flowkit-capacity release [names]` | Gives back what this session holds, all of it without names. |
+| `flowkit-capacity hold simulator --for me --minutes 60` | Your test hold: no slice takes it until the minutes run out or `release --for me`; run it again to renew. |
+
+A lease goes free on its own when the holder's close is recorded, when the holder has no pid, or
+when it has been not busy with its transcript untouched for 30 minutes; never while `claude agents`
+is unknown (a test hold still runs out on the clock).
+
+State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/capacity/`: `resources/<name>.json` (the
+leases), `launching/<pid>.json` (an in-flight launch, counted while its pid lives), `log.jsonl`
+(one line per take, release, free, reclaim and hold; `reclaim` when the holder died) and
+`status.json`, rewritten on every change with a `version` field
+(`tests/fixtures/capacity-status.json` shows its shape). Every change runs under one lock that is
+tried for 10 seconds and then gone on without, with one stderr line, so a stuck holder never
+stalls the machine.
+
 ## Your own ladder
 
 A close can choose the next session's model and effort, and run a step of yours, from one file:

@@ -1,0 +1,7 @@
+#!/bin/sh
+# flowkit-capacity: this machine's chain slots and named resources (the handoff README, "Capacity").
+#   flowkit-capacity status [--json]
+#   flowkit-capacity take <names> [--session <id>]      all or none, refused while holding others
+#   flowkit-capacity release [<names>] [--session <id> | --for me]
+#   flowkit-capacity hold <names> --for me [--minutes 60]
+exec python3 "$(dirname "$0")/../scripts/capacity.py" "$@"
