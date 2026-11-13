@@ -1,4 +1,6 @@
-{
+// capacity/status.json as handoff's capacity.py writes it: the board reads this, and handoff's
+// test_capacity.py parses what follows `export default` as JSON and checks its shape against the writer.
+export default {
   "version": 2,
   "at": 1786700000.0,
   "agents": "known",

@@ -30,12 +30,25 @@ export type Card = {
   tests: TestLine[]
 }
 
+// capacity/status.json, as handoff's capacity.py writes it (version 2); the board only reads it.
+export type CapacityStatus = {
+  version: number
+  at: number
+  agents: 'known' | 'unknown'
+  slots: number
+  used: number | null
+  chains: { story: string; sessions: { name: string; stalled: boolean }[] }[]
+  resources: { name: string; session: string | null; holder: string | null; since: number | null; why: string | null; until: number | null }[]
+  queue: { name: string; eta: number | null }[]
+}
+
 export type Snapshot = {
   at: number
   cards: Card[]
   loose: Chip[]
   isAgentsKnown: boolean
   isStoriesKnown: boolean
+  capacity?: string[]
 }
 
 declare module 'claude-code' {

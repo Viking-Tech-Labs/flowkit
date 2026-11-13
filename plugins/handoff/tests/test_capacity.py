@@ -14,7 +14,7 @@ from unittest import mock
 
 PLUGIN = Path(__file__).resolve().parent.parent
 CAPACITY = PLUGIN / "scripts" / "capacity.py"
-FIXTURE = PLUGIN / "tests" / "fixtures" / "capacity-status.json"  # the board's tests read it too
+FIXTURE = PLUGIN.parent / "board" / "tests" / "fixtures" / "capacity-status.ts"  # the board reads it in its own tests
 spec = importlib.util.spec_from_file_location("capacity", CAPACITY)
 capacity = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(capacity)
@@ -339,7 +339,7 @@ class Capacity(unittest.TestCase):
         self.assertEqual([(c["story"], c["state"]) for c in data["chains"]], [("demo", "running"), ("side", "launching")])
         self.assertEqual({r["name"]: r["session"] for r in data["resources"]}, {"simulator": s2, "emulator": "me"})
         self.assertEqual(json.loads(self.cli("status", "--json", at=t).stdout), data)
-        fixture = json.loads(FIXTURE.read_text())
+        fixture = json.loads(FIXTURE.read_text().split("\nexport default ", 1)[1])
         self.assertEqual(fixture["version"], capacity.STATUS_VERSION)
         self.assertEqual(shape(fixture), shape(data))  # change the fixture with the schema, and the board with it
         self.assertEqual([e["event"] for e in self.log_events()], ["take", "hold"])

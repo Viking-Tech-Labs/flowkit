@@ -1,4 +1,4 @@
-import type { Card, CardState, Chip, Snapshot, Step, TestLine } from '../types'
+import type { CapacityStatus, Card, CardState, Chip, Snapshot, Step, TestLine } from '../types'
 
 export const DAY = 86_400_000
 // A session promised by a close has this long to come up (trust prompt, start-up) before the
@@ -22,7 +22,7 @@ export type Stats = { ctx_pct?: number | null; cost_usd?: number | null }
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 export type Ticks = Readonly<Record<string, true>>
 
-export type Next = { kind: 'started' | 'pending' | 'none' | 'other'; names: string[]; text: string }
+export type Next = { kind: 'started' | 'pending' | 'queued' | 'none' | 'other'; names: string[]; text: string }
 export type Section = {
   name: string
   at: number
@@ -47,7 +47,7 @@ const clean = (text: string): string => text.replace(/\*\*/g, '').trim()
 
 const parseNext = (rest: string): Next => {
   const text = rest.trim()
-  const named = /^(started|spawned|pending)\s+(.+)$/i.exec(text)
+  const named = /^(started|spawned|pending|queued)\s+(.+)$/i.exec(text)
   if (named !== null) {
     const names = (named[2] ?? '')
       .replace(/\([^)]*\)/g, '')
@@ -55,7 +55,8 @@ const parseNext = (rest: string): Next => {
       .split(/\s*,\s*/)
       .map(n => n.trim())
       .filter(n => n !== '' && n !== 'none')
-    return { kind: named[1]?.toLowerCase() === 'pending' ? 'pending' : 'started', names, text }
+    const word = named[1]?.toLowerCase()
+    return { kind: word === 'pending' || word === 'queued' ? word : 'started', names, text }
   }
   return { kind: /^none\b/i.test(text) ? 'none' : 'other', names: [], text }
 }
@@ -198,8 +199,12 @@ const cardOf = (story: Story, chips: readonly Chip[], now: number): Card => {
   const working = work.filter(c => c.state === 'working')
   const have = new Set(closes.map(s => s.name))
   const missing: { name: string; since: number }[] = []
+  // A queued launch waits for a slot, not for the user: it is missing only once a session of its
+  // name has come up (the queue launched it) and wrote no close.
+  const isLaunched = (s: Section, n: string): boolean =>
+    s.next.kind === 'started' || (s.next.kind === 'queued' && chips.some(c => c.name === n))
   for (const s of closes) {
-    for (const n of s.next.kind === 'started' ? s.next.names : []) {
+    for (const n of s.next.names.filter(n => isLaunched(s, n))) {
       if (!have.has(n) && !missing.some(m => m.name === n)) missing.push({ name: n, since: s.at })
     }
   }
@@ -231,6 +236,9 @@ const cardOf = (story: Story, chips: readonly Chip[], now: number): Card => {
   } else if (starting.length > 0) {
     state = 'running'
     why = `${list(starting)} starting`
+  } else if (lastClose?.next.kind === 'queued') {
+    state = 'running'
+    why = `queued: ${list(lastClose.next.names)}, launches when a slot frees`
   } else if (lastClose?.next.kind === 'pending') {
     state = 'needs-you'
     why = `launch pending: ${list(lastClose.next.names)}`
@@ -404,6 +412,51 @@ export const testLines = (tests: readonly TestLine[], indent: string): string[] 
   const rows = tests.map(t => [t.item, t.mr, t.device, t.state, t.eta].map((f, i) => cut(f, TEST_WIDTHS[i] ?? 12)))
   const widths = TEST_WIDTHS.map((_, i) => Math.max(0, ...rows.map(r => (r[i] ?? '').length)))
   return rows.map(r => `${indent}${r.map((f, i) => f.padEnd(widths[i] ?? 0)).join('  ')}`.trimEnd())
+}
+
+// capacity/status.json in a few words: slots, the queue, each resource, stalled sessions. The file
+// is a snapshot written by handoff's capacity.py on every take, release, launch and drain; one older
+// than STALE_MS says when it was written. Another version than this reader knows prints just that.
+const STATUS_VERSION = 2
+const STALE_MS = 5 * 60_000
+const clockOf = (seconds: number): string => {
+  const d = new Date(seconds * 1000)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+export const capacityParts = (status: CapacityStatus, now: number): string[] => {
+  if (status.version !== STATUS_VERSION) return [`status.json version ${status.version}, this board reads ${STATUS_VERSION}`]
+  const first = status.queue[0]
+  const stalled = status.chains.flatMap(c => c.sessions.filter(s => s.stalled).map(s => s.name))
+  return [
+    `slots ${status.agents === 'known' ? status.used : '?'}/${status.slots}`,
+    ...(first === undefined
+      ? []
+      : [`queued ${status.queue.length}${first.eta === null ? '' : ` (next ~${clockOf(first.eta)})`}`]),
+    ...status.resources.map(r =>
+      r.session === null
+        ? `${r.name} free`
+        : r.session === 'me'
+          ? `${r.name}: you, test hold${r.until === null ? '' : ` until ${clockOf(r.until)}`}`
+          : `${r.name}: ${r.holder ?? r.session}${r.since === null ? '' : ` since ${clockOf(r.since)}`}${r.why ? ` (${r.why})` : ''}`,
+    ),
+    ...(stalled.length > 0 ? [`stalled: ${stalled.join(', ')}`] : []),
+    ...(now - status.at * 1000 > STALE_MS ? [`as of ${clockOf(status.at)}`] : []),
+  ]
+}
+
+// The CAPACITY block of /where: the parts joined by " · ", wrapped under the heading.
+export const capacityLines = (parts: readonly string[], width: number): string[] => {
+  const head = 'CAPACITY  '
+  const lines: string[] = []
+  let line = ''
+  for (const part of parts) {
+    if (line !== '' && head.length + line.length + 3 + part.length > width) {
+      lines.push(line)
+      line = part
+    } else line = line === '' ? part : `${line} · ${part}`
+  }
+  if (line !== '') lines.push(line)
+  return lines.map((l, i) => (i === 0 ? head : ' '.repeat(head.length)) + l)
 }
 
 export const storyLines = (cards: readonly Card[], ticks: Ticks, now: number, isAll: boolean): string[] => {

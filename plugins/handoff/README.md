@@ -425,7 +425,7 @@ and limit; `reclaim` when the holder died; launch, queue and dequeue carry the r
 for a gate call, the launcher and its load-hold seconds), `limits.json`, `testq.json` (test-queue
 lines tied to queued launches) and
 `status.json`, rewritten on every change with a `version` field
-(`tests/fixtures/capacity-status.json` shows its shape). Every change runs under one lock that is
+(`../board/tests/fixtures/capacity-status.ts` shows its shape). Every change runs under one lock that is
 tried for 10 seconds and then gone on without, with one stderr line, so a stuck holder never
 stalls the machine.
 

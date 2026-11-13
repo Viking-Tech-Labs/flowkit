@@ -1,8 +1,11 @@
 import type { CommandSpec, On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
+import status from './fixtures/capacity-status'
 import {
   buildSnapshot,
+  capacityLines,
+  capacityParts,
   formeLines,
   isShown,
   openSteps,
@@ -15,6 +18,7 @@ import {
   usageLines,
 } from '../hooks/model'
 import type { Agent, Story } from '../hooks/model'
+import type { CapacityStatus } from '../types'
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -292,6 +296,52 @@ test('a test queue reads one item per line, skips headings and blanks, and leave
   expect(parseTests('\n# only a heading\n')).toEqual([])
 })
 
+test('a queued launch waits for a slot, not for you: running until its session comes up, then stalls like a started one', () => {
+  const queued = parseStory('q', close('q-s1', 3 * HOUR, 'queued q-s2'), NOW - 3 * HOUR)
+  expect(queued?.sections[0]?.next).toEqual({ kind: 'queued', names: ['q-s2'], text: 'queued q-s2' })
+  const of = (agents: Agent[]) => buildSnapshot(queued === undefined ? [] : [queued], agents, new Map(), NOW).cards[0]
+  expect([of([])?.state, of([])?.why]).toEqual(['running', 'queued: q-s2, launches when a slot frees'])
+  const up = (status: string): Agent[] => [{ kind: 'interactive', status, name: 'q-s2', sessionId: 'q2', startedAt: NOW - MIN }]
+  expect(of(up('busy'))?.state).toBe('running')
+  expect([of(up('idle'))?.state, of(up('idle'))?.why]).toEqual(['stalled', 'q-s2 sits idle, no close'])
+})
+
+// handoff's capacity.py test writes the same shape: one fixture for the writer and this reader.
+const at = (s: number): string => {
+  const d = new Date(s * 1000)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+const STATUS = status as CapacityStatus
+
+test('the capacity block reads the shared status.json fixture: slots, queue, each resource, stalled, how old', () => {
+  expect(capacityParts(STATUS, STATUS.at * 1000)).toEqual([
+    'slots 2/3',
+    `queued 1 (next ~${at(1786703100)})`,
+    `emulator: you, test hold until ${at(1786701800)}`,
+    `simulator: demo-s2 since ${at(1786700000)} (take)`,
+    'backend free',
+  ])
+  const later = {
+    ...STATUS,
+    agents: 'unknown' as const,
+    queue: [],
+    chains: [{ story: 'demo', sessions: [{ name: 'demo-s2', stalled: true }] }],
+  }
+  expect(capacityParts(later, STATUS.at * 1000 + 6 * MIN)).toEqual([
+    'slots ?/3',
+    `emulator: you, test hold until ${at(1786701800)}`,
+    `simulator: demo-s2 since ${at(1786700000)} (take)`,
+    'backend free',
+    'stalled: demo-s2',
+    `as of ${at(STATUS.at)}`,
+  ])
+  expect(capacityParts({ ...STATUS, version: 3 }, NOW)).toEqual(['status.json version 3, this board reads 2'])
+  const lines = capacityLines(capacityParts(STATUS, STATUS.at * 1000), 60)
+  expect(lines[0]?.startsWith('CAPACITY  slots 2/3 · queued 1')).toBe(true)
+  expect(lines.slice(1).every(l => l.startsWith(' '.repeat(10)) && !l.startsWith(' '.repeat(11)))).toBe(true)
+  for (const line of lines) expect(line.length).toBeLessThanOrEqual(60)
+})
+
 const stubWorld = (on: On, agentsOut: string = JSON.stringify(AGENTS)) => {
   const commands: CommandSpec[] = []
   const store: Record<string, unknown> = {}
@@ -303,6 +353,7 @@ const stubWorld = (on: On, agentsOut: string = JSON.stringify(AGENTS)) => {
     '/home/n/.claude/stories/draft.md': 'a prompt draft with FOR ME in it, no close section\n',
     '/home/n/.claude/session-stats/s5.json': JSON.stringify({ ctx_pct: 61, cost_usd: 141.2 }),
     '/home/n/.claude/session-stats/s1.json': '{"ctx_pct": 4',
+    '/home/n/.claude/capacity/status.json': JSON.stringify({ ...STATUS, at: NOW / 1000 }),
   }
   const mtimes: Record<string, number> = {
     'chain.md': NOW - 20 * MIN,
@@ -372,6 +423,7 @@ test('/board, /where and /forme register as immediate and answer from the stubbe
   expect(board).toMatch(/\n\* c-s3 +working +20m +app\n/)
   expect(board).toContain('  5-hour    51%  resets in 2h 14m')
   expect(board).toContain('STORIES  1 need you, 0 stalled, 1 running, 1 done')
+  expect(board).toMatch(/\n\nCAPACITY {2}slots 2\/3 · queued 1 \(next ~\d\d:\d\d\) · emulator: you, test hold until .*\n(?: {10}\S.*\n)*\nSTORIES /)
   expect(board).not.toContain('draft')
   expect(board).toMatch(
     /\n {2}chain +running .*\n {4}test queue\n {6}Login screen {5}!93 {2}iPhone 15 {2}ready to test {2}14:30\n {6}Settings toggle {2}!94 {2}Pixel 8 {4}building {7}15:10\n {6}Vehicles list\n/,
@@ -442,6 +494,7 @@ for (const surface of ['terminal', 'desktop', 'vscode'] as const) {
     })
     const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
     expect(all).toContain('BOARD')
+    expect(all).toMatch(/CAPACITY[\s\S]*slots 2\/3 · queued 1/)
     expect(all).toContain('NEEDS YOU')
     expect(all).toContain('needy')
     expect(all).toContain('chain')

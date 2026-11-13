@@ -1,10 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { CommandRunInput, EngineInterface, Register } from 'claude-code'
 
-import type { Card, Chip, Snapshot } from '../types'
+import type { CapacityStatus, Card, Chip, Snapshot } from '../types'
 import {
   age,
   buildSnapshot,
+  capacityLines,
+  capacityParts,
   countsOf,
   formeLines,
   isShown,
@@ -79,10 +81,11 @@ type World = { snap: Snapshot; files: string[] | undefined; marks: Ticks }
 // status line writes, the ticks. A part that cannot be read leaves the rest.
 const gather = async ($: EngineInterface): Promise<World> => {
   const root = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${(await $.env.get('HOME')) ?? ''}/.claude`
-  const [now, ran, loaded] = await Promise.all([
+  const [now, ran, loaded, held] = await Promise.all([
     $.clock.now(),
     soft($.process.run(AGENTS, { timeoutMs: 5000 })),
     soft(loadStories($, root)),
+    soft($.fs.read(`${root}/capacity/status.json`)),
   ])
   let agents: Agent[] | undefined
   try {
@@ -107,7 +110,14 @@ const gather = async ($: EngineInterface): Promise<World> => {
   )
   // Read last: a tick made while the slow reads ran is not overwritten.
   const marks = await loadTicks($)
-  return { snap: buildSnapshot(loaded?.stories, agents, stats, now), files: loaded?.files, marks }
+  const snap = buildSnapshot(loaded?.stories, agents, stats, now)
+  // No status.json is no capacity gate set up: the block is left out.
+  try {
+    if (held !== undefined) snap.capacity = capacityParts(JSON.parse(held) as CapacityStatus, now)
+  } catch {
+    snap.capacity = ['capacity/status.json could not be read']
+  }
+  return { snap, files: loaded?.files, marks }
 }
 
 const refresh = async ($: EngineInterface): Promise<void> => {
@@ -165,6 +175,7 @@ const where = async ($: EngineInterface, e: CommandRunInput): Promise<string> =>
     '',
     ...usageLines(usage?.rateLimits, snap.at),
     '',
+    ...(snap.capacity === undefined ? [] : [...capacityLines(snap.capacity, widthOf(e)), '']),
     ...(snap.isStoriesKnown
       ? storyLines(snap.cards, marks, snap.at, e.args.trim() === 'all')
       : ['STORIES  ~/.claude/stories could not be read']),
@@ -344,6 +355,11 @@ export const register: Register = on => {
             done · {hhmm(snap.at)}
           </Text>
         </Text>
+        {snap.capacity !== undefined && (
+          <Text>
+            <Text weight="bold">CAPACITY</Text> <Text dimColor>{snap.capacity.join(' · ')}</Text>
+          </Text>
+        )}
         {!snap.isStoriesKnown && <Text color="error">~/.claude/stories could not be read</Text>}
         {!snap.isAgentsKnown && <Text color="error">`claude agents` did not answer: session states are missing</Text>}
         {snap.isStoriesKnown && snap.cards.length === 0 && (
