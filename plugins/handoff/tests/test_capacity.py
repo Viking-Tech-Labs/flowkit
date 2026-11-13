@@ -49,7 +49,7 @@ class Capacity(unittest.TestCase):
         (self.claude / "stories").mkdir(parents=True)
         (self.tmp / "bin").mkdir()
         self.env = {"CLAUDE_CONFIG_DIR": str(self.claude), "XDG_CONFIG_HOME": str(self.tmp / "xdg"),
-                    "PATH": f"{self.tmp / 'bin'}:{os.environ['PATH']}", "FLOWKIT_CAPACITY_AGENTS_TIMEOUT": "1"}
+                    "PATH": f"{self.tmp / 'bin'}:{os.environ['PATH']}", "FLOWKIT_CAPACITY_AGENTS_TIMEOUT": "3"}
         patch = mock.patch.dict(os.environ, self.env)
         patch.start()
         self.addCleanup(patch.stop)
@@ -520,6 +520,138 @@ class Capacity(unittest.TestCase):
         r = subprocess.run([str(PLUGIN / "bin" / "flowkit-capacity"), "status"], capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "slots 0/3\n", ""))
         self.assertTrue((self.claude / "capacity" / "status.json").exists())
+
+    # waves: the scheduler over the queue and the running chains
+
+    T = 1_800_000_000.0  # a fixed clock for the scheduler fixtures
+    M = 60
+
+    def running(self, tree, sid="0" * 8 + "-2222-2222-2222-" + "2" * 12):
+        return {"tree": str(tree), "repo": str(tree), "state": "running", "sessions": [{"session": sid, "name": "x"}]}
+
+    def plan(self, found, items, log, slots=3, waiting=()):
+        cfg = {**capacity.DEFAULTS, "slots": slots, "repos": {}}
+        out = capacity.forecast(cfg, found, list(waiting), items, self.T, log)
+        return [(round((p["start"] - self.T) / self.M), round((p["ready"] - self.T) / self.M), p["wave"])
+                if p["start"] is not None else None for _, p in sorted(out.items(), key=lambda kv: (kv[0][0] != "queue", kv[0][1]))]
+
+    def item(self, tree, slices=1, needs=()):
+        return {"name": Path(tree).name, "tree": str(tree), "slices": slices, "needs": set(needs)}
+
+    def test_waves_three_slots_foreign_chains_and_fallback_minutes(self):
+        f1, f2, a, b, c = (self.repo(n) for n in ("f1", "f2", "a", "b", "c"))
+        log = [  # two foreign chains: f1 started 10 min ago with 2 slices left after it, f2 40 min ago, its last
+            {"t": self.T - 10 * self.M, "event": "launch", "name": "f1-s1", "story": "f1", "tree": str(f1), "left": 2},
+            {"t": self.T - 40 * self.M, "event": "launch", "name": "f2-s3", "story": "f2", "tree": str(f2), "left": 0}]
+        # no spans in the log: every repo is planned at slice_minutes (50)
+        self.assertEqual(self.plan([self.running(f1), self.running(f2)],
+                                   [self.item(a), self.item(b, 2), self.item(c)], log), [
+            (0, 50, 1),    # a: the third slot, now
+            (10, 110, 2),  # b: f2's last slice ends at its 50 minutes
+            (50, 100, 3)]) # c: a ends; f1 still has 140 minutes to go
+        # a slice past its median gets ten minutes yet, and a chain with no launch in the log one slice from now
+        log[1]["t"] = self.T - 90 * self.M
+        self.assertEqual(self.plan([self.running(f2)], [self.item(a)], log, slots=1), [(10, 60, 2)])
+        self.assertEqual(self.plan([self.running(f2)], [self.item(a)], [], slots=1), [(50, 100, 2)])
+
+    def test_waves_a_shared_resource_and_the_users_hold(self):
+        a, b, c, d = (self.repo(n) for n in "abcd")
+        self.devices()
+        capacity.hold(None, {"emulator"}, 30, t=self.T)
+        self.assertEqual(self.plan([], [self.item(a, 2, ["simulator"]), self.item(b, 1, ["simulator"]), self.item(c),
+                                        self.item(d, 1, ["emulator"])], [], slots=4), [
+            (0, 100, 1),    # a takes the simulator
+            (100, 150, 3),  # b waits for it
+            (0, 50, 1),     # c needs nothing: it passes b, which waits for a resource only
+            (30, 80, 2)])   # d: the emulator is the user's for 30 minutes
+        # a running chain holds its lease to its end; a queued launch goes before the batch
+        sid = "e" * 8 + "-2222-2222-2222-" + "2" * 12
+        capacity.take([self.row("x", sid, a)], sid, {"simulator"}, t=self.T)
+        queued = [{"id": 4, "tree": str(c), "needs": ["simulator"], "left": 1, "continuation": False}]
+        self.assertEqual(self.plan([self.running(a, sid)], [self.item(b, 1, ["simulator"])], [], waiting=queued), [
+            (50, 150, 2),    # the queued launch, two slices, once the chain in a lets the simulator go
+            (150, 200, 3)])  # the batch behind it
+
+    def test_waves_medians_leave_out_held_time_and_parked_chains(self):
+        r = self.repo("r")
+        ev = lambda m, event, **kw: {"t": self.T + m * self.M, "event": event, "story": "r", "tree": str(r), **kw}
+        log = [ev(0, "launch", name="r-s1", by="user"),
+               ev(20, "launch", name="r-s2", by="chain", launcher="r-s1"),            # 20
+               ev(50, "launch", name="r-s3", by="chain", launcher="r-s2"),            # 30
+               ev(100, "queue", id=7, name="r-s4", by="chain", launcher="r-s3", held=600),  # 50 less 10 held
+               {"t": self.T + 130 * self.M, "event": "dequeue", "id": 7, "name": "r-s4", "story": "r"},
+               ev(130 + 13 * 60, "launch", name="r-s5", by="chain", launcher="r-s4")]  # parked: left out
+        self.assertEqual(capacity.medians(log), {str(r): 30 * self.M})
+        self.assertEqual(capacity.medians(log[:3]), {}, "two spans: slice_minutes stands in")
+
+    def test_the_gate_queues_with_the_forecast_eta(self):
+        app, rows, _ = self.full_machine()
+        code, msg = capacity.gate(rows, "4242", app, "demo", "demo-s1", self.prompt("Left: 1"), [], {}, t=self.T)
+        self.assertEqual(code, capacity.QUEUED)
+        self.assertEqual(capacity.entries()[0]["eta"], self.T + 50 * self.M, "other-s1's one slice at slice_minutes")
+        self.assertEqual(self.log_events()[-1]["left"], 1)
+
+    def test_waves_plan_line_and_the_test_queue(self):
+        app = self.devices()
+        a, b, c = (self.repo(n) for n in "abc")
+        self.story("epic", "> launched app-s1\n")
+        rows = [self.row("app-s1", "f" * 8 + "-2222-2222-2222-" + "2" * 12, app)]
+        self.agents(rows)
+        (self.claude / "stories" / "epic.tests.md").write_text(
+            "# epic test queue\nLogin · !1 · sim · ready to test · \nOld · !2 · sim · tested · \n")
+        lines = capacity.waves(rows, [f"a={a}:2:simulator", f"b={b}", f"c={c}:1:emulator+simulator"], "epic",
+                               write=True, t=self.T)
+        hm = lambda m: time.strftime("%H:%M", time.localtime(self.T + m * self.M))
+        self.assertEqual(lines, [
+            f"a · wave 1 · now · ready ~{hm(100)} · 2 slices · needs simulator",
+            f"b · wave 1 · now · ready ~{hm(50)} · 1 slice · shed",
+            f"c · wave 2 · start ~{hm(100)} · ready ~{hm(150)} · 1 slice · needs emulator, simulator",
+            f"Plan: 1 of 3 now (a) · 1 queued (c ~{hm(100)}) · 1 shed (b) · slots 3/3 · 1 wait on your testing"])
+        self.assertEqual(capacity.read_tests("epic")[1][-1], ["c", "", "", "queued, wave 2, needs emulator, simulator", hm(150)])
+        self.assertEqual(capacity.ties(), {"c": {"story": "epic", "item": "c"}})
+        # the drain moves the line to running with its ready time
+        capacity.write_json(self.claude / "capacity" / "queue" / "1.json",
+                            {"name": "c", "story": "epic", "tree": str(c), "argv": [], "needs": ["simulator"], "left": 0,
+                             "continuation": False, "queued": self.T})
+        with mock.patch.object(capacity, "spawn", side_effect=lambda e: self.sleeper()):
+            capacity.drain([], t=self.T + 5 * self.M)
+        self.assertEqual(capacity.read_tests("epic")[1][-1][3:], ["running", hm(55)])
+        self.assertEqual(capacity.ties(), {})
+        with self.assertRaises(ValueError):
+            capacity.waves(rows, ["no-tree"], t=self.T)
+
+    def test_testq_writes_through_the_lock(self):
+        procs = [subprocess.Popen(["python3", str(CAPACITY), "testq", "epic", "set", f"{w}-{n}", "--state", "building",
+                                   "--eta", "14:30"], stdout=subprocess.DEVNULL) for w in "ab" for n in range(8)]
+        self.assertEqual([p.wait() for p in procs], [0] * 16)
+        _, lines = capacity.read_tests("epic")
+        self.assertEqual(sorted(x[0] for x in lines), sorted(f"{w}-{n}" for w in "ab" for n in range(8)), "no write lost")
+        self.assertEqual({x[4] for x in lines}, {"14:30"})
+        r = self.cli("testq", "epic", "set", "a-0", "--state", "ready to test", "--eta", "", "--mr", "!9")
+        self.assertEqual(r.stdout.strip(), "a-0 · !9 ·  · ready to test ·")
+        test = [e for e in self.log_events() if e["event"] == "test"]
+        self.assertEqual(len(test), 17)
+        self.assertEqual((test[-1]["before"], test[-1]["state"], test[-1]["eta"]), ("building", "ready to test", ""))
+        for w in "ab":
+            for n in range(8):
+                self.assertEqual(self.cli("testq", "epic", "drop", f"{w}-{n}").returncode, 0)
+        self.assertFalse(capacity.tests_path("epic").exists(), "an empty queue deletes the file")
+        self.assertEqual(self.cli("testq", "epic", "drop", "a-0").returncode, 1)
+
+    def test_limit_runs_a_repo_slots_fewer_for_a_while(self):
+        app, lib = self.devices(), self.repo("lib")
+        self.conf.write_text(self.conf.read_text() + f"[{lib}]\nslots = 1\n")
+        t = time.time()
+        self.assertEqual(self.cli("limit", str(app), "-1", "--hours", "2", at=t).stdout.strip(),
+                         f"repo {app}: 2 slots until {time.strftime('%H:%M', time.localtime(t + 7200))}")
+        self.cli("limit", str(lib), "-1", at=t)
+        cfg = capacity.load_config()
+        self.assertEqual((cfg["repos"][str(app)]["slots"], cfg["repos"][str(lib)]["slots"]), (2, 1), "never under one")
+        with mock.patch.dict(os.environ, {"FLOWKIT_CAPACITY_NOW": str(t + 7300)}):
+            self.assertNotIn("slots", capacity.load_config()["repos"][str(app)], "run out")
+        self.cli("limit", str(lib), "0", at=t)
+        self.assertEqual(capacity.load_config()["repos"][str(lib)]["slots"], 1)
+        self.assertEqual([(e["event"], e["delta"]) for e in self.log_events()], [("limit", -1), ("limit", -1), ("limit", 0)])
 
 
 if __name__ == "__main__":

@@ -363,6 +363,7 @@ if [ "$single" -eq 0 ] && [ -z "$from_queue" ]; then
   [ -n "$prompt_copy" ] && again+=("$prompt_copy")
   gate=(gate --pid $$ --tree "$repo" --story "$slug" --name "$name" --prompt "$prompt_copy")
   [ "$over_cap" -eq 1 ] && gate+=(--over-cap)
+  [ "$held" -eq 0 ] || gate+=(--held "$(( $(date +%s) - held_at ))")
   [ "$dry" -eq 1 ] && gate+=(--dry-run)
   verdict=""; code=0
   verdict="$(python3 "$cap" "${gate[@]}" -- "${again[@]}")" || code=$?

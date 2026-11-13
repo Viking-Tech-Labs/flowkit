@@ -356,6 +356,9 @@ shape it does not know, the count is unknown, never zero: nothing is reclaimed.
 | `flowkit-capacity release [names]` | Gives back what this session holds, all of it without names. |
 | `flowkit-capacity hold simulator --for me --minutes 60` | Your test hold: no slice takes it until the minutes run out or `release --for me`; run it again to renew. |
 | `flowkit-capacity drain` | Launches what the queue holds that can start now (it also runs on its own, see below). |
+| `flowkit-capacity waves a=/Users/me/app:2:simulator b=/Users/me/lib [--story s --write]` | Plans a batch (`NAME=TREE[:SLICES[:NEEDS]]`, needs joined by `+`, in launch order): each item's wave, start and ready times, and one plan line. See "Waves" below. |
+| `flowkit-capacity testq <story> [set\|drop <item>] [--state …] [--eta HH:MM] [--mr …] [--device …] [--launch name]` | The story's test queue, `<story>.tests.md`, one line at a time under the lock, each change logged as `test`. The file goes once its last line does. `--launch` ties a line to a queued launch: its drain sets it `running` with its ready time. |
+| `flowkit-capacity limit /Users/me/app -1 [--hours 12]` | The repo runs one slot fewer (never under one) for the hours given; `0` ends it. Logged as `limit`. |
 
 A lease goes free on its own when the holder's close is recorded, when the holder has no pid, or
 when it has been not busy with its transcript untouched for 30 minutes; never while `claude agents`
@@ -367,8 +370,8 @@ after the refusals and before anything is typed:
 - A launch that opens a **new chain** while the machine's slots, or its repo's, are all used, or
   while `claude agents` does not answer, is not launched but queued: `flowkit-spawn` prints
   `QUEUED #<position>, ~<HH:MM> · id=<id> · <why>`, writes `> queued <name> · …` into the story
-  file and exits 11. The time is rough (a slice per slot ahead of it). `--over-cap` launches it
-  anyway, logged as `over-cap`.
+  file and exits 11. The time is the waves forecast's (below). `--over-cap` launches it anyway,
+  logged as `over-cap`.
 - A chain's **own next slice** never waits for a slot: the launching session belongs to the same
   story (or runs in the tree the launch goes to, a first slice started by hand). A coordinator's or
   a reporter's launch is always a new chain. A launch into a tree that already holds a counted
@@ -396,11 +399,31 @@ most every `FLOWKIT_CAPACITY_POLL` seconds, 15 by default). An empty queue costs
 read. With the background driver and no tmux there is no tick: the queue drains on those events
 only.
 
+**Waves.** `waves` and every queued ETA replay the drain's rules forward in time: the running
+chains end after their current slice and the `Left:` count of their latest launch, the queue goes
+first, then the batch in order; a new chain waits for a slot, every item for all its needs at once,
+and nobody passes an earlier one waiting for a slot or the same resource. A slice lasts its repo's
+median from the log (from a slice's launch to its own gate call for the next one, the minutes that
+call sat in a load hold taken off, spans over 12 hours left out), or `slice_minutes` until a repo
+has three spans. A running slice already past its median is given ten minutes yet. Every time is
+printed with `~`: it is a forecast. An item that needs no resource is `shed`: a coordinator gives
+it a chain of its own. The plan line reads
+
+```
+Plan: 1 of 3 now (a) · 1 queued (c ~16:40) · 1 shed (b) · slots 3/3 · 1 wait on your testing
+```
+
+the last part counting the story's test-queue lines whose state says `to test`. With `--write`,
+every item that does not start now gets a test-queue line (`queued, wave 2, needs simulator`, its
+ready time) tied to its launch name.
+
 State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/capacity/`: `resources/<name>.json` (the
 leases), `launching/<pid>.json` (an in-flight launch, counted while its pid lives), `queue/<id>.json`
 (a queued launch: its arguments, prompt, story, tree, needs, left, by, queued-at), `log.jsonl`
-(one line per take, release, free, reclaim, hold, launch, queue, dequeue, repoint and over-cap;
-`reclaim` when the holder died) and
+(one line per take, release, free, reclaim, hold, launch, queue, dequeue, repoint, over-cap, test
+and limit; `reclaim` when the holder died; launch, queue and dequeue carry the repo, `Left:` and,
+for a gate call, the launcher and its load-hold seconds), `limits.json`, `testq.json` (test-queue
+lines tied to queued launches) and
 `status.json`, rewritten on every change with a `version` field
 (`tests/fixtures/capacity-status.json` shows its shape). Every change runs under one lock that is
 tried for 10 seconds and then gone on without, with one stderr line, so a stuck holder never
