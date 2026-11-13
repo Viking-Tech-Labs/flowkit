@@ -15,6 +15,7 @@ import {
   stateWord,
   storyLines,
   parseStory,
+  parseTests,
   usageLines,
   usd,
 } from './model'
@@ -24,6 +25,7 @@ const PANE = 'board'
 // A card with more steps than this lists the open ones only, until its button shows all.
 const CAP = 5
 const REFRESH_MS = 8000
+const TESTS = '.tests.md'
 // The sessions come from `claude agents --json --all`: interactive ones carry `status`, background
 // ones `state`, and `status` too while their process runs.
 const AGENTS = [
@@ -49,11 +51,18 @@ const loadStories = async ($: EngineInterface, root: string): Promise<{ stories:
     if (/ENOENT|no such file|not found/i.test(String(e instanceof Error ? e.message : e))) return []
     throw e
   })
-  const files = listed.filter(f => f.kind === 'file' && f.name.endsWith('.md'))
+  // <story>.tests.md beside a story file is its test queue, not a story.
+  const queues = new Set(listed.filter(f => f.kind === 'file' && f.name.endsWith(TESTS)).map(f => f.name.slice(0, -TESTS.length)))
+  const files = listed.filter(f => f.kind === 'file' && f.name.endsWith('.md') && !f.name.endsWith(TESTS))
   const rows = await Promise.all(
     files.map(async f => {
       const text = await soft($.fs.read(`${dir}/${f.name}`))
-      return text === undefined ? undefined : parseStory(f.name.slice(0, -3), text, f.mtimeMs)
+      const story = text === undefined ? undefined : parseStory(f.name.slice(0, -3), text, f.mtimeMs)
+      if (story !== undefined && queues.has(story.name)) {
+        const tests = await soft($.fs.read(`${dir}/${story.name}${TESTS}`))
+        if (tests !== undefined) story.tests = parseTests(tests)
+      }
+      return story
     }),
   )
   return { stories: rows.filter((r): r is Story => r !== undefined), files: files.map(f => f.name.slice(0, -3)) }
@@ -255,6 +264,16 @@ export const register: Register = on => {
             <Text dimColor wrap="truncate-end">
               idle at the prompt: {idle.map(chip => chip.name).join(', ')}
             </Text>
+          )}
+          {c.tests.length > 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text weight="bold">TEST QUEUE</Text>
+              {c.tests.map((t, i) => (
+                <Text key={`test:${c.story}:${i}`} wrap="truncate-end">
+                  {[t.item, t.mr, t.device, t.state, t.eta].filter(f => f !== '').join(' · ')}
+                </Text>
+              ))}
+            </Box>
           )}
           {c.steps.length > 0 && (
             <Box flexDirection="column" marginTop={1}>

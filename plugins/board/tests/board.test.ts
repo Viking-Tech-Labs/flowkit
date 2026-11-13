@@ -7,6 +7,7 @@ import {
   isShown,
   openSteps,
   parseStory,
+  parseTests,
   pruneTicks,
   sessionLines,
   stepsOf,
@@ -274,11 +275,29 @@ test('/forme wraps the open steps of each story touched in the last three days, 
   expect(formeLines(cards, {}, NOW, 60, 'nope')).toContain('  no story "nope" with a close section')
 })
 
+const QUEUE = `# chain test queue
+
+- Login screen · !93 · iPhone 15 · ready to test · 14:30
+Settings toggle · !94 · Pixel 8 · building · 15:10
+Vehicles list
+`
+
+test('a test queue reads one item per line, skips headings and blanks, and leaves a missing field empty', () => {
+  expect(parseTests(QUEUE)).toEqual([
+    { item: 'Login screen', mr: '!93', device: 'iPhone 15', state: 'ready to test', eta: '14:30' },
+    { item: 'Settings toggle', mr: '!94', device: 'Pixel 8', state: 'building', eta: '15:10' },
+    { item: 'Vehicles list', mr: '', device: '', state: '', eta: '' },
+  ])
+  expect(parseTests('a · b · c · d · e · f')[0]?.eta).toBe('e · f')
+  expect(parseTests('\n# only a heading\n')).toEqual([])
+})
+
 const stubWorld = (on: On, agentsOut: string = JSON.stringify(AGENTS)) => {
   const commands: CommandSpec[] = []
   const store: Record<string, unknown> = {}
   const files: Record<string, string> = {
     '/home/n/.claude/stories/chain.md': CHAIN,
+    '/home/n/.claude/stories/chain.tests.md': QUEUE,
     '/home/n/.claude/stories/needy.md': close('n-s1', 30 * MIN, 'started n-s2'),
     '/home/n/.claude/stories/fin.md': close('x-s1', 6 * HOUR, 'none', 'FOR ME\n- Push main.\n'),
     '/home/n/.claude/stories/draft.md': 'a prompt draft with FOR ME in it, no close section\n',
@@ -287,6 +306,7 @@ const stubWorld = (on: On, agentsOut: string = JSON.stringify(AGENTS)) => {
   }
   const mtimes: Record<string, number> = {
     'chain.md': NOW - 20 * MIN,
+    'chain.tests.md': NOW,
     'needy.md': NOW - 30 * MIN,
     'fin.md': NOW - 6 * HOUR,
     'draft.md': NOW,
@@ -353,6 +373,10 @@ test('/board, /where and /forme register as immediate and answer from the stubbe
   expect(board).toContain('  5-hour    51%  resets in 2h 14m')
   expect(board).toContain('STORIES  1 need you, 0 stalled, 1 running, 1 done')
   expect(board).not.toContain('draft')
+  expect(board).toMatch(
+    /\n {2}chain +running .*\n {4}test queue\n {6}Login screen {5}!93 {2}iPhone 15 {2}ready to test {2}14:30\n {6}Settings toggle {2}!94 {2}Pixel 8 {4}building {7}15:10\n {6}Vehicles list\n/,
+  )
+  expect(board.match(/test queue/g)?.length).toBe(1)
   for (const line of lines) expect(line.length).toBeLessThanOrEqual(100)
 
   const steps = (await $.command.run({ ...run, command: 'forme' })).text ?? ''
@@ -423,6 +447,8 @@ for (const surface of ['terminal', 'desktop', 'vscode'] as const) {
     expect(all).toContain('chain')
     expect(all).toContain('c-s3 · working')
     expect(all).toContain('n-s2 waits (permission prompt)')
+    expect(all).toContain('TEST QUEUE\nLogin screen · !93 · iPhone 15 · ready to test · 14:30\nSettings toggle · !94 · Pixel 8 · building · 15:10\nVehicles list')
+    expect(all.match(/TEST QUEUE/g)?.length).toBe(1)
     expect((await ui.findAll({ type: 'Link' })).map(l => [l.props.href, l.props.label])).toEqual([
       ['https://gitlab.com/g/p/-/merge_requests/93', 'MR !93  p'],
     ])

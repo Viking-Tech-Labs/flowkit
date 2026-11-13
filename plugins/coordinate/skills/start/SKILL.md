@@ -134,6 +134,10 @@ Coordinator: <name> · Mission: <path or "pasted"> · Updated: <date time>
 ```
 
 - **DONE**: update the board, start or brief what was held on it, tell the user what moved.
+- **The test queue**: whenever an item becomes testable, or its state or ETA moves, rewrite
+  `${CLAUDE_CONFIG_DIR:-~/.claude}/stories/<slug>.tests.md`, one line per item: `item · MR · device ·
+  state · ETA as a clock time` (format: the board plugin's README, "The test queue"). `/board`
+  and `/where` show it under the story.
 - **BLOCKED**: record it. Blocked on the user: say so plainly, with the worker's name and its
   Remote Control link.
 - **To reach a worker**, `coordinate.py workers <worker>` first. `live`: SendMessage to its name;

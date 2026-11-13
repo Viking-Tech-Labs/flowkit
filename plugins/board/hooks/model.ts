@@ -1,4 +1,4 @@
-import type { Card, CardState, Chip, Snapshot, Step } from '../types'
+import type { Card, CardState, Chip, Snapshot, Step, TestLine } from '../types'
 
 export const DAY = 86_400_000
 // A session promised by a close has this long to come up (trust prompt, start-up) before the
@@ -31,7 +31,7 @@ export type Section = {
   forMe: string[]
   links: string[]
 }
-export type Story = { name: string; mtimeMs: number; sections: Section[] }
+export type Story = { name: string; mtimeMs: number; sections: Section[]; tests?: TestLine[] }
 
 // The sections of a story file: "## <name> · <YYYY-MM-DD HH:MM>", as the handoff close writes them.
 const HEADING = /^## (.+?) · (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})\s*$/
@@ -121,6 +121,19 @@ export const parseStory = (name: string, text: string, mtimeMs: number): Story |
   for (const s of sections) s.forMe = s.forMe.filter(step => step !== '' && !NOTHING.test(step))
   return { name, mtimeMs, sections }
 }
+
+// The test queue a coordinator keeps beside the story file, <story>.tests.md: one line per item,
+// "item · MR · device · state · ETA". Blank lines, # headings and a leading list marker are skipped;
+// a missing field is empty, a sixth and on stay with the ETA.
+export const parseTests = (text: string): TestLine[] =>
+  text
+    .split('\n')
+    .map(line => line.trim().replace(/^[-*]\s+/, ''))
+    .filter(line => line !== '' && !line.startsWith('#'))
+    .map(line => {
+      const [item = '', mr = '', device = '', state = '', ...eta] = line.split(/\s*·\s*/)
+      return { item, mr, device, state, eta: eta.join(' · ') }
+    })
 
 const normal = (text: string): string => text.toLowerCase().replace(/\s+/g, ' ')
 
@@ -238,6 +251,7 @@ const cardOf = (story: Story, chips: readonly Chip[], now: number): Card => {
     chips: [...chips],
     steps: stepsOf(story),
     links: linksOf(story),
+    tests: story.tests ?? [],
   }
 }
 
@@ -384,6 +398,14 @@ export const countsOf = (cards: readonly Card[]): Record<CardState, number> => {
 const STATE_WORD: Record<CardState, string> = { 'needs-you': 'NEEDS YOU', stalled: 'STALLED', running: 'running', done: 'done' }
 export const stateWord = (state: CardState): string => STATE_WORD[state]
 
+// The test queue under its story in /where: the fields in columns, each cut to a width.
+const TEST_WIDTHS = [36, 18, 14, 14, 12] as const
+export const testLines = (tests: readonly TestLine[], indent: string): string[] => {
+  const rows = tests.map(t => [t.item, t.mr, t.device, t.state, t.eta].map((f, i) => cut(f, TEST_WIDTHS[i] ?? 12)))
+  const widths = TEST_WIDTHS.map((_, i) => Math.max(0, ...rows.map(r => (r[i] ?? '').length)))
+  return rows.map(r => `${indent}${r.map((f, i) => f.padEnd(widths[i] ?? 0)).join('  ')}`.trimEnd())
+}
+
 export const storyLines = (cards: readonly Card[], ticks: Ticks, now: number, isAll: boolean): string[] => {
   const shown = cards.filter(c => isAll || isShown(c, ticks, now))
   const n = countsOf(cards)
@@ -398,6 +420,7 @@ export const storyLines = (cards: readonly Card[], ticks: Ticks, now: number, is
     ...shown.flatMap(c => [
       line(c.story, stateWord(c.state), String(c.closes), String(openSteps(c, ticks).length), age(now - c.touchedMs)),
       ...(c.state === 'stalled' || c.state === 'needs-you' ? [`  ${' '.repeat(nameW)}  ${c.why}`] : []),
+      ...(c.tests.length > 0 ? ['    test queue', ...testLines(c.tests, '      ')] : []),
     ]),
     ...(folded.length > 0
       ? [`  ${folded.length} more (${folded.filter(c => c.state !== 'done').length} not done), quiet: /where all`]

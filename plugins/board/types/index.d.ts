@@ -14,6 +14,9 @@ export type Chip = {
 
 export type Step = { key: string; text: string; from: string }
 
+// A line of the story's test queue, <story>.tests.md: item · MR · device · state · ETA.
+export type TestLine = { item: string; mr: string; device: string; state: string; eta: string }
+
 export type Card = {
   story: string
   state: CardState
@@ -24,6 +27,7 @@ export type Card = {
   chips: Chip[]
   steps: Step[]
   links: string[]
+  tests: TestLine[]
 }
 
 export type Snapshot = {

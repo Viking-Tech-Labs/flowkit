@@ -39,7 +39,34 @@ a step of theirs is still open), fold into one line that unfolds.
 - `~/.claude/session-stats/<session id>.json`, for the context and cost figures. The `handoff`
   status-line offer writes them; a session without the file shows without the numbers.
 
+- `~/.claude/stories/<story>.tests.md`, when it exists: the story's test queue (below).
+
 Nothing is written outside the plugin's own store (the ticks).
+
+## The test queue
+
+What you can test now, and when the rest will be ready, kept by whoever runs the story (a
+`coordinate` coordinator, or any session or script) beside the story file as
+`~/.claude/stories/<story>.tests.md`. Plain text, one line per item, five fields between ` · `:
+
+```
+# my-story test queue
+Login screen · !93 · iPhone 15 · ready to test · 14:30
+Settings toggle · !94 · Pixel 8 · building · 15:10
+```
+
+| Field | Holds |
+|---|---|
+| item | what to test, in a few words |
+| MR | the merge request (`!93`, a URL), empty before one exists |
+| device | where to test it (a phone, a simulator, a browser) |
+| state | free words: `ready to test`, `building`, `waiting on review`, `tested` |
+| ETA | a clock time (`14:30`) when it will be ready to test, empty once it is |
+
+Blank lines and `#` lines are skipped, a leading `- ` is dropped, and a missing field stays empty.
+The writer rewrites the whole file whenever a line changes and deletes it when the queue is empty.
+`/board` lists it on the story's card under TEST QUEUE, `/where` under the story's row; a story
+without the file shows nothing.
 
 ## Surfaces
 
