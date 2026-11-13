@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -484,6 +485,7 @@ class Capacity(unittest.TestCase):
         self.assertEqual(self.queue(), [("q2-s1", "slots 1/1")])
         self.assertEqual(started[0]["argv"], ["q1"])
         self.assertEqual([e["event"] for e in self.log_events()][-1], "dequeue")
+        self.assertLessEqual(self.log_events()[-1]["gap"], self.log_events()[-1]["waited"], "idle-with-queue's bound")
         status = json.loads((self.claude / "capacity" / "status.json").read_text())
         self.assertEqual([q["name"] for q in status["queue"]], ["q2-s1"])
 
@@ -611,6 +613,7 @@ class Capacity(unittest.TestCase):
             f"Plan: 1 of 3 now (a) · 1 queued (c ~{hm(100)}) · 1 shed (b) · slots 3/3 · 1 wait on your testing"])
         self.assertEqual(capacity.read_tests("epic")[1][-1], ["c", "", "", "queued, wave 2, needs emulator, simulator", hm(150)])
         self.assertEqual(capacity.ties(), {"c": {"story": "epic", "item": "c"}})
+        self.assertIn(("waves", 3), [(e["event"], e.get("items")) for e in self.log_events()], "a batch, for the report")
         # the drain moves the line to running with its ready time
         capacity.write_json(self.claude / "capacity" / "queue" / "1.json",
                             {"name": "c", "story": "epic", "tree": str(c), "argv": [], "needs": ["simulator"], "left": 0,
@@ -654,6 +657,104 @@ class Capacity(unittest.TestCase):
         self.cli("limit", str(lib), "0", at=t)
         self.assertEqual(capacity.load_config()["repos"][str(lib)]["slots"], 1)
         self.assertEqual([(e["event"], e["delta"]) for e in self.log_events()], [("limit", -1), ("limit", -1), ("limit", 0)])
+
+    def write_log(self, *events):
+        path = self.claude / "capacity" / "log.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(e) + "\n" for e in events))
+
+    def write_transcript(self, sid, name, entries):
+        """A transcript under projects/: an agent-name line, then (seconds, entry) pairs."""
+        iso = lambda s: datetime.fromtimestamp(s, timezone.utc).isoformat().replace("+00:00", "Z")  # noqa: E731
+        path = self.claude / "projects" / "-w-app" / f"{sid}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(e) + "\n" for e in [{"type": "agent-name", "agentName": name, "sessionId": sid}] + [
+            {**e, "timestamp": iso(at), "sessionId": sid} for at, e in entries]))
+
+    def test_report_over_a_synthetic_log(self):
+        T = datetime(2026, 11, 10, 12, 0).timestamp()
+        M = 60
+        night = datetime(2026, 11, 10, 23, 0).timestamp()
+        self.write_log(
+            {"t": T, "event": "launch", "name": "a-s1", "held": 120},
+            {"t": T + M, "event": "queue", "id": 1, "name": "b-s1", "needs": ["simulator"],
+             "why": "busy: simulator is held by a-s1 since 12:00 (take)", "eta": T + 31 * M, "held": 0},
+            {"t": T + 41 * M, "event": "dequeue", "id": 1, "name": "b-s1", "waited": 2400, "gap": 900},
+            {"t": night - 90 * M, "event": "queue", "id": 2, "name": "c-s1", "needs": [], "why": "slots 3/3",
+             "eta": night - 30 * M},
+            {"t": night, "event": "dequeue", "id": 2, "name": "c-s1", "waited": 5400, "gap": 5400},
+            {"t": T + 2 * M, "event": "reclaim", "resource": "emulator"},
+            {"t": T + 3 * M, "event": "over-cap", "name": "d-s1"},
+            {"t": T + 4 * M, "event": "audit", "resource": "simulator", "session": "s9", "holder": "a-s1",
+             "command": "xcrun simctl install booted x"},
+            {"t": T + 5 * M, "event": "note", "kind": "collision", "text": "two installs on the simulator"},
+            *({"t": T + n, "event": "waves", "story": "epic", "items": n} for n in (4, 5, 6, 2)),
+            {"t": T, "event": "test", "story": "epic", "item": "b", "op": "set", "before": None,
+             "state": "queued, wave 2", "eta": T + 60 * M},
+            {"t": T + 80 * M, "event": "test", "story": "epic", "item": "b", "op": "set", "before": "queued, wave 2",
+             "state": "ready to test"},
+            {"t": T - 2 * capacity.DAY, "event": "over-cap", "name": "before-the-window"},
+        )
+        usage = lambda n: {"type": "assistant", "message": {"usage": {"input_tokens": n}}}  # noqa: E731
+        typed = lambda text: {"type": "user", "origin": {"kind": "human"}, "message": {"content": text}}  # noqa: E731
+        self.write_transcript("c" * 8, "epic-coord", [
+            (T + 10 * M, typed("go on with the batch")),
+            (T + 11 * M, usage(100_000)),
+            (T + 20 * M, {"type": "user", "isMeta": True, "origin": {"kind": "peer"}, "message": {"content": "slice done"}}),
+            (T + 21 * M, {"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}}),
+            (T + 30 * M, typed("what's the status?")),
+            (T + 60 * M, {"type": "system", "subtype": "compact_boundary",
+                          "compactMetadata": {"preTokens": 150_000, "postTokens": 20_000}}),
+            (T + 70 * M, usage(50_000)),
+        ])
+        self.write_transcript("d" * 8, "app-s1", [(T + 15 * M, typed("a worker's prompt")), (T + 40 * M, usage(10))])
+        data = capacity.report(T, T + capacity.DAY)
+        self.assertEqual(data["launch_holds"], {"count": 1, "minutes": 2})
+        self.assertEqual(data["queued"], {"count": 2, "minutes": 130, "launch_eta_error": 20, "ready_eta_error": 20,
+                                          "ready_items": 1})
+        self.assertEqual(data["resource_waits"], {"simulator": {"count": 1, "minutes": 40}})
+        self.assertEqual((data["reclaims"], data["over_cap"], data["batches"]), (1, 1, 3))
+        self.assertEqual(data["idle_with_queue"], {"day": 15 + 30, "nights": {"2026-11-10": 60}})
+        self.assertEqual(len(data["collisions"]), 2)
+        self.assertEqual((data["sessions"], data["over_slots_minutes"]), (2, 0))
+        self.assertEqual(data["coordinators"], {"epic-coord": {"2026-11-10": {
+            "typed": 2, "status": 1, "compactions": 1, "growth": 50_000 + 130_000}}})
+        lines = capacity.report_lines(data)
+        self.assertIn("coordinator     epic-coord: 11-10 180k, 1 compacted, 2 typed (1 status)", lines)
+        self.assertEqual(lines[-1], "pass            batches enough · idle nights pass · ETA error pass · growth pass"
+                                    " (180k epic-coord 11-10) · status asks no baseline given · collisions FAIL")
+        base = capacity.report(T, T + capacity.DAY, baseline=True)
+        self.assertNotIn("queued", base)
+        self.assertEqual(capacity.report_lines(base)[-1], "typed prompts   2.0/day to coordinators, 1.0/day asking for status")
+        against = {**base, "coordinators": {"x-coord": {"2026-11-03": {"typed": 9, "status": 4, "compactions": 0}}}}
+        self.assertIn("status asks pass (1.0 vs 4.0/day)", capacity.report_lines(data, against)[-1])
+        r = self.cli("report", "--since", "2026-11-10", "--until", "2026-11-12", "--json")
+        self.assertEqual((r.returncode, json.loads(r.stdout)["over_cap"]), (0, 1), r.stderr)
+        self.assertEqual(self.cli("report", "--since", "last week").returncode, 2)
+
+    def test_the_audit_hook_logs_a_match_and_never_denies(self):
+        app = self.repo("app")
+        self.conf.write_text(f"[{app}]\nresource simulator = s\naudit simulator = xcrun simctl|maestro test\n"
+                             "audit emulator = adb ( \nresource backend = b\n")
+        mine, other = "a" * 8 + "-1111-1111-1111-" + "1" * 12, "b" * 8 + "-1111-1111-1111-" + "1" * 12
+        call = lambda sid, cmd: capacity.audit({"session_id": sid, "cwd": str(app),  # noqa: E731
+                                                "tool_input": {"command": cmd}}, t=100)
+        self.assertEqual(call(mine, "git status"), [])
+        self.assertEqual(call(mine, "xcrun simctl install booted App.app"), ["simulator"], "free, not taken: logged")
+        rows = [self.row("app-s1", mine, app)]
+        self.agents(rows)
+        self.assertEqual(capacity.take(rows, mine, {"simulator"})[0], 0)
+        self.assertEqual(call(mine, "maestro test flow.yaml"), [], "the holder runs it")
+        self.assertEqual(call(other, "maestro test flow.yaml"), ["simulator"])
+        audits = [e for e in self.log_events() if e["event"] == "audit"]
+        self.assertEqual([(e["session"], e["holder"]) for e in audits], [(mine, None), (other, "app-s1")])
+        for stdin in ('{"session_id": "x", "tool_input": {"command": "xcrun simctl boot"}}', "not json", ""):
+            r = subprocess.run(["python3", str(CAPACITY), "audit"], input=stdin, capture_output=True, text=True)
+            self.assertEqual((r.returncode, r.stdout), (0, ""), "never denies, never answers the harness")
+        self.assertEqual(len([e for e in self.log_events() if e["event"] == "audit"]), 3)
+        self.assertEqual(self.cli("note", "collision", "two installs").stdout.strip(), "noted collision: two installs")
+        self.assertEqual(self.log_events()[-1], {"t": self.log_events()[-1]["t"], "event": "note", "kind": "collision",
+                                                 "text": "two installs"})
 
 
 if __name__ == "__main__":

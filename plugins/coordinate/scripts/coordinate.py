@@ -102,6 +102,8 @@ def growth(path, t):
                 at = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00")).timestamp()
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
+            if at > t:  # a day in the past (capacity report): what came later is not its growth
+                break
             if e.get("isSidechain"):
                 continue
             if e.get("type") == "assistant":

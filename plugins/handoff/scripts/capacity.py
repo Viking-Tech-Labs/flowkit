@@ -9,6 +9,7 @@ declares no resources. State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/capaci
 import argparse
 import contextlib
 import fcntl
+import importlib.util
 import json
 import os
 import re
@@ -44,6 +45,13 @@ COORD_NAME = re.compile(r"(?:^|-)coord(?:inator)?(?:-\d+)?$")  # coord-1, story-
 SECTION = re.compile(r"^\[(.+)\]$")
 RESOURCE = re.compile(r"^resource\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.*)$")
 SETTING = re.compile(r"^([a-z_]+)\s*=\s*(\S+)$")
+AUDIT = re.compile(r"^audit\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.+)$")  # a resource's commands, for the audit hook
+SINCE = re.compile(r"^(\d+(?:\.\d+)?)([dhm])$")  # report --since 7d, 36h, 90m
+DAY = 24 * 3600
+NIGHT_FROM, NIGHT_TO = 22, 8  # the report's night, local hours
+IDLE_WITH_QUEUE = 10 * 60  # a startable launch left waiting longer than this is idle machine time
+STATUS_ASK = re.compile(r"\b(status|what'?s going on|where are we|is (it|everything|anything) (stuck|done)|"
+                        r"all done|what'?s left|anything (left|planned)|how far|progress)\b", re.I)
 
 
 def config_path():
@@ -77,6 +85,16 @@ def load_config(path=None):
                 print(f"capacity.conf:{n}: a resource belongs under a [<repo path>] section", file=sys.stderr)
             else:
                 section["resources"][m.group(1)] = m.group(2).strip()
+        elif m := AUDIT.match(line):
+            try:
+                pattern = re.compile(m.group(2).strip())
+            except re.error as e:
+                print(f"capacity.conf:{n}: not a pattern: {e}", file=sys.stderr)
+                continue
+            if section is None:
+                print(f"capacity.conf:{n}: an audit line belongs under a [<repo path>] section", file=sys.stderr)
+            else:
+                section.setdefault("audit", {})[m.group(1)] = pattern
         elif (m := SETTING.match(line)) and (m.group(1) in DEFAULTS if section is None else m.group(1) == "slots"):
             try:
                 (cfg if section is None else section)[m.group(1)] = number(m.group(2))
@@ -862,7 +880,10 @@ def drain(rows, t=None, ending=()):
     new flowkit-spawn's pid before the lock goes, so the next gate counts them. ending: session
     ids whose close is being recorded right now (still busy). Returns the launched entries."""
     t = now() if t is None else t
-    if not queued() or load_held():
+    if not queued():
+        return []
+    gap = drain_gap(t)
+    if load_held():
         return []
     cfg = load_config()
     started = []
@@ -880,7 +901,7 @@ def drain(rows, t=None, ending=()):
                 (state_dir() / "queue" / f"{e['id']}.json").unlink(missing_ok=True)
                 log("dequeue", t, id=e["id"], name=e.get("name", ""), story=e.get("story", ""), pid=pid,
                     waited=round(t - (e.get("queued") or t)), tree=e["tree"], repo=repo_of(e["tree"]),
-                    left=e.get("left"))
+                    left=e.get("left"), gap=None if gap is None else round(min(gap, t - (e.get("queued") or t))))
                 tie = ties().get(e.get("name"))
                 if tie:
                     m = medians(events()).get(repo_of(e["tree"]), cfg["slice_minutes"] * 60)
@@ -1043,6 +1064,8 @@ def waves(rows, specs, story="", write=False, t=None):
     found = chains(rows, t)
     waiting = entries()
     plan = forecast(cfg, found, waiting, items, t)
+    if write and story:
+        log("waves", t, story=story, items=len(items))  # a batch, for the report
     lines, now_, later, shed, lost = [], [], [], [], []
     for n, item in enumerate(items):
         p = plan[("item", n)]
@@ -1077,6 +1100,327 @@ def waves(rows, specs, story="", write=False, t=None):
     if found is None:
         parts.append("claude agents did not answer: no new chain starts until it does")
     return lines + [" · ".join(parts)]
+
+
+def note(kind, text, t=None):
+    """`note collision "…"`: a line any session (or the user) adds to the log for the report."""
+    log("note", t, kind=kind, text=text)
+    return f"noted {kind}: {text}"
+
+
+def audit(payload, t=None):
+    """The PreToolUse audit (decision 7): a Bash command matching a resource's `audit` pattern, from
+    a session that does not hold that resource, is logged as `audit`. Patterns are machine-wide, as
+    resource names are. Never denies and prints nothing; returns the resources logged."""
+    patterns = {}
+    for section in load_config()["repos"].values():
+        patterns.update(section.get("audit", {}))
+    command = (payload.get("tool_input") or {}).get("command") or ""
+    hits = [n for n, p in sorted(patterns.items()) if p.search(command)]
+    if not hits:
+        return []
+    sid = payload.get("session_id") or ""
+    held = leases()
+    out = []
+    for name in hits:
+        lease = held.get(name)
+        if lease and lease["session"] == sid:
+            continue
+        log("audit", t, resource=name, session=sid, holder=lease and (lease.get("name") or lease["session"]),
+            command=command[:200], cwd=payload.get("cwd") or "")
+        out.append(name)
+    return out
+
+
+def drain_gap(t):
+    """Seconds since the previous drain of a non-empty queue (capacity/drained), and this one
+    stamped: an entry startable now was not at the previous drain, so the gap bounds how long it
+    sat startable. None the first time."""
+    path = state_dir() / "drained"
+    try:
+        prev = float(path.read_text())
+    except (OSError, ValueError):
+        prev = None
+    write_json(path, t)
+    return None if prev is None else max(t - prev, 0)
+
+
+def since_arg(text, t):
+    """`7d`, `36h`, `90m` before t, or a local date `2026-11-06`."""
+    m = SINCE.match(text)
+    if m:
+        return t - float(m.group(1)) * {"d": DAY, "h": 3600, "m": 60}[m.group(2)]
+    return datetime.strptime(text, "%Y-%m-%d").timestamp()
+
+
+def midnight(ts):
+    return datetime.fromtimestamp(ts).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def day_of(ts):
+    return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+
+def night_minutes(a, b):
+    """Minutes of [a, b] in each night (NIGHT_FROM to NIGHT_TO local), keyed by the evening's date."""
+    out = {}
+    d = midnight(a) - DAY
+    while d < b:
+        lo = datetime.fromtimestamp(d).replace(hour=NIGHT_FROM).timestamp()
+        hi = (datetime.fromtimestamp(d + DAY + 3600).replace(hour=NIGHT_TO, minute=0, second=0)).timestamp()
+        overlap = min(b, hi) - max(a, lo)
+        if overlap > 0:
+            out[day_of(d + 3600)] = out.get(day_of(d + 3600), 0) + overlap / 60
+        d = midnight(d + DAY + 3600)
+    return out
+
+
+def coordinate_growth():
+    """coordinate.py's growth(), when the coordinate plugin sits beside this one (the repository's
+    plugins/, or the plugin cache's <marketplace>/coordinate/<version>/); None without it."""
+    here = Path(__file__).resolve()
+    found = list(here.parents[2].glob("coordinate/scripts/coordinate.py")) or sorted(
+        here.parents[3].glob("coordinate/*/scripts/coordinate.py"),
+        key=lambda p: [int(x) if x.isdigit() else 0 for x in p.parts[-3].split(".")])[-1:]
+    if not found:
+        return None
+    spec = importlib.util.spec_from_file_location("flowkit_coordinate", found[0])
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.growth
+
+
+TIMESTAMP = re.compile(r'"timestamp":\s*"([^"]+)"')
+
+
+def typed_text(e):
+    """A prompt the user typed (Remote Control included), or None: not a tool result, a hook's or
+    the harness's meta text, a peer session's message or a task notification."""
+    if e.get("type") != "user" or e.get("isSidechain") or e.get("isMeta"):
+        return None
+    origin = e.get("origin")
+    if origin is not None and (not isinstance(origin, dict) or origin.get("kind") != "human"):
+        return None
+    content = (e.get("message") or {}).get("content")
+    if isinstance(content, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            return None
+        content = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    text = (content or "").strip() if isinstance(content, str) else ""
+    return text if text and not text.startswith("<") else None
+
+
+def transcript(path, start, end):
+    """One pass over a session transcript: its name, its active spans in [start, end) (split where
+    it sat still over IDLE), the prompts typed to it and its compactions, each with its time."""
+    name, times, typed, compactions = "", [], [], []
+    with open(path, errors="replace") as f:
+        for line in f:
+            m = TIMESTAMP.search(line)
+            at = None
+            if m:
+                try:
+                    at = datetime.fromisoformat(m.group(1).replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    pass
+            wanted = '"agent-name"' in line or '"custom-title"' in line or (
+                at is not None and start <= at < end and ('"compact_boundary"' in line or '"type":"user"' in line
+                                                          or '"type": "user"' in line))
+            if at is not None and start <= at < end and '"isSidechain":true' not in line:
+                times.append(at)
+            if not wanted:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("type") == "agent-name" and e.get("agentName"):
+                name = e["agentName"]
+            elif e.get("type") == "custom-title" and e.get("customTitle") and not name:
+                name = e["customTitle"]
+            elif e.get("subtype") == "compact_boundary":
+                compactions.append(at)
+            elif (text := typed_text(e)) is not None:
+                typed.append((at, text))
+    spans = []
+    for at in sorted(times):
+        if spans and at - spans[-1][1] <= IDLE:
+            spans[-1][1] = at
+        else:
+            spans.append([at, at])
+    return {"name": name, "spans": spans, "typed": typed, "compactions": compactions}
+
+
+def sessions_report(start, end, cfg):
+    """From the transcripts and story files: sessions at once, and per coordinator per day its
+    growth, compactions, typed prompts and those asking for status."""
+    names = coordinators()
+    growth = coordinate_growth()
+    spans, coords = [], {}
+    for path in sorted((claude_dir() / "projects").glob("*/*.jsonl")):
+        try:
+            if path.stat().st_mtime < start:
+                continue
+            facts = transcript(path, start, end)
+        except OSError:
+            continue
+        spans += facts["spans"]
+        if not facts["name"] or not (COORD_NAME.search(facts["name"]) or facts["name"] in names):
+            continue
+        days = coords.setdefault(facts["name"], {})
+        for at, text in facts["typed"]:
+            d = days.setdefault(day_of(at), {"typed": 0, "status": 0, "compactions": 0})
+            d["typed"] += 1
+            d["status"] += bool(STATUS_ASK.search(text))
+        for at in facts["compactions"]:
+            days.setdefault(day_of(at), {"typed": 0, "status": 0, "compactions": 0})["compactions"] += 1
+        for a, b in facts["spans"]:
+            day = midnight(a)
+            while day <= b:
+                d = days.setdefault(day_of(day + 3600), {"typed": 0, "status": 0, "compactions": 0})
+                if growth is not None and "growth" not in d:
+                    d["growth"] = growth(path, min(midnight(day + DAY + 3600), end))[0]
+                day = midnight(day + DAY + 3600)
+    edges = sorted([(a, 1) for a, _ in spans] + [(b, -1) for _, b in spans], key=lambda x: (x[0], -x[1]))
+    peak = live = 0
+    over, since = 0.0, None
+    for at, step in edges:
+        live += step
+        peak = max(peak, live)
+        if live > cfg["slots"] and since is None:
+            since = at
+        elif live <= cfg["slots"] and since is not None:
+            over, since = over + at - since, None
+    return {"sessions": len(spans) and peak, "over_slots_minutes": round(over / 60),
+            "growth_known": growth is not None, "coordinators": coords}
+
+
+def report(start, end, baseline=False):
+    """`capacity report` (§6 of the plan): what the log says about the window, and what the
+    transcripts say. baseline: the transcripts only, for the week before the log existed."""
+    cfg = load_config()
+    out = {"start": start, "end": end, "slots": cfg["slots"], "coordinator_growth": cfg["coordinator_growth"],
+           **sessions_report(start, end, cfg)}
+    if baseline:
+        return out
+    every = events()
+    evs = [e for e in every if start <= e["t"] < end]
+    queued_at = {e.get("id"): e for e in every if e["event"] == "queue"}
+    dequeued = {e.get("id"): e for e in every if e["event"] == "dequeue"}
+    held = [e["held"] for e in evs if e["event"] in ("launch", "queue") and isinstance(e.get("held"), (int, float))
+            and e["held"] > 0]
+    queues = [e for e in evs if e["event"] == "queue"]
+    waited = {q.get("id"): (dequeued[q["id"]]["t"] if q.get("id") in dequeued else end) - q["t"] for q in queues}
+    launch_err = [(d["t"] - queued_at[d["id"]]["eta"]) / 60 for d in evs if d["event"] == "dequeue"
+                  and isinstance(queued_at.get(d.get("id"), {}).get("eta"), (int, float))]
+    planned, ready = {}, {}
+    for e in evs:
+        if e["event"] != "test" or e.get("op") != "set":
+            continue
+        key = (e.get("story"), e.get("item"))
+        if isinstance(e.get("eta"), (int, float)) and key not in planned:
+            planned[key] = e["eta"]
+        if TO_TEST.search(e.get("state") or "") and not TO_TEST.search(e.get("before") or "") and key not in ready:
+            ready[key] = e["t"]
+    ready_err = [(ready[k] - planned[k]) / 60 for k in ready if k in planned]
+    waits = {}
+    for q in queues:
+        for name in q.get("needs") or []:
+            if name in (q.get("why") or ""):
+                w = waits.setdefault(name, {"count": 0, "minutes": 0})
+                w["count"] += 1
+                w["minutes"] += round(waited[q.get("id")] / 60)
+    idle_day, nights = 0.0, {}
+    for d in evs:
+        gap = d.get("gap") if d["event"] == "dequeue" else None
+        if isinstance(gap, (int, float)) and gap > IDLE_WITH_QUEUE:
+            night = night_minutes(d["t"] - gap, d["t"])
+            for k, v in night.items():
+                nights[k] = nights.get(k, 0) + v
+            idle_day += gap / 60 - sum(night.values())
+    collisions = [{"t": e["t"], "what": e.get("text") if e["event"] == "note" else
+                   f"{e.get('resource')} by {e.get('session') or '?'} while {e.get('holder') or 'free'}: {e.get('command')}"}
+                  for e in evs if e["event"] == "audit" or (e["event"] == "note" and e.get("kind") == "collision")]
+    out.update({
+        "launch_holds": {"count": len(held), "minutes": round(sum(held) / 60)},
+        "queued": {"count": len(queues), "minutes": round(sum(waited.values()) / 60),
+                   "launch_eta_error": launch_err and round(statistics.median(abs(x) for x in launch_err)),
+                   "ready_eta_error": ready_err and round(statistics.median(abs(x) for x in ready_err)),
+                   "ready_items": len(ready_err)},
+        "resource_waits": waits,
+        "reclaims": sum(e["event"] == "reclaim" for e in evs),
+        "over_cap": sum(e["event"] == "over-cap" for e in evs),
+        "idle_with_queue": {"day": round(idle_day), "nights": {k: round(v) for k, v in sorted(nights.items())}},
+        "collisions": collisions,
+        "batches": sum(e["event"] == "waves" and (e.get("items") or 0) >= 4 for e in evs),
+    })
+    return out
+
+
+def per_day(coords, key):
+    """The coordinators' sum of key per day, over the days any of them ran."""
+    days = {}
+    for d in coords.values():
+        for day, v in d.items():
+            days[day] = days.get(day, 0) + v.get(key, 0)
+    return days
+
+
+def report_lines(data, against=None):
+    """The report as text, with the battle test's pass lines when it is not a baseline."""
+    span = f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(data['start']))} → " \
+           f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(data['end']))}"
+    coords = data["coordinators"]
+    typed, asks = per_day(coords, "typed"), per_day(coords, "status")
+    days = max(1.0, (data["end"] - data["start"]) / DAY)
+    tokens = lambda n: f"{n / 1_000_000:.1f}m" if n >= 1_000_000 else f"{round(n / 1000)}k"  # noqa: E731
+    growth = {(name, day): v["growth"] for name, d in coords.items() for day, v in d.items() if "growth" in v}
+    worst = max(growth.items(), key=lambda kv: kv[1], default=None)
+    lines = [f"capacity report · {span}{' · baseline (transcripts only)' if 'queued' not in data else ''}",
+             f"sessions        peak {data['sessions']} at once · {data['over_slots_minutes']} min over {data['slots']} slots"]
+    for name, d in sorted(coords.items()):
+        lines.append(f"coordinator     {name}: " + " · ".join(
+            f"{day[5:]} {tokens(v['growth']) if 'growth' in v else '?'}, {v['compactions']} compacted, "
+            f"{v['typed']} typed ({v['status']} status)" for day, v in sorted(d.items())))
+    if not coords:
+        lines.append("coordinator     none ran")
+    elif not data["growth_known"]:
+        lines.append("coordinator     growth needs the coordinate plugin beside this one")
+    lines.append(f"typed prompts   {sum(typed.values()) / days:.1f}/day to coordinators, {sum(asks.values()) / days:.1f}/day "
+                 f"asking for status")
+    if "queued" not in data:
+        return lines
+    q, idle = data["queued"], data["idle_with_queue"]
+    worst_night = max(idle["nights"].items(), key=lambda kv: kv[1], default=None)
+    lines += [
+        f"launch holds    {data['launch_holds']['count']}, {data['launch_holds']['minutes']} min",
+        f"queued          {q['count']} launches, {q['minutes']} min queued · launch ETA error median "
+        f"{'-' if q['launch_eta_error'] == [] else str(q['launch_eta_error']) + ' min'} · ready ETA error median "
+        f"{'-' if q['ready_eta_error'] == [] else str(q['ready_eta_error']) + ' min'} over {q['ready_items']} items",
+        "resource waits  " + (" · ".join(f"{n} {w['count']} ({w['minutes']} min)" for n, w in sorted(data["resource_waits"].items()))
+                              or "none"),
+        f"reclaims        {data['reclaims']} · over-cap launches {data['over_cap']}",
+        f"idle w/ queue   {idle['day']} min by day · " + (" · ".join(f"night {k[5:]} {v} min" for k, v in idle["nights"].items())
+                                                         or "no night"),
+        f"collisions      {len(data['collisions'])}" + "".join(
+            f"\n                {time.strftime('%m-%d %H:%M', time.localtime(c['t']))} {c['what']}" for c in data["collisions"][-5:]),
+        f"batches         {data['batches']} of 4+ items",
+    ]
+    base = against and sum(per_day(against["coordinators"], "status").values()) / max(
+        1.0, (against["end"] - against["start"]) / DAY)
+    mark = lambda ok: "pass" if ok else "FAIL"  # noqa: E731
+    lines += [
+        "pass            " + " · ".join([
+            f"batches {'enough' if data['batches'] >= 3 else 'extend the test'}",
+            f"idle nights {mark(not worst_night or worst_night[1] <= 60)}",
+            f"ETA error {'-' if q['ready_eta_error'] == [] else mark(q['ready_eta_error'] <= 30)}",
+            f"growth {mark(not worst or worst[1] < data['coordinator_growth'])}"
+            + (f" ({tokens(worst[1])} {worst[0][0]} {worst[0][1][5:]})" if worst else ""),
+            "status asks " + ("no baseline given" if against is None else
+                              f"{mark(sum(asks.values()) / days <= base / 2)} ({sum(asks.values()) / days:.1f} vs {base:.1f}/day)"),
+            f"collisions {mark(not data['collisions'])}",
+        ])]
+    return lines
 
 
 def resolve_session(rows):
@@ -1162,7 +1506,39 @@ def main(argv=None):
     p.add_argument("repo")
     p.add_argument("delta", type=int)
     p.add_argument("--hours", type=float, default=12)
+    p = sub.add_parser("report", help="the battle test's numbers over a window (plan §6)")
+    p.add_argument("--since", default="7d", help="7d, 36h, 90m or a date (default 7d)")
+    p.add_argument("--until", help="the window's end, the same forms (default now)")
+    p.add_argument("--baseline", action="store_true", help="the transcripts and story files only")
+    p.add_argument("--against", help="a baseline's --json output: compare the status asks with it")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("note", help="a line for the report, e.g. note collision \"two installs on the simulator\"")
+    p.add_argument("kind", choices=["collision"])
+    p.add_argument("text")
+    sub.add_parser("audit", help="the PreToolUse hook: log a resource command from a session without the lease")
     args = parser.parse_args(argv)
+
+    if args.cmd == "audit":
+        try:
+            if config_path().exists():
+                audit(json.load(sys.stdin))
+        except Exception as e:  # never in the way of a tool call
+            print(f"capacity audit: {e}", file=sys.stderr)
+        return 0
+    if args.cmd == "note":
+        print(note(args.kind, args.text))
+        return 0
+    if args.cmd == "report":
+        t = now()
+        try:
+            end = since_arg(args.until, t) if args.until else t
+            data = report(since_arg(args.since, end if args.until else t), end, args.baseline)
+            against = json.loads(Path(args.against).read_text()) if args.against else None
+        except (ValueError, OSError) as e:
+            print(e, file=sys.stderr)
+            return 2
+        print(json.dumps(data, indent=2) if args.json else "\n".join(report_lines(data, against)))
+        return 0
 
     if args.cmd == "testq":
         t = now()

@@ -1,5 +1,6 @@
 """Run with `python3 -m unittest discover plugins/coordinate/tests`. A stub `claude` serves the
 session list and records what it was called with, so nothing reaches a real session."""
+import importlib.util
 import json
 import os
 import subprocess
@@ -102,6 +103,11 @@ class Coordinate(unittest.TestCase):
         (self.tmp / "xdg" / "flowkit").mkdir(parents=True)
         (self.tmp / "xdg" / "flowkit" / "capacity.conf").write_text("slots = 3\ncoordinator_growth = 200k\n")
         self.assertTrue(self.run_("self", "--growth").stdout.endswith("· over 200k\n"))
+        spec = importlib.util.spec_from_file_location("coordinate", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(mod.growth(project / f"{sid}.jsonl", now - 2 * 3600), (175_000, 2, 40_000),
+                         "a day in the past (capacity report) leaves out what came after it")
         (project / f"{sid}.jsonl").unlink()
         self.assertEqual(self.run_("self", "--growth").returncode, 8)
 
