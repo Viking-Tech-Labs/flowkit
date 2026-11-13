@@ -4,7 +4,9 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "coordinate.py"
@@ -74,6 +76,34 @@ class Coordinate(unittest.TestCase):
     def test_self_not_listed(self):
         self.agents([])
         self.assertEqual(self.run_("self").returncode, 4)
+
+    def test_self_growth_from_the_transcript(self):
+        sid = "c0ffee00-0000-0000-0000-000000000000"
+        self.agents([{"name": "epic-coord", "pid": os.getpid(), "id": "c1", "sessionId": sid}])
+        project = self.tmp / "claude" / "projects" / "-r"
+        project.mkdir(parents=True)
+        now = time.time()
+        stamp = lambda hours: datetime.fromtimestamp(now - hours * 3600, timezone.utc).isoformat()
+        turn = lambda hours, k, **kw: {"type": "assistant", "timestamp": stamp(hours), **kw, "message": {"usage": {
+            "input_tokens": 2, "cache_read_input_tokens": k * 1000 - 3, "output_tokens": 1}}}
+        compact = lambda hours, pre, post=None: {"type": "system", "subtype": "compact_boundary", "timestamp": stamp(hours),
+                                                 "compactMetadata": {"preTokens": pre * 1000, **(
+                                                     {"postTokens": post * 1000} if post else {})}}
+        lines = [turn(30, 50),                   # the size when the 24 h began
+                 turn(10, 150), compact(9, 160, 30),  # dropped 130k
+                 turn(5, 90), compact(4, 95),    # no postTokens: the next turn's size stands in
+                 turn(3, 40), turn(1, 80),       # dropped 55k; 80k now
+                 turn(1, 999, isSidechain=True), {"type": "user", "timestamp": "not a time"}]
+        (project / f"{sid}.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\nnot json\n")
+        self.env.update(CLAUDE_CONFIG_DIR=str(self.tmp / "claude"), XDG_CONFIG_HOME=str(self.tmp / "xdg"))
+        out = self.run_("self", "--growth")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.splitlines()[-1], "growth: 215k in 24 h (2 compactions, now 80k) · under 300k")
+        (self.tmp / "xdg" / "flowkit").mkdir(parents=True)
+        (self.tmp / "xdg" / "flowkit" / "capacity.conf").write_text("slots = 3\ncoordinator_growth = 200k\n")
+        self.assertTrue(self.run_("self", "--growth").stdout.endswith("· over 200k\n"))
+        (project / f"{sid}.jsonl").unlink()
+        self.assertEqual(self.run_("self", "--growth").returncode, 8)
 
 
 if __name__ == "__main__":

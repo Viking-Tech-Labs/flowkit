@@ -6,6 +6,8 @@ calls this with plain arguments; nothing here asks.
                                       handoff's bin/ can come first on an inherited PATH)
   coordinate.py self                  this session: name, id, session id (the coordinator's name
                                       is what its workers message)
+  coordinate.py self --growth         and the context it added in the last 24 h, from its
+                                      transcript, against capacity.conf's coordinator_growth
   coordinate.py workers <name> ...    one line per worker: live (message it), retired (a stopped
                                       background session: wake it), or missing
   coordinate.py wake <name> <message> wake a retired background worker with the message as its
@@ -13,12 +15,17 @@ calls this with plain arguments; nothing here asks.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+DAY = 24 * 3600
+GROWTH = 300_000  # capacity.conf's coordinator_growth when it sets none
 
 
 def fail(msg, code=2):
@@ -81,7 +88,71 @@ def cmd_spawner():
     print(found)
 
 
-def cmd_self():
+def growth(path, t):
+    """Context tokens the session added in the 24 h before t: what each compaction in that window
+    dropped (preTokens - postTokens, else the next turn's size), plus the size now, less the size
+    at the window's start. A count of compactions would not do: one at 30% drops less than one at
+    69%. Returns (tokens, compactions, size now)."""
+    size = start = dropped = count = 0
+    pending = None  # a compaction in the window whose postTokens the transcript does not give
+    with open(path, errors="replace") as f:
+        for line in f:
+            try:
+                e = json.loads(line)
+                at = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00")).timestamp()
+            except (ValueError, KeyError, TypeError, AttributeError):
+                continue
+            if e.get("isSidechain"):
+                continue
+            if e.get("type") == "assistant":
+                u = (e.get("message") or {}).get("usage") or {}
+                n = sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens",
+                                                "cache_read_input_tokens", "output_tokens"))
+                if not n:
+                    continue
+                if pending is not None:
+                    dropped += max(pending - n, 0)
+                    pending = None
+                size = n
+            elif e.get("subtype") == "compact_boundary":
+                meta = e.get("compactMetadata") or {}
+                pre, post = meta.get("preTokens") or size, meta.get("postTokens")
+                if at >= t - DAY:
+                    count += 1
+                    if post is None:
+                        pending = pre
+                    else:
+                        dropped += max(pre - post, 0)
+                size = post or 0
+            else:
+                continue
+            if at < t - DAY:
+                start = size
+    return size - start + dropped, count, size
+
+
+def growth_limit():
+    """coordinator_growth from capacity.conf's machine keys (`300k`, `1.5m`), else GROWTH."""
+    path = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "flowkit" / "capacity.conf"
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return GROWTH
+    for raw in lines:
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("["):
+            break
+        m = re.match(r"^coordinator_growth\s*=\s*([\d.]+)([km]?)$", line, re.I)
+        if m:
+            return int(float(m.group(1)) * {"k": 1_000, "m": 1_000_000}.get(m.group(2).lower(), 1))
+    return GROWTH
+
+
+def tokens(n):
+    return f"{n / 1_000_000:.1f}m" if n >= 1_000_000 else f"{round(n / 1000)}k"
+
+
+def cmd_self(with_growth=False):
     rows = agents()
     by_pid = {r["pid"]: r for r in rows if r.get("pid")}
     pid = os.getppid()
@@ -91,6 +162,14 @@ def cmd_self():
             print(f"name: {r.get('name') or '-'}")
             print(f"id: {r.get('id') or '-'}")
             print(f"session: {r.get('sessionId')}")
+            if with_growth:
+                found = sorted(CLAUDE.glob(f"projects/*/{r.get('sessionId')}.jsonl"))
+                if not found:
+                    fail(f"no transcript for session {r.get('sessionId')} under {CLAUDE / 'projects'}", 8)
+                added, count, size = growth(found[0], time.time())
+                limit = growth_limit()
+                print(f"growth: {tokens(added)} in 24 h ({count} compaction{'s' if count != 1 else ''}, "
+                      f"now {tokens(size)}) · {'over' if added > limit else 'under'} {tokens(limit)}")
             return
         pid = parent(pid)
         if pid <= 1:
@@ -127,8 +206,8 @@ def main(argv):
     cmd, rest = argv[0], argv[1:]
     if cmd == "spawner" and not rest:
         cmd_spawner()
-    elif cmd == "self" and not rest:
-        cmd_self()
+    elif cmd == "self" and rest in ([], ["--growth"]):
+        cmd_self(bool(rest))
     elif cmd == "workers" and rest:
         cmd_workers(rest)
     elif cmd == "wake" and len(rest) == 2:
