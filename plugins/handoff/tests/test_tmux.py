@@ -366,5 +366,85 @@ class Closer(Labels):
             (self.tmp / "handoff.conf").write_text(conf)
 
 
+class PaneCloser(Closer):
+    """autoclose=on: a finished slice's pane goes once its close is recorded and its successor runs."""
+
+    def slice_done(self, n=1, nxt="s2", name="", **kw):
+        """Session n idle 10 minutes with its close recorded, `Next: started <nxt>`."""
+        sid = self.session(n, status=kw.pop("status", "idle"), idle_for=10 * 60, name=name or f"s{n}", **kw)
+        self.note(f"## s{n} · 2026-11-13 09:00", f"Session: {sid} · Repo: /repo", f"Next: started {nxt}")
+        return sid
+
+    def successor(self, n=2, status="busy"):
+        self.session(n, status=status, name=f"s{n}")
+
+    def test_a_finished_slice_goes_once_its_successor_runs(self):
+        self.slice_done()
+        self.successor()
+        self.assertEqual(self.closes(), ["%1"])
+        self.assertEqual(self.killed, [1001])
+
+    def test_a_successor_in_the_background_counts(self):
+        self.slice_done()
+        self.rows.append({"kind": "background", "pid": 4242, "name": "s2", "status": "busy"})
+        self.assertEqual(self.closes(), ["%1"])
+
+    def test_no_successor_running_or_no_close_recorded_keeps_the_pane(self):
+        self.slice_done()
+        self.assertEqual(self.closes(), [], "the successor is not running")
+        self.setUp()
+        self.session(1, status="idle", idle_for=10 * 60, name="s1")
+        self.note("# st", "Next: started s2")  # a line outside its close section
+        self.successor()
+        self.assertEqual(self.closes(), [], "no close recorded")
+
+    def test_the_reporter_and_a_coordinator_stay(self):
+        self.slice_done(name="st-report")
+        self.successor()
+        self.assertEqual(self.closes(), [], "reporter")
+        for name in ("st-coord", "st-coordinator", "coord-7"):
+            self.setUp()
+            self.slice_done(name=name)
+            self.successor()
+            self.assertEqual(self.closes(), [], name)
+        self.setUp()
+        (self.tmp / "coordination").mkdir()
+        (self.tmp / "coordination" / "st.md").write_text("# st - coordination board\nCoordinator: `lead` · Mission: x\n")
+        self.slice_done(name="lead")
+        self.successor()
+        self.assertEqual(self.closes(), [], "named on a coordination board")
+
+    def test_a_busy_waiting_or_lately_touched_session_stays(self):
+        for kw in ({"status": "busy"}, {"status": "waiting"}, {"touched": 60}, {"retry": True}):
+            self.setUp()
+            self.slice_done(**kw)
+            self.successor()
+            self.assertEqual(self.closes(), [], kw)
+            self.assertEqual(self.killed, [], kw)
+
+    def test_adhoc_unmarked_and_held_tabs_stay(self):
+        for story, hold in (("adhoc", ""), ("", ""), ("st", "1")):
+            self.setUp()
+            self.window("@2", story, hold=hold)
+            self.slice_done()
+            self.successor()
+            self.assertEqual(self.closes(), [], (story, hold))
+
+    def test_autoclose_off_closes_no_pane(self):
+        (self.tmp / "handoff.conf").write_text("driver=tmux\n")
+        self.slice_done()
+        self.successor()
+        self.assertEqual(self.closes(), [])
+
+    def test_closable_prints_and_closes_nothing(self):
+        self.slice_done()
+        self.successor()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.ft.closable()
+        self.assertEqual(out.getvalue(), "would close work:w.1 %1 s1 (successor s2 runs)\n")
+        self.assertEqual((self.killed, [a for a in self.writes if a[0] == "kill-pane"]), ([], []))
+
+
 if __name__ == "__main__":
     unittest.main()

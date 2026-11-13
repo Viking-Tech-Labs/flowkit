@@ -136,6 +136,15 @@ are never closed, except a one-pane window of your own that you hand `flowkit-sp
 becomes the story's next tab and goes with the story. A reporter started in a window of your own
 (a tab with other panes in it, handed over with `--pane`) stays with that window.
 
+With `autoclose=on` the tick also closes a finished slice's pane before the story ends, so a long
+chain's tab does not fill with idle sessions: once the slice's close is recorded in the story file
+and a session its `Next: started` line names is running (in a pane or in the background). Never
+the reporter, a coordinator (a name on a `~/.claude/coordination/*.md` board's `Coordinator:` line,
+or one with `coord` at the start or after a `-`), a session in the adhoc tab or a window with no
+story mark, a held tab, or a session that is busy, waits on you, is in error or whose transcript
+moved in the last 5 minutes. `flowkit-tmux closable` is a dry run: it prints the panes the tick
+would close and closes nothing.
+
 ## Being away
 
 `/handoff:away` writes `~/.claude/away` (the stamp of when; it counts for 12 hours, and every

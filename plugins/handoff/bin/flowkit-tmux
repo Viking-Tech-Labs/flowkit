@@ -5,7 +5,9 @@
                               (@flowkit_state: working, waiting, idle), each tab with how many
                               of its sessions wait on you (@flowkit_wait), each story and adhoc
                               tab with its most urgent state (@flowkit_tab), prints the total;
-                              with autoclose=on in handoff.conf it also closes finished story tabs
+                              with autoclose=on in handoff.conf it also closes a finished slice's
+                              pane once its successor runs, and finished story tabs
+  flowkit-tmux closable       dry run: the panes the tick would close, closing nothing
   flowkit-tmux list [client]  numbered list of every session, waiting first; a number jumps there
   flowkit-tmux help           the cheat sheet
 
@@ -39,6 +41,8 @@ SESSION_LINE = re.compile(r"^Session: ([0-9a-f-]{36})\b", re.M)  # a recorded cl
 HEADING = re.compile(r"^## (.+?) · \d{4}-\d\d-\d\d", re.M)  # a close section, or the reporter's final report
 FINAL = re.compile(r"^## Final report · (\d{4}-\d\d-\d\d \d\d:\d\d)", re.M)
 PROMISED = re.compile(r"^Next: (?:spawned|started) (.*)$", re.M)  # the sessions a close launched
+COORDINATOR = re.compile(r"^Coordinator: (\S+)", re.M)  # a coordination board names its coordinator
+COORD_NAME = re.compile(r"(?:^|-)coord")  # coord-1, story-coord, story-coordinator
 SHELLS = {"zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh"}
 QUIET = 5 * 60  # a session is closed only once its transcript and forks have been still this long
 BACKFILL = 15 * 60  # an unfinished story this quiet rings its reporter, who records the missing closes
@@ -270,9 +274,73 @@ def close_stories(pane_list, found, words):
             tmux("kill-pane", "-t", p["id"])
 
 
+def coordinators():
+    """The names on the coordination boards (`Coordinator: <name> · …`)."""
+    names = set()
+    for path in (CLAUDE / "coordination").glob("*.md"):
+        try:
+            names.update(m.strip("`") for m in COORDINATOR.findall(path.read_text(errors="replace")))
+        except OSError:
+            pass
+    return names
+
+
+def successors(slug, sid):
+    """The sessions the close of sid launched, from its section of the story file."""
+    try:
+        text = (CLAUDE / "stories" / f"{slug}.md").read_text(errors="replace")
+    except OSError:
+        return set()
+    for section in re.split(r"^(?=## )", text, flags=re.M):
+        if re.search(rf"^Session: {re.escape(sid)}\b", section, re.M):
+            names = set()
+            for rest in PROMISED.findall(section):
+                names.update(n.strip() for n in re.split(r",\s*", re.sub(r"\s*\(.*$", "", rest)))
+            return names - {"", "none"}
+    return set()
+
+
+def finished_panes(rows, found, words):
+    """Story panes whose slice is over: the close is recorded and a session it launched runs. Never
+    the reporter, a coordinator, the adhoc tab (no story mark), a held tab, or a session at work,
+    waiting on the user, in error or touched in the last 5 minutes."""
+    now = time.time()
+    live = {r.get("name") for r in rows if r.get("pid")}  # a successor in the background has no pane
+    coords = coordinators()
+    out = []
+    for p, r in found:
+        name, sid = r.get("name") or "", r.get("sessionId") or ""
+        if not p.get("slug") or p.get("hold") or starting(p, now) or not sid:
+            continue
+        if r.get("status") != "idle" or words.get(p["id"]) == "error":
+            continue
+        if name.endswith("-report") or name in coords or COORD_NAME.search(name):
+            continue
+        if sid not in closed(p["slug"]) or not untouched(sid, now - QUIET):
+            continue
+        if (successors(p["slug"], sid) - {name}) & live:
+            out.append((p, r))
+    return out
+
+
+def close_panes(rows, found, words):
+    """Closes the finished panes; True when one went."""
+    done = finished_panes(rows, found, words)
+    if not done:
+        return False
+    fresh = {p["id"]: p for p in panes()}  # the list is a `claude agents` old
+    for p, r in done:
+        now_p = fresh.get(p["id"])
+        if not now_p or now_p["pid"] != p["pid"] or starting(now_p, time.time()):
+            continue
+        if terminate(int(r["pid"])):
+            tmux("kill-pane", "-t", p["id"])
+    return True
+
+
 def waiting():
     pane_list = panes()
-    found = []
+    found, rows = [], []
     if any(VERSION.match(p["cmd"]) for p in pane_list):
         rows = agents()
         if rows is None:
@@ -306,7 +374,7 @@ def waiting():
             cmds += [";", "set-option", "-w", "-u", "-t", wid, "@flowkit_tab"]
     if cmds:
         tmux(*cmds[1:])
-    if setting("autoclose") == "on":
+    if setting("autoclose") == "on" and not close_panes(rows, found, words):
         close_stories(pane_list, found, words)
     total = sum(count.values())
     if total:
@@ -399,10 +467,31 @@ def help_text():
         pause()
 
 
+def closable():
+    """A dry run of the pane close: prints the panes the tick would close, closes nothing."""
+    pane_list = panes()
+    rows = agents()
+    if rows is None:
+        print("claude agents --json failed.")
+        return
+    found = placed(rows, pane_list)
+    words = {p["id"]: tab_state(r, p.get("story")) if p.get("story") else "" for p, r in found}
+    done = finished_panes(rows, found, words)
+    for p, r in done:
+        print(f"would close {p['sess']}:{p['wname']}.{p['pidx']} {p['id']} {r.get('name') or '?'}"
+              f" (successor {', '.join(sorted(successors(p['slug'], r['sessionId'])))} runs)")
+    if not done:
+        print("nothing to close")
+    if setting("autoclose") != "on":
+        print("autoclose is off in handoff.conf: the tick closes nothing")
+
+
 def main(argv):
     cmd = argv[0] if argv else ""
     if cmd == "waiting":
         status_line()
+    elif cmd == "closable":
+        closable()
     elif cmd == "list":
         list_sessions(argv[1] if len(argv) > 1 else "")
     elif cmd == "help":
