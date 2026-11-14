@@ -1,6 +1,6 @@
 {
   "name": "board",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A live board of your story chains: one card per story (running, needs you, stalled, done), its FOR ME steps with ticks that persist, MR links; /where and /forme in text",
   "author": {
     "name": "flowkit"
