@@ -89,13 +89,15 @@ NAMES = ("PLAN.md", "BUILD-PLAN.md", "HANDOFF.md", "ROADMAP.md", "docs/PLAN.md",
 SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 CHAIN_END = "mr-ready"  # chain_end= of handoff.conf when the key is absent
 CHAIN_ENDS = {  # a chain's end: what its slices do about pushing, the MR and the merge; the last slice ends it
-    "branch": "no slice pushes; the last slice leaves the branch committed and the user pushes",
-    "draft-mr": "each slice pushes its green commits, the first push opens a Draft MR; the last slice reads the "
-                "pipeline and leaves the MR in Draft",
-    "mr-ready": "each slice pushes its green commits, the first push opens a Draft MR; the last slice takes it out "
-                "of Draft, watches the pipeline to green, no merge",
+    "branch": "no slice pushes; the last slice leaves the branch committed and the user pushes; no watch",
+    "draft-mr": "each slice pushes its green commits, the first push opens a Draft MR; the last slice pushes, "
+                "registers the watch and closes: the MR stays in Draft, a red pipeline gets one fix slice",
+    "mr-ready": "each slice pushes its green commits, the first push opens a Draft MR; the last slice pushes, "
+                "registers the watch and closes: the watch takes the MR out of Draft on green, a red pipeline gets "
+                "one fix slice, no merge",
     "merge": "each slice pushes its green commits, the first push opens a Draft MR; the last slice takes it out of "
-             "Draft, sets auto-merge and watches until it is merged",
+             "Draft, sets auto-merge, registers the watch and closes: the watch reports the merge and the target "
+             "branch's pipeline",
 }
 
 

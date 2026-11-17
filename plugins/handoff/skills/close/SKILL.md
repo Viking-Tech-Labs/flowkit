@@ -189,6 +189,42 @@ other session still uses them, and ends with what is ready for the user to try i
         means two sessions would share one working tree.
    After a successful spawn this session touches the repo no more: no edits, no commits; the
    next session owns the working tree.
+
+9a. **Register the watch**, on every close of a chain's last slice that pushed, with or without
+    `spawn`, before step 10. The slice is the last when its brief's `Chain end:` line says so,
+    and it pushed when that line has the slices push (`draft-mr`, `mr-ready`, `merge`, or the
+    user's words to that effect); with `branch`, or nothing pushed, there is no watch. Nobody
+    waits for the pipeline: a script polls it, so this session's slot, its leases and its tree
+    are free at the close. With a `Story:`, from the tree that was pushed:
+    ```sh
+    "${CLAUDE_PLUGIN_ROOT}/bin/flowkit-watch" add --story <slug> --mr <merge request URL> \
+      [--ready] [--until merged]
+    ```
+    - `draft-mr`: neither flag; the MR stays in Draft.
+    - `mr-ready`: `--ready`; the watch takes the MR out of Draft on green, so the slice leaves
+      it in Draft.
+    - `merge`: `--until merged`; the slice took the MR out of Draft and set auto-merge at its
+      push, and the watch reports the merge and the target branch's pipeline.
+    - The user's own words: the flags that carry them out; what no flag covers stays a FOR ME
+      step.
+    It arms what was pushed (`@{u}`), not `HEAD`, so the commits of steps 2 to 4 change nothing,
+    and it asks the forge nothing, so the close never waits for the network. A slice that pushed
+    in two repos registers one watch per merge request, each from its own tree. A push with no
+    merge request is watched as `--ref <branch>`; a pipeline that is not GitLab's as
+    `--check '<command>' --name <name>` (exit 0 green, 1 red, 2 still running). A fix slice a
+    watch started registers the next watch the same way, with no flags: it keeps those of the
+    watch before it.
+    Its last line is `watching <name> · sha <sha> · until <green|merged>`: step 10 writes
+    `Next: watching <name> (<merge request URL>)`, and DONE gets one line, "pipeline watched as
+    <name>". The pipeline goes under neither FOR ME, OPEN nor LEFT: the watch owns it, and writes
+    its own section under `<name>` when the pipeline ends, with this close's LEFT in it. Green
+    is `Next: none`; the first red starts one fix slice in the story, marked "(auto)"; a second
+    red, a pipeline that never starts and a broken watch are reported to the user there. A merge
+    (other than `merge`'s own auto-merge), a release and a message to a person still wait for
+    the user's word.
+    When `add` fails (exit 1, the reason on stderr: no `glab` on the PATH, not a merge request's
+    URL, no upstream): say why under OPEN, put the pipeline's link under FOR ME as the step to
+    look at, and step 10 writes `Next: none`. Never wait for the pipeline in its place.
 10. **Record the close in the story file**, as the last tool call before the reply. The story's
     slug is the `Story:` of the prompt this session started from (started from a command: of the
     brief in the pick-up block); with none, skip this step. Pipe
@@ -197,7 +233,7 @@ other session still uses them, and ends with what is ready for the user to try i
     ## <this session's name> · <date "+%Y-%m-%d %H:%M">
     Session: ${CLAUDE_SESSION_ID} · Repo: <path>
     Resume: cd <path> && claude -r ${CLAUDE_SESSION_ID}
-    Next: started <name> | queued <name> | pending <name> | none
+    Next: started <name> | queued <name> | pending <name> | watching <name> (<link>) | none
     [Prompt: <saved path> — launch: <launch line>]
     <the DONE / FOR ME / OPEN / LEFT of step 7, verbatim>
     ```
@@ -208,7 +244,11 @@ other session still uses them, and ends with what is ready for the user to try i
     - `pending <name>` when step 5 drafted a prompt and nothing launched it. The prompt must be
       saved: if step 9 did not save it, run `handoff.py save-prompt <name>` now, and add the
       `Prompt:` line with the path it printed and the launch line of step 9.1;
-    - `none` only when step 5 drafted nothing: no repo work is left on the story. `Next: none` on the last close, with none of the story's sessions still live,
+    - `watching <name> (<link>)` when step 9a registered a watch: the name `flowkit-watch add`
+      printed, several joined by `, ` before the one bracket. The story is not done until each
+      has its own section. A close that also started a session writes that `Next:` line first
+      and this one under it;
+    - `none` only when step 5 drafted nothing and step 9a registered no watch: no repo work is left on the story. `Next: none` on the last close (a watch's own section is one), with none of the story's sessions still live,
     is what marks the story done. `handoff.py record` also types `closed <this session's name>`
     into the pane of the story's live `<slug>-report` session, so do not message it yourself;
     without a reporter, the file is the record. Its second line says what that doorbell did:

@@ -116,7 +116,8 @@ Sessions started in the background have no pane and are not counted; `prefix a` 
 The tab's word is its most urgent session's state, in this order: **needs you** (a question or a
 permission), **error** (the last turn failed on an API error), **stalled** (idle 15 minutes or
 more, transcript and forks untouched, no close recorded), **running**, **watching** (closed, but a
-watch or background task still runs), **done** (closed and idle). A close counts once the story
+watch or background task still runs; also a story with an open `flowkit-watch` and nothing more
+urgent in its tab, see "Watches"), **done** (closed and idle). A close counts once the story
 file has its `Session:` line. Your own windows, without a story or adhoc mark, get no word.
 
 New in 0.5.0, off until you turn it on: with `autoclose=on` in `handoff.conf`, the same tick
@@ -124,7 +125,8 @@ closes a story's tab once the story is finished, so finished tabs no longer pile
 finished when its reporter's final report is in, or, with no reporter left, when every session a
 close launched has recorded its own close (a session started after the final report needs its
 own close either way); while the closes are still missing, the tick types
-`report now` into an idle reporter (at most every 5 minutes) so it writes that report. The whole
+`report now` into an idle reporter (at most every 5 minutes) so it writes that report, though never
+while a watch of the story is open: its own section rings the reporter when the pipeline ends. The whole
 story goes at once, every pane in every one of its tabs, the reporter last, and only when nothing
 in it is busy, waiting on you, watching or in error, no pane runs anything but Claude or a bare
 shell, the story file has sat 5 minutes and every session's transcript and forks have been still
@@ -138,7 +140,8 @@ becomes the story's next tab and goes with the story. A reporter started in a wi
 
 With `autoclose=on` the tick also closes a finished slice's pane before the story ends, so a long
 chain's tab does not fill with idle sessions: once the slice's close is recorded in the story file
-and a session its `Next: started` line names is running (in a pane or in the background). Never
+and a session its `Next: started` line names is running (in a pane or in the background), or a
+watch its `Next: watching` line names is open. Never
 the reporter, a coordinator (a name on a `~/.claude/coordination/*.md` board's `Coordinator:` line,
 or one with `coord` at the start or after a `-`), a session in the adhoc tab or a window with no
 story mark, a held tab, or a session that is busy, waits on you, is in error or whose transcript
@@ -255,9 +258,11 @@ requests hear nothing, and without the status line the hook stays silent.
   after 30 days and says how many went.
 - **The story file**, `~/.claude/stories/<slug>.md`, when the session's prompt names a `Story:`:
   one section per close with the session id, how to resume it, the four close blocks and a
-  `Next:` line: `started <name>`, `pending <name>` (a saved prompt nothing started) or `none`.
-  `Next: none` is written only when no repo work is left; on the last close, with no session of
-  the story still live, it is what marks the story done. Its header carries the story's
+  `Next:` line: `started <name>`, `queued <name>` (the capacity gate holds the launch),
+  `pending <name>` (a saved prompt nothing started), `watching <name>` (the last slice pushed and
+  a watch has its pipeline, see "Watches") or `none`. `Next: none` is written only when no repo
+  work is left; on the last close (a watch's own section is one), with no session of the story
+  still live, it is what marks the story done. Its header carries the story's
   `Chain end:` line (below).
 
 Unattended (`overnight`, the away flag set, or a headless run without the question tool) the close
@@ -271,10 +276,15 @@ MR and the merge, which no one was there to give. Now the story carries one line
 saying what the chain's last slice leaves behind, and every brief repeats it next to `Stop when:`,
 the last slice told that it is the last. The close that drafts a story's first prompt asks once,
 proposing `chain_end=` from `handoff.conf` (`/handoff:setup` offers it; `mr-ready` until it is set):
-`branch` (no slice pushes), `draft-mr` (each slice pushes its green commits, the first push opens a
-Draft MR, the last slice leaves it there), `mr-ready` (the last slice also takes it out of Draft and
-watches the pipeline to green, no merge) or `merge` (then sets auto-merge and watches until it is
-merged); your own words are taken as they are. Unattended, the close takes the conf value "(auto)".
+`branch` (no slice pushes, no watch), `draft-mr` (each slice pushes its green commits, the first
+push opens a Draft MR; the last slice pushes, registers the watch and closes, and the MR stays in
+Draft), `mr-ready` (as `draft-mr`, and the watch takes the MR out of Draft on green; no merge) or
+`merge` (the last slice takes the MR out of Draft, sets auto-merge, registers the watch until it is
+merged and closes; the watch reports the merge and the target branch's pipeline); your own words
+are taken as they are. Since 0.9.0 the last slice does not sit through its pipeline: its close
+registers a watch (step 9a, with or without `spawn`) and a red pipeline gets one fix slice, see
+"Watches". A slice in the middle of a chain still reads the pipeline of the one before it and fixes
+a red it caused. Unattended, the close takes the conf value "(auto)".
 The line lives in the story file's header (`handoff.py chain-end <story>` prints it, with a value
 or words sets it) and in the pick-up block. The close itself still never pushes: the slices do, as
 the line says.
@@ -332,6 +342,8 @@ coordinator_growth = 300k   # context tokens a coordinator may add per day
 
 [/Users/me/app]             # a repo's main checkout; its worktrees inherit the section
 slots = 2                   # optional: at most 2 of the machine's slots for this repo
+checkouts = 1               # optional: its sessions switch branches in this one checkout
+check = ./ci-status         # optional: what a watch asks for this repo's merge requests
 resource simulator = install a build, run a device check, hand over a test
 resource backend   = start the local stack; release once it is stopped
 audit simulator    = xcrun simctl (install|launch)|maestro test   # optional: the audit hook's pattern
@@ -339,6 +351,13 @@ audit simulator    = xcrun simctl (install|launch)|maestro test   # optional: th
 
 Resource names are machine-wide: two repos that both declare `simulator` share one lease. So are
 `audit` patterns (Python regular expressions, searched in a Bash command).
+
+`checkouts = 1` is for a repository whose sessions all work in its main checkout and switch
+branches there, so one works in it at a time: the checkout becomes a resource of its own,
+`<repo dir>-checkout` (`app-checkout`), which every launch into the main checkout takes without
+naming it in `Needs:`. A slice there may still take a device. `check = <command>` is the command a
+watch runs for a merge request of this repository in place of asking GitLab (exit 0 green, 1 red,
+2 still running; see "Watches").
 
 **Slots are counted, never leased.** A slot is a working tree with a live story session in it, read
 from `claude agents --json --all` and the story files each time it is asked, so a crashed or resumed
@@ -353,7 +372,7 @@ shape it does not know, the count is unknown, never zero: nothing is reclaimed.
 
 | Command | What it does |
 |---|---|
-| `flowkit-capacity status [--json]` | One line for the slots, then one per repo limit, chain and resource. |
+| `flowkit-capacity status [--json]` | One line for the slots, then one per repo limit, chain, resource, queued launch and open watch. |
 | `flowkit-capacity take simulator,backend` | Leases the set to this session, or nothing if any of it is held; refused while the session holds something outside the set (release first: nobody waits for more while holding some). |
 | `flowkit-capacity release [names]` | Gives back what this session holds, all of it without names. |
 | `flowkit-capacity hold simulator --for me --minutes 60` | Your test hold: no slice takes it until the minutes run out or `release --for me`; run it again to renew. |
@@ -388,6 +407,11 @@ after the refusals and before anything is typed:
   closers crossing over a simulator and a backend never wait on each other.
 - The queue is first in, first out: a launch never passes an earlier one waiting for a slot, or
   for a resource it needs too.
+- A launch a watch makes (`flowkit-spawn --from-watch <watch>`: a red pipeline's fix slice, an
+  on-green prompt) is never the calling session's own next slice. It never waits for a slot, since
+  its story's slot went back when the last slice closed (logged `over-cap`); it waits for its
+  needs like any other, goes first when the queue drains, and a chain's next slice whose closer
+  holds a resource the fix waits for (the one checkout) is queued behind it.
 - The launch's holds go to the new session once `flowkit-spawn` prints `SPAWNED`, and back on any
   other exit (a refusal, a failed start, a kill: an EXIT trap, and the `launching/` marker goes
   with the pid). Every story launch writes `> launched <name> · <time>` into the story file,
@@ -439,6 +463,9 @@ denies and prints nothing; with no `capacity.conf`, or no `audit` line, it costs
   minutes count, split by day and by night (22:00 to 08:00, keyed by the evening's date);
 - collisions: `audit` lines and `note collision` lines;
 - batches: `waves --write` runs, those of 4 items or more;
+- watched: the minutes the watches that ended in the window were open, how many they were, and
+  the fix slices they started. A watch's own log lines, and the gate's for a launch a watch made,
+  are in no other count;
 - from the transcripts (`projects/*/*.jsonl` touched in the window): the peak of sessions at once
   and the minutes over the machine's slots (a session counts while it wrote within 30 minutes),
   and per coordinator (a name like `*-coord`, or on a coordination board) per day: its context
@@ -457,14 +484,118 @@ State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/capacity/`: `resources/<name>
 leases), `launching/<pid>.json` (an in-flight launch, counted while its pid lives), `queue/<id>.json`
 (a queued launch: its arguments, prompt, story, tree, needs, left, by, queued-at), `log.jsonl`
 (one line per take, release, free, reclaim, hold, launch, queue, dequeue, repoint, over-cap, test,
-limit, waves, audit and note; `reclaim` when the holder died; launch, queue and dequeue carry the
-repo, `Left:` and, for a gate call, the launcher and its load-hold seconds; dequeue its `gap`),
+limit, waves, audit, note and watch; `reclaim` when the holder died; launch, queue and dequeue carry
+the repo, `Left:` and, for a gate call, the launcher and its load-hold seconds; dequeue its `gap`;
+the gate's lines for a watch's launch carry `watch`),
 `drained` (the last drain of a non-empty queue), `limits.json`, `testq.json` (test-queue lines tied
 to queued launches) and
-`status.json`, rewritten on every change with a `version` field
-(`../board/tests/fixtures/capacity-status.ts` shows its shape). Every change runs under one lock that is
+`status.json`, rewritten on every change with a `version` field (3 since it lists the open
+watches as `watches`; `../board/tests/fixtures/capacity-status.ts` shows its shape). Every change runs under one lock that is
 tried for 10 seconds and then gone on without, with one stderr line, so a stuck holder never
 stalls the machine.
+
+## Watches
+
+New in 0.9.0. A chain's last slice used to sit in its session until the pipeline of what it pushed
+was green: a slot, a device lease and a working tree held for an hour of waiting. Now nobody waits
+for green, and red wakes somebody. The last slice pushes, its close registers a watch (step 9a)
+and records `Next: watching <name>`, and the session is over: its slot, its leases and its tree are
+free that minute. A script asks for the pipeline once a minute, at no tokens and no slot. Only
+starting work is optimistic: a merge you did not ask for, a release and a message to a person
+still wait for green and for your word.
+
+```
+flowkit-watch add --story <slug> --mr <url> [--ready] [--until merged] [--left <text>]
+flowkit-watch add --story <slug> --ref <branch> [--sha <sha>] [--project <path>] [--name <n>]
+flowkit-watch add --story <slug> --check '<command>' --name <n>
+    any of them: [--on-green-run '<command>'] [--on-green <prompt> [--repo <tree>] [--on-green-name <n>]]
+flowkit-watch list [--json]
+flowkit-watch drop <name>
+```
+
+**Registering.** `add` runs in the tree that was pushed and arms the sha of `@{u}`, not `HEAD`: a
+close commits its docs after the push. It asks GitLab nothing, so a close never waits for the
+network. It keeps `glab`'s path from the session's PATH, the tree and its branch, the session that
+registered it with its close's LEFT, and the model, effort and `Needs:` of that session's prompt.
+A watch's name is its own: `<repo dir>!<iid>` for a merge request (`app!12`), `<repo dir>@<branch>`
+for a ref, `--name` for a command, and `…#2` for the next watch of the same target, so a section
+written for one never stands for the next. There are three kinds: a merge request (its head
+pipeline, through `glab api`, counted while the MR's head is the sha that was armed; or the
+repository's `check = <command>` of `capacity.conf`), a ref (a branch's pipeline at a sha) and a
+command (exit 0 green, 1 red, 2 still running, anything else an error; its last line of output is
+the summary).
+
+**The poller.** One per machine (`poller.pid`, whose mtime is its heartbeat), started by `add`
+and gone when no watch is open. It asks each watch once a minute, 30 seconds at most per ask,
+under no capacity lock, with `CLAUDE_PID`, `TMUX_PANE` and `CLAUDE_CODE_*` taken out of its
+environment so that nothing it starts passes for a session, and keeps the computer awake
+(`caffeinate`, where there is one) while a watch is pending. The tmux tick, every recorded close and every `flowkit-spawn` that ends start
+it again when it is gone or its heartbeat is older than three minutes.
+
+**What an answer does.** Pending does nothing. Everything that ends a watch is a section of the
+story file under the watch's name, written through `handoff.py record`, so the reporter is rung
+and the capacity queue drains; what does not end it is a `> watch <name> · … · <time>` line there,
+which stands for no promise.
+
+- **Green**:
+  ```
+  ## app!12 · 2026-11-17 16:05
+  Watch: pipeline green 16:04 · sha abc1234 · 41 min · https://gitlab.com/g/p/-/merge_requests/12
+  Next: none
+  DONE - pipeline green
+  FOR ME - nothing new
+  OPEN - nothing
+  LEFT - <the registering close's LEFT>
+  ```
+  With `--ready` the watch takes the merge request out of Draft first. `--on-green-run` runs a
+  command in the tree (five minutes at most; its exit and last line go into DONE), and
+  `--on-green` starts a session with that prompt, in `--repo`, named `--on-green-name` (the prompt
+  file's name by default), recorded as `Next: started <name>` or `queued <name>`: "when this is
+  green, start that".
+- **`--until merged`** (the chain end `merge`): after green the watch waits for the merge. A
+  missing approval is a line and the wait goes on; a conflict or an auto-merge a push cancelled is
+  reported. Once merged it watches the target branch's pipeline at the merge commit and reports the
+  result; a red target is reported, never fixed (a fix there is a new merge request: your call).
+  Then, when the tree is the main checkout on that branch, clean and nobody works in it, it
+  switches to the default branch, pulls and deletes the merged branch.
+- **The head moved** (someone pushed, the pipeline was cancelled for a newer one): the watch moves
+  to the new head with a `retarget` line, and never starts a fix for a sha that is no longer the
+  head.
+- **Red**, the first of a merge request: one fix slice, marked "(auto)". The watch fills
+  `scripts/fix-brief.md` in as `~/.claude/spawned/<story>-fix-<n>.md` and launches it through
+  `flowkit-spawn --from-watch <name>`: in the registered tree when that is still on the branch
+  and free (no session, queued launch, test hold or other process in it, nothing uncommitted); in
+  a `checkouts = 1` repository, queued for the checkout; else in a detached worktree under
+  `.claude/worktrees/`, which goes when the watch ends. An effort of `max` is lowered to `xhigh`,
+  since nobody approved it. The red's section says `Next: started <session>` or `queued
+  <session>`, the watch stays open as `fixing`, and the fix slice's close registers the next
+  watch (`app!12#2`) with a bare `flowkit-watch add --story <slug> --mr <url>`, which keeps the
+  flags of the one before. A red after one fix is reported with its failed jobs: the second is
+  yours. A red command or ref is reported too.
+- **A red base.** A merge request whose target is the branch of another watch that is red waits
+  for it (`waiting-base`): the base is fixed in its own story.
+- **Reported**, each a section with `Next: none`: no pipeline for the armed head after 15 minutes;
+  a pipeline that is `manual`, `canceled` or `skipped`; 15 asks failed in a row (`watch broken:`
+  with the error: `glab`'s login, the network, a command that cannot run); six hours since the
+  watch was armed, the time it spent `fixing` or `waiting-base` aside.
+- `flowkit-watch drop <name>` ends a watch with a section of its own (`Watch: dropped`).
+
+**What reads `Next: watching`.** It is a promise like `started`: the story is not complete until
+the name has its own section. The tmux kit shows the story's tab as `watching` while nothing in it
+is more urgent, closes the pane of the slice that registered the watch, and does not ring the
+reporter for a final report while a watch is open; the reporter writes that report once every
+`watching` name has its section. `flowkit-capacity status` prints a `watch` line per open watch
+and `status.json` lists them as `watches`, rewritten whenever one opens, changes state or goes;
+the [`board`](../board/README.md) plugin reads them there, so a story of two repositories is not
+done while its second watch runs. A line of a story's test queue that names the merge request
+moves with it: `building` with an ETA (the repository's median from registering to green, once
+the log has three), `fixing`, `ready to test`.
+
+State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/flowkit/watches/`: `<name>.json` (one watch;
+the file goes once its last section is recorded), `<name>.lock`, `poller.pid` and
+`launched/<session>.log` (the output of a launch the watch made). Events go to capacity's
+`log.jsonl` as `watch` with an `op`: add, arm, retarget, green, red, fix, report, merged, error,
+deadline, done (how it ended, and its minutes).
 
 ## Your own ladder
 

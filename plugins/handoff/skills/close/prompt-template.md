@@ -32,7 +32,7 @@ Keep Today's items as a checklist in your replies and tick them as you go; check
 ending any turn. A text-only message is a progress report, not the end: while an item is
 open, keep working or say what blocks it.
 
-[Chain end: <the story's line>[; this slice is the chain's LAST: it does that work, then closes without `spawn`]]
+[Chain end: <the story's line>[; this slice is the chain's LAST: it does that work, then closes without `spawn`; where it pushed, its close registers the watch (step 9a) and nobody waits for the pipeline]]
 Stop when: <done condition>, or when a step needs the user's hands; then close with
 `/handoff:close` (add `spawn` when the plan runs on without the user), which records the
 close in the story file[; then send your verdict to <Report-to> with SendMessage (load it

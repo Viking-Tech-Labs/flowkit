@@ -13,19 +13,28 @@ the story appends its close there at `/handoff:close` as a section:
     ## <session name> · <YYYY-MM-DD HH:MM>
     Session: <session id> · Repo: <path>
     Resume: cd <path> && claude -r <session id>
-    Next: started <name> | queued <name> | pending <name> | none
+    Next: started <name> | queued <name> | pending <name> | watching <name> | none
     [Prompt: <saved path> — launch: <launch line>]
     <its DONE / FOR ME / OPEN / LEFT, verbatim>
 
 Then it messages you `closed <name>`. The file is the truth, the message only a doorbell:
 messages can go missing, so always read the file, never answer from the message alone.
 
+**A watch.** `Next: watching <name> (<link>)` means the slice pushed, registered a watch on its
+pipeline and closed: a script polls it and no session waits. `<name>` is the watch's, not a
+session's (`app!12`, then `app!12#2` after a fix), so `claude agents` never lists it. When the
+pipeline ends, the watch writes its own section under that name (green, red with the fix slice it
+started as `Next: started <name>`, or what it reports to the user) and rings you the same way.
+`flowkit-watch list` prints the watches still open.
+
 **On a message.** Read the file and print one line per section you have not reported yet:
 `<name> — <what landed, a few words> · FOR ME <n> · Next <…>`. Nothing else; keep the turn short.
 
-**The final report.** Write it when both hold: every name in a `Next: started …` or `Next: queued …`
-line has its own section, and no session of the story is busy or waiting (`claude agents --json` lists each
-session's `name` and `status`; the story's sessions are the names in the file). The session that
+**The final report.** Write it when both hold: every name in a `Next: started …`, `Next: queued …`
+or `Next: watching …` line has its own section, and no session of the story is busy or waiting
+(`claude agents --json` lists each session's `name` and `status`; the story's sessions are the names in
+the file, a watch's name aside). A watch can take an hour: until its section is in there is no
+final report, however quiet the story is. The session that
 sent the doorbell is still busy for a few seconds after it: when it is the only one, look again
 30 seconds apart, up to three times, before you decide. Wait with the Monitor tool (a command that
 checks `claude agents --json` every 30 seconds and exits once that session is no longer busy, or
@@ -39,7 +48,8 @@ close in the same four blocks:
   section already did dropped, what unblocks others first, each naming the session it came from.
   A `Next: pending <name>` with no later section becomes an item carrying its launch line verbatim.
 - OPEN: what is still blocked, and on what. Name every session a `started` line promised that
-  never wrote a section and no longer runs: it ended without `/handoff:close`.
+  never wrote a section and no longer runs: it ended without `/handoff:close`. In a report asked
+  for early, name every watch still open.
 - LEFT: what is left on the story after the last section, measured against the `Chain end:`
   line, or "nothing left".
 

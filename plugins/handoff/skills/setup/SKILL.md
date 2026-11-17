@@ -112,10 +112,15 @@ proposed.
 
 | Value | Every slice | The last slice |
 |---|---|---|
-| `branch` | commits, never pushes | leaves the branch committed; the user pushes |
-| `draft-mr` | pushes its green commits; the first push opens a Draft MR | reads the pipeline, leaves the MR in Draft |
-| `mr-ready` | as `draft-mr` | takes the MR out of Draft, watches the pipeline to green, no merge |
-| `merge` | as `draft-mr` | as `mr-ready`, then sets auto-merge and watches until it is merged |
+| `branch` | commits, never pushes | leaves the branch committed; the user pushes; no watch |
+| `draft-mr` | pushes its green commits; the first push opens a Draft MR | pushes, registers the watch and closes; the MR stays in Draft; a red pipeline gets one fix slice |
+| `mr-ready` | as `draft-mr` | as `draft-mr` with `--ready`: the watch takes the MR out of Draft on green; no merge |
+| `merge` | as `draft-mr` | takes the MR out of Draft, sets auto-merge, registers the watch `--until merged` and closes; the watch reports the merge and the target branch's pipeline |
+
+No session waits for a pipeline: the last slice's close registers a watch (`flowkit-watch`, the
+close skill's step 9a), a script polls it, and green or red comes back as a section of the story
+file. A slice in the middle of a chain reads the pipeline of the one before it and fixes a red it
+caused.
 
 1. Say in plain words what it does, with the table; `handoff.py state` prints the current value as
    `chain-end:`.

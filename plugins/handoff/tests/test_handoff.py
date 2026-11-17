@@ -78,7 +78,8 @@ class Handoff(unittest.TestCase):
         conf.parent.mkdir()
         state = lambda: self.handoff("state", str(self.tmp / "data"), str(repo)).stdout
         self.assertIn("chain-end: mr-ready (each slice pushes its green commits, the first push opens a Draft MR; "
-                      "the last slice takes it out of Draft, watches the pipeline to green, no merge)", state())
+                      "the last slice pushes, registers the watch and closes: the watch takes the MR out of Draft on "
+                      "green, a red pipeline gets one fix slice, no merge)", state())
         conf.write_text("driver=tmux\nchain_end=merge\n")
         self.assertIn("chain-end: merge (each slice pushes", state())
         conf.write_text("chain_end=ship\n")

@@ -1,6 +1,8 @@
 The pick-up block. The close writes it into the repo's pick-up doc under a heading of its own,
 replacing the previous block, never appending a second one. Fill every line; write "none" rather
-than dropping a line.
+than dropping a line. On a chain whose slices push, the last slice registers the watch and closes
+(close step 9a): `Not done / next` then names the pipeline as the watch's, never as a session's
+to wait for.
 
 ```
 ### WHERE TO PICK UP — <date "+%Y-%m-%d %H:%M">
