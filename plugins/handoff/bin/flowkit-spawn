@@ -350,6 +350,10 @@ fi
 # queued too, its closer's resources given back. A broken gate never stops a launch.
 cap="$me/scripts/capacity.py"
 give_back() { python3 "$cap" launched --pid $$ >/dev/null 2>&1 || true; }
+watch_poller() { # an open watch with no poller gets one: a launch's end is one of the moments that is checked
+  compgen -G "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/flowkit/watches/*.json" >/dev/null || return 0
+  python3 "$me/scripts/watch.py" ensure >/dev/null 2>&1 || true
+}
 if [ "$single" -eq 0 ] && [ -z "$from_queue" ]; then
   again=(--repo "$repo" --name "$name" --story "$slug")
   [ -n "$model" ] && again+=(--model "$model")
@@ -370,6 +374,7 @@ if [ "$single" -eq 0 ] && [ -z "$from_queue" ]; then
   if [ "$code" -eq 11 ]; then
     echo "$verdict"
     story_note "> queued $name · $(date '+%Y-%m-%d %H:%M') · ${verdict#QUEUED }"
+    watch_poller
     exit 11
   elif [ "$code" -ne 0 ]; then
     echo "capacity gate failed (exit $code); launching without it" >&2
@@ -385,6 +390,7 @@ trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 spawned() { # after the SPAWNED line: the launch's resources go to the new session
   trap - EXIT
   python3 "$cap" launched --pid $$ --name "$name" >/dev/null 2>&1 || true
+  watch_poller
 }
 
 # A single session shares the tree with any Claude already running in the repo: its system

@@ -282,6 +282,41 @@ class Handoff(unittest.TestCase):
         self.assertEqual(story.read_text().count("> held"), 1, "said once")
         self.assertIn("--bg", self.calls.read_text())
 
+    def test_a_close_and_a_launchs_end_start_a_missing_watch_poller(self):
+        watches = self.tmp / "claude" / "flowkit" / "watches"
+        watches.mkdir(parents=True)
+        self.env["FLOWKIT_WATCH_POLL"] = "0.2"
+        close = "## s1 · 2026-10-27 12:00\nSession: x · Repo: /r\nNext: none\n"
+
+        def poller():
+            try:
+                return int((watches / "poller.pid").read_text())
+            except (OSError, ValueError):
+                return None
+
+        def comes_and_goes(after):
+            deadline = time.time() + 10
+            while poller() is None:
+                self.assertLess(time.time(), deadline, f"no poller {after}")
+                time.sleep(0.05)
+            (watches / "probe.json").unlink()  # with its last watch the poller goes
+            while poller() is not None:
+                self.assertLess(time.time(), deadline, "the poller stayed with no watch open")
+                time.sleep(0.05)
+
+        self.addCleanup(lambda: poller() and os.kill(poller(), 15))
+        self.handoff("record", "my-story", stdin=close)
+        time.sleep(0.5)
+        self.assertEqual(list(watches.iterdir()), [], "no watch is open: nothing is started")
+        (watches / "probe.json").write_text(json.dumps({"name": "probe", "state": "fixing"}))
+        self.handoff("record", "my-story", stdin=close)
+        comes_and_goes("after a close")
+        (watches / "probe.json").write_text(json.dumps({"name": "probe", "state": "fixing"}))
+        proc, _, _ = self.held_spawn(None)
+        out, err = proc.communicate(timeout=10)
+        self.assertIn("SPAWNED driver=background", out, err)
+        comes_and_goes("after a launch's end")
+
     def test_spawn_ignores_a_stale_load_hold(self):
         proc, _, story = self.held_spawn(["2026-01-01T00:00:00+00:00", "swap 9 GB"])
         out, err = proc.communicate(timeout=10)

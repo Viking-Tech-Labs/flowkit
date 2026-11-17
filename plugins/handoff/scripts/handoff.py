@@ -690,6 +690,19 @@ def record(story):
     if section.group(1) != "Final report":
         print(f"reporter: {ring(slug, section.group(1))}")
     drain(text)
+    watch_poller()
+
+
+def watch_poller():
+    """An open watch with no poller gets one (`watch.py ensure`, detached): a close is one of the
+    moments that is checked. No watch costs one directory read."""
+    try:
+        if any(e.name.endswith(".json") for e in os.scandir(CLAUDE / "flowkit" / "watches")):
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent / "watch.py"), "ensure"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+    except OSError:
+        pass
 
 
 def drain(text):

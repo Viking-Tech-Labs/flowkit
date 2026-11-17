@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -218,6 +219,35 @@ class Cache(Labels):
         with mock.patch.object(self.ft.subprocess, "Popen") as popen:
             self.ft.drain()
         self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "capacity.py"), "drain"])
+        (self.tmp / "flowkit" / "watches").mkdir()
+        (self.tmp / "flowkit" / "watches" / "repo!12.json").write_text("{}")
+        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
+            self.ft.watch()
+        self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "watch.py"), "run"])
+
+    def test_the_tick_starts_a_watch_poller_that_went(self):
+        state = self.tmp / "flowkit" / "watches"
+        state.mkdir()
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
+            self.line()
+            self.assertEqual(popen.call_count, 0, "no watch is open: one directory read")
+            (state / "repo!12.json").write_text("{}")
+            (state / "poller.pid").write_text(str(os.getpid()))
+            self.ft.watch()
+            self.assertEqual(popen.call_count, 0, "its poller runs and beats")
+            os.utime(state / "poller.pid", (0, 0))
+            self.ft.CACHE.unlink()
+            self.line()
+            self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "watch.py"), "run"],
+                             "a heartbeat older than three minutes")
+            self.ft.watch()
+            self.assertEqual(popen.call_count, 1, "at most once a minute")
+            (state / "poller.pid").write_text(str(gone.pid))
+            os.utime(state / ".tick", (0, 0))
+            self.ft.watch()
+            self.assertEqual(popen.call_count, 2, "a fresh heartbeat of a process that is gone")
 
     def test_a_line_younger_than_ten_seconds_comes_from_the_cache(self):
         self.session(1, status="waiting")
