@@ -8,6 +8,7 @@ import io
 import importlib.util
 import json
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -18,8 +19,8 @@ BIN = Path(__file__).resolve().parent.parent / "bin" / "flowkit-tmux"
 SEP = "\x1f"
 
 
-def load():
-    loader = importlib.machinery.SourceFileLoader("flowkit_tmux", str(BIN))
+def load(path=BIN):
+    loader = importlib.machinery.SourceFileLoader("flowkit_tmux", str(path))
     module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
     loader.exec_module(module)
     return module
@@ -196,6 +197,24 @@ class Cache(Labels):
                 self.ft.CACHE.unlink()
                 self.line()
             self.assertEqual(popen.call_count, 2)
+
+    def test_the_installed_copy_drains_through_the_installed_plugin(self):
+        """The kit's copy in ~/.local/bin has no scripts beside it: the drain starts the capacity.py
+        of the newest handoff in installed_plugins.json that has one."""
+        copy = self.tmp / "home" / ".local" / "bin" / "flowkit-tmux"
+        copy.parent.mkdir(parents=True)
+        shutil.copyfile(BIN, copy)
+        self.ft = load(copy)
+        self.ft.CLAUDE = self.tmp
+        (self.tmp / "plugins").mkdir()
+        (self.tmp / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": {"handoff@flowkit": [
+            {"installPath": str(self.tmp / "gone")}, {"installPath": str(BIN.parent.parent)}]}}))
+        queue = self.tmp / "capacity" / "queue"
+        queue.mkdir(parents=True)
+        (queue / "1.json").write_text("{}")
+        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
+            self.ft.drain()
+        self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "capacity.py"), "drain"])
 
     def test_a_line_younger_than_ten_seconds_comes_from_the_cache(self):
         self.session(1, status="waiting")

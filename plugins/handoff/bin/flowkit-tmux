@@ -381,6 +381,27 @@ def waiting():
         print(f"#[reverse] ⚑ {total} need{'s' if total == 1 else ''} you #[noreverse] ", end="")
 
 
+def plugin_root():
+    """The handoff plugin whose files this copy uses: its own when they sit beside it (the repo, the
+    plugin cache), else the newest handoff in installed_plugins.json, since the kit's copy in
+    ~/.local/bin has nothing beside it."""
+    own = Path(__file__).resolve().parent.parent
+    if (own / "scripts" / "capacity.py").is_file():
+        return own
+    def version(root):
+        try:
+            return tuple(int(n) for n in json.loads((root / ".claude-plugin" / "plugin.json").read_text())["version"].split("."))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+    try:
+        entries = json.loads((CLAUDE / "plugins" / "installed_plugins.json").read_text())["plugins"]["handoff@flowkit"]
+        roots = [Path(e["installPath"]) for e in entries]
+    except (OSError, ValueError, KeyError, TypeError):
+        return own
+    found = [(v, root) for root in roots if (root / "scripts" / "capacity.py").is_file() and (v := version(root))]
+    return max(found)[1] if found else own
+
+
 def drain():
     """The capacity queue drains on the tick too, so a slot freed by a session that died or sat
     idle starts the next queued launch. An empty queue costs one directory read; else
@@ -398,7 +419,7 @@ def drain():
         pass
     try:
         (state / ".tick").touch()
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent.parent / "scripts" / "capacity.py"), "drain"],
+        subprocess.Popen([sys.executable, str(plugin_root() / "scripts" / "capacity.py"), "drain"],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     except OSError:
@@ -482,7 +503,7 @@ def list_sessions(client=""):
 
 
 def help_text():
-    for path in (CONFIG / "tmux-cheatsheet.md", Path(__file__).resolve().parent.parent / "tmux" / "cheatsheet.md"):
+    for path in (CONFIG / "tmux-cheatsheet.md", plugin_root() / "tmux" / "cheatsheet.md"):
         if path.is_file():
             print(path.read_text())
             break
