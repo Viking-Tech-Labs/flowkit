@@ -45,6 +45,7 @@ COORD_NAME = re.compile(r"(?:^|-)coord(?:inator)?(?:-\d+)?$")  # coord-1, story-
 SECTION = re.compile(r"^\[(.+)\]$")
 RESOURCE = re.compile(r"^resource\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.*)$")
 SETTING = re.compile(r"^([a-z_]+)\s*=\s*(\S+)$")
+CHECK = re.compile(r"^check\s*=\s*(.+)$")  # a repo's own answer for the watches on its MRs (watch.py)
 AUDIT = re.compile(r"^audit\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.+)$")  # a resource's commands, for the audit hook
 SINCE = re.compile(r"^(\d+(?:\.\d+)?)([dhm])$")  # report --since 7d, 36h, 90m
 DAY = 24 * 3600
@@ -95,6 +96,11 @@ def load_config(path=None):
                 print(f"capacity.conf:{n}: an audit line belongs under a [<repo path>] section", file=sys.stderr)
             else:
                 section.setdefault("audit", {})[m.group(1)] = pattern
+        elif m := CHECK.match(line):
+            if section is None:
+                print(f"capacity.conf:{n}: a check belongs under a [<repo path>] section", file=sys.stderr)
+            else:
+                section["check"] = m.group(1).strip()
         elif (m := SETTING.match(line)) and (m.group(1) in DEFAULTS if section is None else m.group(1) == "slots"):
             try:
                 (cfg if section is None else section)[m.group(1)] = number(m.group(2))

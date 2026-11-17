@@ -1,0 +1,8 @@
+#!/bin/sh
+# flowkit-watch: a pipeline watched by a script, so no session waits for it (scripts/watch.py).
+#   flowkit-watch add --story <slug> --mr <url> [--ready] [--until merged] [--left <text>]
+#   flowkit-watch add --story <slug> --ref <branch> [--sha <sha>] [--project <path>] [--name <n>]
+#   flowkit-watch add --story <slug> --check '<command>' --name <n>
+#   flowkit-watch list [--json]
+#   flowkit-watch drop <name>
+exec python3 "$(dirname "$0")/../scripts/watch.py" "$@"
