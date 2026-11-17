@@ -387,7 +387,7 @@ def plugin_root():
     plugin cache), else the newest handoff in installed_plugins.json, since the kit's copy in
     ~/.local/bin has nothing beside it."""
     own = Path(__file__).resolve().parent.parent
-    if (own / "scripts" / "capacity.py").is_file():
+    if (own / ".claude-plugin" / "plugin.json").is_file():
         return own
     def version(root):
         try:

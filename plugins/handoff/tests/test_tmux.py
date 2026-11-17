@@ -199,11 +199,14 @@ class Cache(Labels):
             self.assertEqual(popen.call_count, 2)
 
     def test_the_installed_copy_drains_through_the_installed_plugin(self):
-        """The kit's copy in ~/.local/bin has no scripts beside it: the drain starts the capacity.py
-        of the newest handoff in installed_plugins.json that has one."""
+        """The kit's copy in ~/.local/bin is no plugin (the resolver the kit puts in ~/.local/scripts
+        notwithstanding): the drain starts the capacity.py of the newest handoff in
+        installed_plugins.json that has one."""
         copy = self.tmp / "home" / ".local" / "bin" / "flowkit-tmux"
         copy.parent.mkdir(parents=True)
         shutil.copyfile(BIN, copy)
+        (copy.parent.parent / "scripts").mkdir()
+        (copy.parent.parent / "scripts" / "capacity.py").write_text("# the kit's resolver for a 0.8.0 tick\n")
         self.ft = load(copy)
         self.ft.CLAUDE = self.tmp
         (self.tmp / "plugins").mkdir()
