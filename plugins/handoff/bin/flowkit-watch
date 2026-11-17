@@ -3,6 +3,7 @@
 #   flowkit-watch add --story <slug> --mr <url> [--ready] [--until merged] [--left <text>]
 #   flowkit-watch add --story <slug> --ref <branch> [--sha <sha>] [--project <path>] [--name <n>]
 #   flowkit-watch add --story <slug> --check '<command>' --name <n>
+#       any of them: [--on-green-run '<command>'] [--on-green <prompt> [--repo <tree>] [--on-green-name <n>]]
 #   flowkit-watch list [--json]
 #   flowkit-watch drop <name>
 exec python3 "$(dirname "$0")/../scripts/watch.py" "$@"
