@@ -86,6 +86,13 @@ class Labels(unittest.TestCase):
             (self.tmp / "flowkit" / "retry" / f"{sid}.json").write_text("{}")
         return sid
 
+    def arm(self, name, story="st"):
+        """An open watch of the story: its arm file, as scripts/watch.py keeps it until its section is in."""
+        path = self.tmp / "flowkit" / "watches" / f"{name}.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({"name": name, "story": story, "state": "pending"}))
+        return path
+
     def label(self, wid):
         self.writes.clear()
         self.ft.closed.cache_clear()
@@ -156,6 +163,25 @@ class Labels(unittest.TestCase):
         self.window("@2")
         self.session(7, status="waiting")
         self.assertEqual(self.label("@2"), "unchanged")
+
+    def test_a_story_with_an_open_watch_is_watching_while_nothing_is_more_urgent(self):
+        self.window("@1", "st", label="done")
+        self.session(1, status="idle", idle_for=60, name="st-report")
+        self.session(2, status="idle", closed=True)
+        self.window("@2", "other")
+        self.session(3, status="idle", closed=True)
+        self.assertEqual((self.label("@1"), self.label("@2")), ("unchanged", "done"))
+        arm = self.arm("app!7")
+        (arm.parent / ".app!7.json.123").write_text("{")  # a write caught halfway
+        self.assertEqual((self.label("@1"), self.label("@2")), ("watching", "done"))
+        self.session(4, status="busy")
+        self.assertEqual(self.label("@2"), "running")
+        self.wid, self.story = "@1", "st"
+        self.session(5, status="idle", idle_for=20 * 60)
+        self.assertEqual(self.label("@1"), "stalled")
+        self.rows.pop(), self.pane_list.pop()
+        arm.unlink()
+        self.assertEqual(self.label("@1"), "unchanged")  # back to done, which the tab still says
 
     def test_a_label_goes_when_its_sessions_do(self):
         self.window("@1", "st", label="running")
@@ -352,6 +378,28 @@ class Closer(Labels):
         self.closes()
         self.assertFalse(self.rang())  # rung a minute ago: not again yet
 
+    def test_an_open_watch_keeps_the_story_and_its_reporter_unrung(self):
+        self.note("# st")
+        sid = self.session(2, status="idle", idle_for=20 * 60)
+        self.note("## s2 · 2026-11-17 15:20", f"Session: {sid} · Repo: /repo",
+                  "Next: watching app!7 (https://gitlab.com/g/p/-/merge_requests/7)")
+        self.session(1, status="idle", idle_for=20 * 60, name="st-report")
+        arm = self.arm("app!7")
+        self.assertEqual(self.closes(), ["%2"], "the slice's pane goes; the story and its reporter stay")
+        self.assertFalse(self.rang(), "a watch longer than the backfill's 15 minutes")
+        self.rows.pop(0), self.pane_list.pop(0)
+        self.assertEqual(self.closes(), [])
+        self.assertFalse(self.rang())
+        arm.unlink()  # gone with no section: the promise is still open, and the backfill is back
+        self.assertEqual(self.closes(), [])
+        self.assertTrue(self.rang())
+        self.note("## app!7 · 2026-11-17 16:05", "Watch: pipeline green 16:04", "Next: none")
+        self.pane_list[-1][12] = ""
+        self.assertEqual(self.closes(), [])
+        self.assertTrue(self.rang(), "complete: the reporter writes its final report")
+        self.note(self.final())
+        self.assertEqual(self.closes(), ["%1"])
+
     def test_a_tab_whose_claudes_exited_still_closes(self):
         self.note("# st", "Next: spawned s2")
         self.shell(1)
@@ -463,6 +511,22 @@ class PaneCloser(Closer):
         self.slice_done()
         self.rows.append({"kind": "background", "pid": 4242, "name": "s2", "status": "busy"})
         self.assertEqual(self.closes(), ["%1"])
+
+    def test_a_slice_that_registered_a_watch_goes_while_the_watch_is_open(self):
+        sid = self.session(1, status="idle", idle_for=10 * 60, name="s1")
+        self.note("## s1 · 2026-11-17 15:20", f"Session: {sid} · Repo: /repo",
+                  "Next: watching app!7 (https://gitlab.com/g/p/-/merge_requests/7)")
+        self.session(9, status="idle", idle_for=60, name="st-report")
+        self.assertEqual(self.closes(), [], "no arm is open")
+        self.arm("app!7", story="other")
+        self.assertEqual(self.closes(), [], "another story's arm")
+        self.arm("app!7")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.ft.closable()
+        self.assertEqual(out.getvalue(), "would close work:w.1 %1 s1 (watch app!7 is open)\n")
+        self.assertEqual(self.closes(), ["%1"])
+        self.assertEqual(self.killed, [1001])
 
     def test_no_successor_running_or_no_close_recorded_keeps_the_pane(self):
         self.slice_done()

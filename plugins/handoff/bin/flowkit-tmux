@@ -6,7 +6,8 @@
                               of its sessions wait on you (@flowkit_wait), each story and adhoc
                               tab with its most urgent state (@flowkit_tab), prints the total;
                               with autoclose=on in handoff.conf it also closes a finished slice's
-                              pane once its successor runs, and finished story tabs
+                              pane once its successor runs or its watch is open, and finished
+                              story tabs
   flowkit-tmux closable       dry run: the panes the tick would close, closing nothing
   flowkit-tmux list [client]  numbered list of every session, waiting first; a number jumps there
   flowkit-tmux help           the cheat sheet
@@ -41,7 +42,7 @@ STALL = 15 * 60
 SESSION_LINE = re.compile(r"^Session: ([0-9a-f-]{36})\b", re.M)  # a recorded close names its session
 HEADING = re.compile(r"^## (.+?) · \d{4}-\d\d-\d\d", re.M)  # a close section, or the reporter's final report
 FINAL = re.compile(r"^## Final report · (\d{4}-\d\d-\d\d \d\d:\d\d)", re.M)
-PROMISED = re.compile(r"^Next: (?:spawned|started) (.*)$", re.M)  # the sessions a close launched
+PROMISED = re.compile(r"^Next: (?:spawned|started|watching) (.*)$", re.M)  # the sessions a close launched, the watches it registered
 COORDINATOR = re.compile(r"^Coordinator: (\S+)", re.M)  # a coordination board names its coordinator
 COORD_NAME = re.compile(r"(?:^|-)coord")  # coord-1, story-coord, story-coordinator
 SHELLS = {"zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh"}
@@ -178,8 +179,22 @@ def setting(key):
     return value
 
 
+def watched():
+    """Story slug → the names of its open watches: flowkit/watches/<name>.json, which goes once the
+    watch's own section is recorded (scripts/watch.py)."""
+    out = {}
+    for path in (CLAUDE / "flowkit" / "watches").glob("[!.]*.json"):
+        try:
+            arm = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(arm, dict) and arm.get("name") == path.stem and arm.get("story"):
+            out.setdefault(arm["story"], set()).add(arm["name"])
+    return out
+
+
 def story_complete(text):
-    """Every session a close launched has a close section of its own."""
+    """Every session a close launched, and every watch it registered, has a section of its own."""
     have = set(HEADING.findall(text)) - {"Final report"}
     want = set()
     for rest in PROMISED.findall(text):
@@ -235,6 +250,7 @@ def close_stories(pane_list, found, words):
     @flowkit_story are looked at; @flowkit_hold (or the older @cc_hold) on a tab keeps its story."""
     now = time.time()
     rows = {p["id"]: r for p, r in found}
+    arms = watched()
     stories = {}
     for p in pane_list:
         if p.get("slug"):
@@ -257,8 +273,9 @@ def close_stories(pane_list, found, words):
         report = [p for p, r in claudes if (r.get("name") or "").endswith("-report")]
         reported, complete = story_reported(text), story_complete(text)
         if not (reported or not claudes or (complete and not report)):
-            if report and (complete or all(untouched(r.get("sessionId") or "", now - BACKFILL) for _, r in claudes)):
-                ring(report[0], now)
+            if report and slug not in arms and (
+                    complete or all(untouched(r.get("sessionId") or "", now - BACKFILL) for _, r in claudes)):
+                ring(report[0], now)  # never while a watch is open: its section rings the reporter itself
             continue
         if now - written < GRACE or not all(untouched(r.get("sessionId") or "", now - QUIET) for _, r in claudes):
             continue
@@ -287,7 +304,8 @@ def coordinators():
 
 
 def successors(slug, sid):
-    """The sessions the close of sid launched, from its section of the story file."""
+    """The sessions the close of sid launched and the watches it registered, from its section of
+    the story file."""
     try:
         text = (CLAUDE / "stories" / f"{slug}.md").read_text(errors="replace")
     except OSError:
@@ -302,11 +320,13 @@ def successors(slug, sid):
 
 
 def finished_panes(rows, found, words):
-    """Story panes whose slice is over: the close is recorded and a session it launched runs. Never
-    the reporter, a coordinator, the adhoc tab (no story mark), a held tab, or a session at work,
-    waiting on the user, in error or touched in the last 5 minutes."""
+    """Story panes whose slice is over: the close is recorded and a session it launched runs, or a
+    watch it registered is open. Never the reporter, a coordinator, the adhoc tab (no story mark),
+    a held tab, or a session at work, waiting on the user, in error or touched in the last 5
+    minutes."""
     now = time.time()
     live = {r.get("name") for r in rows if r.get("pid")}  # a successor in the background has no pane
+    arms = watched()
     coords = coordinators()
     out = []
     for p, r in found:
@@ -319,7 +339,7 @@ def finished_panes(rows, found, words):
             continue
         if sid not in closed(p["slug"]) or not untouched(sid, now - QUIET):
             continue
-        if (successors(p["slug"], sid) - {name}) & live:
+        if (successors(p["slug"], sid) - {name}) & (live | arms.get(p["slug"], set())):
             out.append((p, r))
     return out
 
@@ -355,6 +375,10 @@ def waiting():
         word = words[p["id"]] = tab_state(r, p.get("story")) if p.get("story") else ""
         if word and (p["wid"] not in tab or URGENCY.index(word) < URGENCY.index(tab[p["wid"]])):
             tab[p["wid"]] = word
+    arms = watched()
+    for p in pane_list:  # a story with a watch open is watched, while nothing in its tab is more urgent
+        if p.get("slug") in arms and tab.get(p["wid"], "done") == "done":
+            tab[p["wid"]] = "watching"
     cmds = []
     for p in pane_list:
         if p["id"] in want and want[p["id"]] != p["state"]:
@@ -555,9 +579,12 @@ def closable():
     found = placed(rows, pane_list)
     words = {p["id"]: tab_state(r, p.get("story")) if p.get("story") else "" for p, r in found}
     done = finished_panes(rows, found, words)
+    arms = watched()
     for p, r in done:
+        names = successors(p["slug"], r["sessionId"])
+        watch = sorted(names & arms.get(p["slug"], set()))
         print(f"would close {p['sess']}:{p['wname']}.{p['pidx']} {p['id']} {r.get('name') or '?'}"
-              f" (successor {', '.join(sorted(successors(p['slug'], r['sessionId'])))} runs)")
+              f" ({'watch ' + ', '.join(watch) + ' is open' if watch else 'successor ' + ', '.join(sorted(names)) + ' runs'})")
     if not done:
         print("nothing to close")
     if setting("autoclose") != "on":
