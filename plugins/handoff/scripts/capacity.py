@@ -28,7 +28,7 @@ ME = "me"  # the holder of the user's test hold
 LAUNCH = "launch:"  # holder prefix of what an in-flight flowkit-spawn holds: launch:<its pid>
 QUEUED = 11  # the gate's exit code when a launch is queued, which flowkit-spawn exits with
 HOLD_STALE = 2 * 3600  # a load hold this old is ignored, as flowkit-spawn ignores it
-STATUS_VERSION = 2  # status.json's schema; the board reads it, plugins/board/tests/fixtures/capacity-status.ts shows it
+STATUS_VERSION = 3  # status.json's schema; the board reads it, plugins/board/tests/fixtures/capacity-status.ts shows it
 SPAN_MAX = 12 * 3600  # a slice span longer than this is a parked chain, not a slice: left out of the medians
 MIN_SPANS = 3  # a repo with fewer slice spans in the log than this is planned at slice_minutes
 OVERDUE = 10 * 60  # a running slice already past its median is given this long yet
@@ -38,7 +38,7 @@ NEEDS = re.compile(r"(?:^|\s{2,})Needs:\s*(.*?)\s*(?=\s{2,}\S+:|$)", re.M)  # a 
 LEFT = re.compile(r"(?:^|\s{2,})Left:\s*(\d+)", re.M)  # a prompt header's slices left after this one
 SESSION_LINE = re.compile(r"^Session: ([0-9a-f-]{36})\b", re.M)  # a recorded close names its session
 HEADING = re.compile(r"^## (.+?) · \d{4}-\d\d-\d\d", re.M)  # a close section, or the reporter's final report
-PROMISED = re.compile(r"^Next: (?:spawned|started) (.*)$", re.M)  # the sessions a close launched
+PROMISED = re.compile(r"^Next: (?:spawned|started|watching) (.*)$", re.M)  # the sessions a close launched, the watches it registered
 LAUNCHED = re.compile(r"^> launched (\S+)", re.M)  # flowkit-spawn's line for every story launch
 COORDINATOR = re.compile(r"^Coordinator: (\S+)", re.M)  # a coordination board names its coordinator
 COORD_NAME = re.compile(r"(?:^|-)coord(?:inator)?(?:-\d+)?$")  # coord-1, story-coord, story-coordinator
@@ -189,7 +189,8 @@ def liveness(rows, sid):
 
 def stories():
     """Every story session's name with its story's slug (a close heading, a `Next:` name or a
-    `> launched` line), and the session ids with a recorded close."""
+    `> launched` line; a watch's name is there too, and stands for no session), and the session ids
+    with a recorded close."""
     members, closed = {}, set()
     for path in sorted((claude_dir() / "stories").glob("*.md")):
         if path.name.endswith(".tests.md"):
@@ -478,8 +479,30 @@ def hold(rows, names, minutes, t=None):
     return 0, f"held {', '.join(sorted(names))} for you until {time.strftime('%H:%M', time.localtime(t + minutes * 60))}"
 
 
+def watches():
+    """The open watches, by name: one per arm file of scripts/watch.py (flowkit/watches/<name>.json,
+    gone once the watch's own section is recorded), with what a status line and the board say.
+    In status.json `polled` and `answer` are as old as the snapshot: an ask does not rewrite it."""
+    out = []
+    for path in sorted((claude_dir() / "flowkit" / "watches").glob("[!.]*.json")):
+        try:
+            arm = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(arm, dict) or arm.get("name") != path.stem:
+            continue
+        fix, waits = arm.get("fix") or {}, arm.get("waits") or {}
+        out.append({"name": arm["name"], "story": arm.get("story") or "", "state": arm.get("state") or "",
+                    "phase": arm.get("phase") or "", "url": arm.get("url") or "", "sha": arm.get("sha") or "",
+                    "armed": arm.get("armed"), "polled": arm.get("polled"), "answer": arm.get("answer") or "",
+                    "fix": {"name": fix.get("name") or "", "state": fix.get("state") or ""} if fix else None,
+                    "waits": waits.get("base") or None})
+    return out
+
+
 def status_data(rows, t):
-    """The snapshot status.json holds: slots, chains, resources and the queue, oldest first."""
+    """The snapshot status.json holds: slots, chains, resources, the queue, oldest first, and the
+    open watches."""
     cfg = load_config()
     found = chains(rows, t)
     used = slots(cfg, found)
@@ -499,11 +522,30 @@ def status_data(rows, t):
             "queue": [{"id": e["id"], "name": e.get("name", ""), "story": e.get("story", ""), "tree": e.get("tree", ""),
                        "needs": sorted(e.get("needs", [])), "left": e.get("left"), "queued": e.get("queued"),
                        "by": e.get("by", ""), "continuation": bool(e.get("continuation")), "why": e.get("why", ""),
-                       "eta": plan[("queue", e["id"])]["start"] or e.get("eta")} for e in waiting]}
+                       "eta": plan[("queue", e["id"])]["start"] or e.get("eta")} for e in waiting],
+            "watches": watches()}
 
 
 def write_status(rows, t):
     write_json(state_dir() / "status.json", status_data(rows, t))
+
+
+def write_watches(t=None):
+    """status.json with its `watches` as they are now: watch.py calls it when an arm opens, changes
+    or goes, which no take, launch or drain marks. The rest of the snapshot stays as it was, so
+    `claude agents` is not asked; with no snapshot of this version yet, a whole one is written."""
+    path = state_dir() / "status.json"
+    with lock():
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            data = None
+        if isinstance(data, dict) and data.get("version") == STATUS_VERSION:
+            write_json(path, {**data, "watches": watches()})
+            return
+    rows = snapshot()
+    with lock():
+        write_status(rows, now() if t is None else t)
 
 
 def clock(t):
@@ -511,7 +553,7 @@ def clock(t):
 
 
 def status_lines(data):
-    """One line for the slots, then one per repo limit, chain and resource."""
+    """One line for the slots, then one per repo limit, chain, resource, queued launch and watch."""
     if data["agents"] == "unknown":
         lines = [f"slots ?/{data['slots']} · claude agents did not answer: nothing is reclaimed, no new chain starts"]
     else:
@@ -533,6 +575,13 @@ def status_lines(data):
         lines.append(f"queue #{n} {q['name']}{' (' + q['story'] + ')' if q['story'] else ''} · {q['why']}"
                      f"{' · needs ' + ', '.join(q['needs']) if q['needs'] else ''} · queued {clock(q['queued'])} by {q['by']}"
                      f" · ~{clock(q['eta'])}")
+    for w in data["watches"]:
+        more = f"{w['fix']['name']} {w['fix']['state']}" if w["state"] == "fixing" and w["fix"] else \
+            w["waits"] or "" if w["state"] == "waiting-base" else "" if w["phase"] in ("", "pipeline") else w["phase"]
+        lines.append(" · ".join(filter(None, [
+            f"watch {w['name']}{' (' + w['story'] + ')' if w['story'] else ''}", w["state"] + (f" ({more})" if more else ""),
+            w["sha"] and f"sha {w['sha'][:7]}", w["armed"] and f"armed {clock(w['armed'])}",
+            w["polled"] and f"asked {clock(w['polled'])}: {w['answer']}", w["url"]])))
     return lines
 
 
@@ -804,7 +853,7 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
                 room = "behind the queue"
             if room and over_cap:
                 if not dry:
-                    log("over-cap", t, name=name, story=story, tree=tree, why=room)
+                    log("over-cap", t, name=name, story=story, tree=tree, why=room, **({"watch": watch} if watch else {}))
             else:
                 why = room
         leased = leases()
@@ -933,7 +982,8 @@ def drain(rows, t=None, ending=()):
                 (state_dir() / "queue" / f"{e['id']}.json").unlink(missing_ok=True)
                 log("dequeue", t, id=e["id"], name=e.get("name", ""), story=e.get("story", ""), pid=pid,
                     waited=round(t - (e.get("queued") or t)), tree=e["tree"], repo=repo_of(e["tree"]),
-                    left=e.get("left"), gap=None if gap is None else round(min(gap, t - (e.get("queued") or t))))
+                    left=e.get("left"), gap=None if gap is None else round(min(gap, t - (e.get("queued") or t))),
+                    **({"watch": e["watch"]} if e.get("watch") else {}))
                 tie = ties().get(e.get("name"))
                 if tie:
                     m = medians(events()).get(repo_of(e["tree"]), cfg["slice_minutes"] * 60)
@@ -1329,14 +1379,18 @@ def sessions_report(start, end, cfg):
 
 def report(start, end, baseline=False):
     """`capacity report` (§6 of the plan): what the log says about the window, and what the
-    transcripts say. baseline: the transcripts only, for the week before the log existed."""
+    transcripts say. baseline: the transcripts only, for the week before the log existed. A watch's
+    own lines (`watch`, and the gate's for a launch a watch made) stay out of every count but
+    `watched`: the minutes its ended watches were open."""
     cfg = load_config()
     out = {"start": start, "end": end, "slots": cfg["slots"], "coordinator_growth": cfg["coordinator_growth"],
            **sessions_report(start, end, cfg)}
     if baseline:
         return out
     every = events()
-    evs = [e for e in every if start <= e["t"] < end]
+    window = [e for e in every if start <= e["t"] < end]
+    evs = [e for e in window if e["event"] != "watch" and not e.get("watch")]
+    ended = [e for e in window if e["event"] == "watch" and e.get("op") == "done"]
     queued_at = {e.get("id"): e for e in every if e["event"] == "queue"}
     dequeued = {e.get("id"): e for e in every if e["event"] == "dequeue"}
     held = [e["held"] for e in evs if e["event"] in ("launch", "queue") and isinstance(e.get("held"), (int, float))
@@ -1385,6 +1439,8 @@ def report(start, end, baseline=False):
         "idle_with_queue": {"day": round(idle_day), "nights": {k: round(v) for k, v in sorted(nights.items())}},
         "collisions": collisions,
         "batches": sum(e["event"] == "waves" and (e.get("items") or 0) >= 4 for e in evs),
+        "watched": {"count": len(ended), "minutes": round(sum(e.get("minutes") or 0 for e in ended)),
+                    "fixes": sum(e["event"] == "watch" and e.get("op") == "fix" for e in window)},
     })
     return out
 
@@ -1422,7 +1478,7 @@ def report_lines(data, against=None):
                  f"asking for status")
     if "queued" not in data:
         return lines
-    q, idle = data["queued"], data["idle_with_queue"]
+    q, idle, w = data["queued"], data["idle_with_queue"], data["watched"]
     worst_night = max(idle["nights"].items(), key=lambda kv: kv[1], default=None)
     lines += [
         f"launch holds    {data['launch_holds']['count']}, {data['launch_holds']['minutes']} min",
@@ -1437,6 +1493,8 @@ def report_lines(data, against=None):
         f"collisions      {len(data['collisions'])}" + "".join(
             f"\n                {time.strftime('%m-%d %H:%M', time.localtime(c['t']))} {c['what']}" for c in data["collisions"][-5:]),
         f"batches         {data['batches']} of 4+ items",
+        f"watched         {w['minutes']} min over {w['count']} watch{'' if w['count'] == 1 else 'es'} · "
+        f"{w['fixes']} fix slice{'' if w['fixes'] == 1 else 's'}",
     ]
     base = against and sum(per_day(against["coordinators"], "status").values()) / max(
         1.0, (against["end"] - against["start"]) / DAY)

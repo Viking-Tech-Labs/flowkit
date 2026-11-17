@@ -30,7 +30,7 @@ export type Card = {
   tests: TestLine[]
 }
 
-// capacity/status.json, as handoff's capacity.py writes it (version 2); the board only reads it.
+// capacity/status.json, as handoff's capacity.py writes it (version 3); the board only reads it.
 export type CapacityStatus = {
   version: number
   at: number
@@ -40,6 +40,18 @@ export type CapacityStatus = {
   chains: { story: string; sessions: { name: string; stalled: boolean }[] }[]
   resources: { name: string; session: string | null; holder: string | null; since: number | null; why: string | null; until: number | null }[]
   queue: { name: string; eta: number | null }[]
+  watches: Watch[]
+}
+
+// An open watch of handoff's watch.py: a pipeline a script polls for a story, until its own section is recorded.
+export type Watch = {
+  name: string
+  story: string
+  state: string
+  phase: string
+  armed: number
+  fix: { name: string; state: string } | null
+  waits: string | null
 }
 
 export type Snapshot = {
@@ -49,6 +61,7 @@ export type Snapshot = {
   isAgentsKnown: boolean
   isStoriesKnown: boolean
   capacity?: string[]
+  watches?: Watch[]
 }
 
 declare module 'claude-code' {

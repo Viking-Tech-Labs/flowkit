@@ -1,7 +1,7 @@
 // capacity/status.json as handoff's capacity.py writes it: the board reads this, and handoff's
 // test_capacity.py parses what follows `export default` as JSON and checks its shape against the writer.
 export default {
-  "version": 2,
+  "version": 3,
   "at": 1786700000.0,
   "agents": "known",
   "slots": 3,
@@ -88,6 +88,50 @@ export default {
       "continuation": false,
       "why": "slots 2/3",
       "eta": 1786703100.0
+    }
+  ],
+  "watches": [
+    {
+      "name": "app!12",
+      "story": "demo",
+      "state": "pending",
+      "phase": "pipeline",
+      "url": "https://gitlab.com/g/p/-/merge_requests/12",
+      "sha": "1111111111111111111111111111111111111111",
+      "armed": 1786699400.0,
+      "polled": 1786699940.0,
+      "answer": "pipeline running",
+      "fix": null,
+      "waits": null
+    },
+    {
+      "name": "lib!9",
+      "story": "side",
+      "state": "fixing",
+      "phase": "pipeline",
+      "url": "https://gitlab.com/g/p/-/merge_requests/9",
+      "sha": "2222222222222222222222222222222222222222",
+      "armed": 1786696400.0,
+      "polled": 1786698200.0,
+      "answer": "pipeline failed",
+      "fix": {
+        "name": "side-fix-1",
+        "state": "started"
+      },
+      "waits": null
+    },
+    {
+      "name": "lib!10",
+      "story": "next",
+      "state": "waiting-base",
+      "phase": "pipeline",
+      "url": "https://gitlab.com/g/p/-/merge_requests/10",
+      "sha": "3333333333333333333333333333333333333333",
+      "armed": 1786697000.0,
+      "polled": 1786698260.0,
+      "answer": "pipeline failed",
+      "fix": null,
+      "waits": "lib!9"
     }
   ]
 }

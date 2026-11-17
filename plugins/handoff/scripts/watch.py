@@ -30,7 +30,8 @@ is red waits for it (`waiting-base`). On green `--on-green-run` runs a command i
 
 State: ${CLAUDE_CONFIG_DIR:-~/.claude}/flowkit/watches/<name>.json (one arm), <name>.lock, and
 poller.pid, whose mtime is the poller's heartbeat; launched/<session>.log is the output of a launch
-the watch made. Events go to capacity's log.jsonl as `watch`.
+the watch made. Events go to capacity's log.jsonl as `watch`; capacity's status.json lists the open
+arms (`watches`), rewritten whenever one opens, changes state or goes.
 """
 import argparse
 import contextlib
@@ -72,6 +73,7 @@ MR_URL = re.compile(r"^https?://[^/\s]+/(.+?)/-/merge_requests/(\d+)")
 REMOTE = re.compile(r"^(?:https?://[^/]+/|(?:ssh://)?[^/@]+@[^:/]+[:/])(.+?)(?:\.git)?/?$")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._!#@+-]*$")
 SCRUB = ("CLAUDE_PID", "TMUX_PANE")  # with CLAUDE_CODE_*: what would pass the poller off as a session
+SHOWN = ("state", "phase", "sha", "fix", "waits")  # what capacity's status.json says of an open arm, besides its name
 
 
 def _capacity():
@@ -179,7 +181,9 @@ def commit(arm, **changes):
             return None
         new = {**have, **changes, "rev": have["rev"] + 1}
         cap.write_json(watches() / f"{arm['name']}.json", new)
-        return new
+    if any(new.get(k) != have.get(k) for k in SHOWN):
+        cap.write_watches(now())
+    return new
 
 
 def log(op, arm, t, **fields):
@@ -347,6 +351,7 @@ def add(args):
                 cap.write_json(watches() / f"{name}.json", arm)
         if arm:
             log("add", arm, t, kind=arm["kind"], sha=sha, tree=tree, until=arm["until"])
+            cap.write_watches(t)
     if old and old["name"] != arm["name"]:  # the fix slice's close: the red arm it answers is over
         retire(old, t, f"armed again as {arm['name']}", "armed")
     took = pipeline_minutes(repo) if queued_tests(arm) else None
@@ -683,6 +688,7 @@ def finish(arm, t):
             (watches() / f"{arm['name']}.{suffix}").unlink(missing_ok=True)
     log("done", arm, t, outcome=out["what"], end=out["kind"], minutes=round((out["at"] - arm["armed"]) / 60),
         **({"next": arm["next"]} if arm.get("next") else {}))
+    cap.write_watches(t)
 
 
 def record(arm, text):
@@ -706,6 +712,7 @@ def retire(arm, t, how, end):
         for suffix in ("json", "lock"):
             (watches() / f"{arm['name']}.{suffix}").unlink(missing_ok=True)
     log("done", arm, t, outcome=how, end=end, minutes=round((t - arm["armed"]) / 60))
+    cap.write_watches(t)
     return True
 
 

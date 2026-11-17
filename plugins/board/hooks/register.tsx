@@ -16,6 +16,8 @@ import {
   stateLabel,
   stateWord,
   storyLines,
+  watchLines,
+  watchesOf,
   parseStory,
   parseTests,
   usageLines,
@@ -110,13 +112,22 @@ const gather = async ($: EngineInterface): Promise<World> => {
   )
   // Read last: a tick made while the slow reads ran is not overwritten.
   const marks = await loadTicks($)
-  const snap = buildSnapshot(loaded?.stories, agents, stats, now)
   // No status.json is no capacity gate set up: the block is left out.
+  let status: CapacityStatus | undefined
+  let capacity: string[] | undefined
   try {
-    if (held !== undefined) snap.capacity = capacityParts(JSON.parse(held) as CapacityStatus, now)
+    if (held !== undefined) {
+      status = JSON.parse(held) as CapacityStatus
+      capacity = capacityParts(status, now)
+    }
   } catch {
-    snap.capacity = ['capacity/status.json could not be read']
+    status = undefined
+    capacity = ['capacity/status.json could not be read']
   }
+  const watches = status === undefined ? [] : watchesOf(status)
+  const snap = buildSnapshot(loaded?.stories, agents, stats, now, watches)
+  if (capacity !== undefined) snap.capacity = capacity
+  if (watches.length > 0) snap.watches = watches
   return { snap, files: loaded?.files, marks }
 }
 
@@ -175,7 +186,9 @@ const where = async ($: EngineInterface, e: CommandRunInput): Promise<string> =>
     '',
     ...usageLines(usage?.rateLimits, snap.at),
     '',
-    ...(snap.capacity === undefined ? [] : [...capacityLines(snap.capacity, widthOf(e)), '']),
+    ...(snap.capacity === undefined
+      ? []
+      : [...capacityLines(snap.capacity, widthOf(e)), ...watchLines(snap.watches ?? [], widthOf(e)), '']),
     ...(snap.isStoriesKnown
       ? storyLines(snap.cards, marks, snap.at, e.args.trim() === 'all')
       : ['STORIES  ~/.claude/stories could not be read']),

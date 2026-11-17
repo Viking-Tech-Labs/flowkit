@@ -16,6 +16,8 @@ import {
   stepsOf,
   storyLines,
   usageLines,
+  watchLines,
+  watchesOf,
 } from '../hooks/model'
 import type { Agent, Story } from '../hooks/model'
 import type { CapacityStatus } from '../types'
@@ -335,14 +337,61 @@ test('the capacity block reads the shared status.json fixture: slots, queue, eac
     'stalled: demo-s2',
     `as of ${at(STATUS.at)}`,
   ])
-  expect(capacityParts({ ...STATUS, version: 3 }, NOW)).toEqual(['status.json version 3, this board reads 2'])
+  expect(capacityParts({ ...STATUS, version: 2 }, NOW)).toEqual(['status.json version 2, this board reads 3'])
   const lines = capacityLines(capacityParts(STATUS, STATUS.at * 1000), 60)
   expect(lines[0]?.startsWith('CAPACITY  slots 2/3 · queued 1')).toBe(true)
   expect(lines.slice(1).every(l => l.startsWith(' '.repeat(10)) && !l.startsWith(' '.repeat(11)))).toBe(true)
   for (const line of lines) expect(line.length).toBeLessThanOrEqual(60)
 })
 
-const stubWorld = (on: On, agentsOut: string = JSON.stringify(AGENTS)) => {
+const MR = 'https://gitlab.com/g/p/-/merge_requests'
+const green = (name: string, msAgo: number): string =>
+  `## ${name} · ${stamp(msAgo)}\nWatch: pipeline green · sha abc1234 · 41 min · ${MR}/7\nNext: none\nDONE - pipeline green\nFOR ME - nothing new\nOPEN - nothing\nLEFT - nothing left\n\n`
+
+test('a registered watch is no session: the card runs while its name has no section, and is done after', () => {
+  const text = close('w-s1', 3 * HOUR, `watching app!7 (${MR}/7)`)
+  const story = parseStory('w', text, NOW - 3 * HOUR)
+  expect(story?.sections[0]?.next).toMatchObject({ kind: 'watching', names: ['app!7'] })
+  expect(story?.sections[0]?.links).toEqual([`${MR}/7`])
+  const of = (t: string, agents: Agent[] = []) => {
+    const parsed = parseStory('w', t, NOW - HOUR)
+    return buildSnapshot(parsed === undefined ? [] : [parsed], agents, new Map(), NOW).cards[0]
+  }
+  expect([of(text)?.state, of(text)?.why]).toEqual(['running', 'watching app!7'])
+  const idle: Agent[] = [{ kind: 'interactive', status: 'idle', name: 'w-s1', sessionId: 'w1', startedAt: NOW - 4 * HOUR }]
+  expect(of(text, idle)?.state).toBe('running')
+  const done = of(text + green('app!7', 2 * HOUR))
+  expect([done?.state, done?.why, done?.closes]).toEqual(['done', 'last close says Next: none', 2])
+  // a red: the watch's section starts the fix slice, whose close registers the next arm
+  const red = `${text}## app!7 · ${stamp(2 * HOUR)}\nWatch: pipeline red\nNext: started w-fix-1\n\n`
+  expect(of(red)?.why).toBe('w-fix-1: no session, no close')
+  expect(of(red + close('w-fix-1', HOUR, `watching app!7#2 (${MR}/7)`))?.why).toBe('watching app!7#2')
+})
+
+test('the open watches of status.json keep a story running whose last close is another repo\'s', () => {
+  const text = `${close('t-app', 3 * HOUR, `watching app!7 (${MR}/7)`)}${close('t-lib', 3 * HOUR, `watching lib!4 (${MR}/4)`)}${green('app!7', 2 * HOUR)}`
+  const parsed = parseStory('two', text, NOW - 2 * HOUR)
+  const of = (watches: CapacityStatus['watches']) => buildSnapshot(parsed === undefined ? [] : [parsed], [], new Map(), NOW, watches).cards[0]
+  expect(of([])?.state).toBe('done')
+  const arm = (name: string, story: string) => ({ ...(STATUS.watches[0] as CapacityStatus['watches'][number]), name, story })
+  expect([of([arm('lib!4', 'two')])?.state, of([arm('lib!4', 'two')])?.why]).toEqual(['running', 'watching lib!4'])
+  expect(of([arm('lib!4', 'other')])?.state).toBe('done')
+  // an arm that has its section (a red one, kept while its fix runs) is the fix session's to carry
+  expect(of([arm('app!7', 'two')])?.state).toBe('done')
+  expect(watchesOf(STATUS).map(w => w.name)).toEqual(['app!12', 'lib!9', 'lib!10'])
+  expect(watchesOf({ ...STATUS, version: 2 })).toEqual([])
+  expect(watchLines(STATUS.watches, 100)).toEqual([
+    `WATCHES   app!12 · demo · pending · armed ${at(1786699400)}`,
+    `          lib!9 · side · fixing (side-fix-1 started) · armed ${at(1786696400)}`,
+    `          lib!10 · next · waiting-base (lib!9) · armed ${at(1786697000)}`,
+  ])
+  const merging = [{ ...arm('app!7', 'two'), phase: 'merge' }]
+  expect(watchLines(merging, 100)).toEqual([`WATCHES   app!7 · two · pending (merge) · armed ${at(1786699400)}`])
+  expect(watchLines(merging, 30)).toEqual(['WATCHES   app!7 · two · pendi…'])
+  expect(watchLines([], 100)).toEqual([])
+})
+
+const stubWorld = (on: On, agentsOut: string = JSON.stringify(AGENTS), capacity: CapacityStatus = STATUS) => {
   const commands: CommandSpec[] = []
   const store: Record<string, unknown> = {}
   const files: Record<string, string> = {
@@ -353,7 +402,7 @@ const stubWorld = (on: On, agentsOut: string = JSON.stringify(AGENTS)) => {
     '/home/n/.claude/stories/draft.md': 'a prompt draft with FOR ME in it, no close section\n',
     '/home/n/.claude/session-stats/s5.json': JSON.stringify({ ctx_pct: 61, cost_usd: 141.2 }),
     '/home/n/.claude/session-stats/s1.json': '{"ctx_pct": 4',
-    '/home/n/.claude/capacity/status.json': JSON.stringify({ ...STATUS, at: NOW / 1000 }),
+    '/home/n/.claude/capacity/status.json': JSON.stringify({ ...capacity, at: NOW / 1000 }),
   }
   const mtimes: Record<string, number> = {
     'chain.md': NOW - 20 * MIN,
@@ -423,7 +472,9 @@ test('/board, /where and /forme register as immediate and answer from the stubbe
   expect(board).toMatch(/\n\* c-s3 +working +20m +app\n/)
   expect(board).toContain('  5-hour    51%  resets in 2h 14m')
   expect(board).toContain('STORIES  1 need you, 0 stalled, 1 running, 1 done')
-  expect(board).toMatch(/\n\nCAPACITY {2}slots 2\/3 · queued 1 \(next ~\d\d:\d\d\) · emulator: you, test hold until .*\n(?: {10}\S.*\n)*\nSTORIES /)
+  expect(board).toMatch(
+    /\n\nCAPACITY {2}slots 2\/3 · queued 1 \(next ~\d\d:\d\d\) · emulator: you, test hold until .*\n(?: {10}\S.*\n)*WATCHES {3}app!12 · demo · pending · armed \d\d:\d\d\n {10}lib!9 · side · fixing \(side-fix-1 started\) · armed \d\d:\d\d\n {10}lib!10 · next · waiting-base \(lib!9\) · armed \d\d:\d\d\n\nSTORIES /,
+  )
   expect(board).not.toContain('draft')
   expect(board).toMatch(
     /\n {2}chain +running .*\n {4}test queue\n {6}Login screen {5}!93 {2}iPhone 15 {2}ready to test {2}14:30\n {6}Settings toggle {2}!94 {2}Pixel 8 {4}building {7}15:10\n {6}Vehicles list\n/,
@@ -437,6 +488,14 @@ test('/board, /where and /forme register as immediate and answer from the stubbe
   const one = (await $.command.run({ ...run, command: 'forme', args: ' fin ' })).text ?? ''
   expect(one).toContain('FOR ME  the steps of fin')
   expect(one).not.toContain('Merge the branch')
+})
+
+test('/where counts a story with an open watch as running, though its last close says Next: none', async ($, on) => {
+  const watch = { ...(STATUS.watches[0] as CapacityStatus['watches'][number]), name: 'app!3', story: 'fin' }
+  stubWorld(on, JSON.stringify(AGENTS), { ...STATUS, watches: [watch] })
+  const board = (await $.command.run({ ...run, command: 'where' })).text ?? ''
+  expect(board).toContain('STORIES  1 need you, 0 stalled, 2 running, 0 done')
+  expect(board).toMatch(/\nWATCHES {3}app!3 · fin · pending · armed \d\d:\d\d\n\nSTORIES /)
 })
 
 test('a section that cannot be read says so and the rest of the board still prints', async ($, on) => {

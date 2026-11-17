@@ -89,6 +89,16 @@ class Capacity(unittest.TestCase):
     def story(self, slug, text):
         (self.claude / "stories" / f"{slug}.md").write_text(text)
 
+    def arm(self, name, story, t, **more):
+        """An open watch, as scripts/watch.py keeps it: only what a status line reads of an arm file."""
+        path = self.claude / "flowkit" / "watches" / f"{name}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "name": name, "story": story, "state": "pending", "phase": "pipeline", "sha": "1" * 40, "armed": t - 600,
+            "url": f"https://gitlab.com/g/p/-/merge_requests/{name.partition('!')[2]}", "polled": t - 60,
+            "answer": "pipeline running", "on_green": {"run": "", "prompt": ""}, "rev": 3, **more}))
+        return path
+
     def repo(self, name):
         path = self.tmp / name
         path.mkdir()
@@ -321,10 +331,19 @@ class Capacity(unittest.TestCase):
             {"name": "next-s1", "story": "next", "tree": str(lib), "prompt": "/p.md", "argv": ["/p.md"],
              "needs": ["simulator"], "left": 2, "continuation": False, "queued": t, "by": "coordinator",
              "why": "slots 2/3", "eta": t + 3000}))
+        self.arm("app!12", "demo", t)
+        self.arm("lib!9", "side", t, state="fixing", answer="pipeline failed", red={"what": "pipeline failed"},
+                 fix={"name": "side-fix-1", "state": "started", "at": t - 300, "tree": str(lib)})
+        self.arm("lib!10", "next", t, state="waiting-base", waits={"base": "lib!9", "story": "side", "branch": "s9"})
+        self.arm("lib!11", "next", t, phase="merge", sha="", polled=None, answer="")
+        (self.claude / "flowkit" / "watches" / ".lib!12.json.4242").write_text("{")  # a write caught halfway
+        (self.claude / "flowkit" / "watches" / "poller.pid").write_text("4242")
         r = self.cli("status", at=t)
         self.assertEqual(r.returncode, 0, r.stderr)
         hm = time.strftime("%H:%M", time.localtime(t))
         until = time.strftime("%H:%M", time.localtime(t + 30 * 60))
+        armed, asked = (time.strftime("%H:%M", time.localtime(t - s)) for s in (600, 60))
+        mr = "https://gitlab.com/g/p/-/merge_requests"
         self.assertEqual(r.stdout.splitlines(), [
             "slots 2/3",
             f"repo {app} · 1/1",
@@ -333,12 +352,19 @@ class Capacity(unittest.TestCase):
             f"resource emulator · held for you until {until} (test hold)",
             f"resource simulator · held by demo-s2 (demo) since {hm} (take)",
             f"queue #1 next-s1 (next) · slots 2/3 · needs simulator · queued {hm} by coordinator · "
-            f"~{time.strftime('%H:%M', time.localtime(t + 3000))}"])
+            f"~{time.strftime('%H:%M', time.localtime(t + 3000))}",
+            f"watch app!12 (demo) · pending · sha 1111111 · armed {armed} · asked {asked}: pipeline running · {mr}/12",
+            f"watch lib!10 (next) · waiting-base (lib!9) · sha 1111111 · armed {armed} · asked {asked}: pipeline running · {mr}/10",
+            f"watch lib!11 (next) · pending (merge) · armed {armed} · {mr}/11",
+            f"watch lib!9 (side) · fixing (side-fix-1 started) · sha 1111111 · armed {armed} · asked {asked}: pipeline failed · {mr}/9"])
         data = json.loads((self.claude / "capacity" / "status.json").read_text())
         self.assertEqual(data["version"], capacity.STATUS_VERSION)
         self.assertEqual((data["agents"], data["used"], data["slots"]), ("known", 2, 3))
         self.assertEqual([(c["story"], c["state"]) for c in data["chains"]], [("demo", "running"), ("side", "launching")])
         self.assertEqual({r["name"]: r["session"] for r in data["resources"]}, {"simulator": s2, "emulator": "me"})
+        self.assertEqual([(w["name"], w["state"], w["fix"], w["waits"]) for w in data["watches"]], [
+            ("app!12", "pending", None, None), ("lib!10", "waiting-base", None, "lib!9"), ("lib!11", "pending", None, None),
+            ("lib!9", "fixing", {"name": "side-fix-1", "state": "started"}, None)])
         self.assertEqual(json.loads(self.cli("status", "--json", at=t).stdout), data)
         fixture = json.loads(FIXTURE.read_text().split("\nexport default ", 1)[1])
         self.assertEqual(fixture["version"], capacity.STATUS_VERSION)
@@ -350,6 +376,29 @@ class Capacity(unittest.TestCase):
         data = json.loads((self.claude / "capacity" / "status.json").read_text())
         self.assertEqual((data["agents"], data["used"], data["chains"]), ("unknown", None, []))
         self.assertEqual(len(data["resources"]), 2)
+
+    def test_a_watch_that_opens_or_goes_rewrites_its_part_of_status_json(self):
+        path = self.claude / "capacity" / "status.json"
+        t = time.time()
+        arm = self.arm("app!12", "demo", t)
+        capacity.write_watches(t)  # no snapshot yet: a whole one
+        data = json.loads(path.read_text())
+        self.assertEqual((data["version"], data["used"], [w["name"] for w in data["watches"]]), (3, 0, ["app!12"]))
+        path.write_text(json.dumps({**data, "used": 2, "at": t - 900}))
+        arm.unlink()
+        self.agents([], "hang")
+        capacity.write_watches()
+        self.assertEqual(json.loads(path.read_text()), {**data, "used": 2, "at": t - 900, "watches": []},
+                         "the rest stays as it was, and `claude agents` is not asked")
+        self.agents([])
+        path.write_text(json.dumps({**data, "version": 2}))
+        capacity.write_watches(t)
+        self.assertEqual(json.loads(path.read_text())["version"], 3, "an older snapshot is written anew")
+
+    def test_a_watching_name_belongs_to_its_story(self):
+        self.story("demo", "## demo-s2 · 2026-11-17 15:20\nSession: " + "a" * 8 + "-5555-5555-5555-" + "5" * 12 +
+                   "\nNext: watching app!12 (https://gitlab.com/g/p/-/merge_requests/12)\n")
+        self.assertEqual(capacity.stories()[0], {"demo-s2": "demo", "app!12": "demo"})
 
     def sleeper(self):
         """A live pid that is not this process: a launch's flowkit-spawn stand-in."""
@@ -759,6 +808,19 @@ class Capacity(unittest.TestCase):
             {"t": T + 80 * M, "event": "test", "story": "epic", "item": "b", "op": "set", "before": "queued, wave 2",
              "state": "ready to test"},
             {"t": T - 2 * capacity.DAY, "event": "over-cap", "name": "before-the-window"},
+            # a watch's own lines, and the gate's for the launches it made: in no count but `watched`
+            {"t": T + 6 * M, "event": "watch", "op": "add", "name": "app!12", "story": "epic"},
+            {"t": T + 30 * M, "event": "watch", "op": "red", "name": "app!12", "story": "epic"},
+            {"t": T + 30 * M, "event": "watch", "op": "fix", "name": "app!12", "story": "epic", "fix": "epic-fix-1"},
+            {"t": T + 30 * M, "event": "over-cap", "name": "epic-fix-1", "watch": "app!12"},
+            {"t": T + 30 * M, "event": "queue", "id": 3, "name": "epic-fix-1", "needs": ["simulator"], "by": "watch",
+             "why": "busy: simulator is held by a-s1 since 12:00 (take)", "eta": T + 35 * M, "held": 60, "watch": "app!12"},
+            {"t": T + 50 * M, "event": "dequeue", "id": 3, "name": "epic-fix-1", "waited": 1200, "gap": 1200, "watch": "app!12"},
+            {"t": T + 50 * M, "event": "launch", "name": "epic-fix-2", "held": 300, "by": "watch", "watch": "app!13"},
+            {"t": T + 55 * M, "event": "watch", "op": "done", "name": "app!12", "story": "epic", "end": "armed", "minutes": 49},
+            {"t": T + 95 * M, "event": "watch", "op": "green", "name": "app!12#2", "story": "epic", "minutes": 40},
+            {"t": T + 95 * M, "event": "watch", "op": "done", "name": "app!12#2", "story": "epic", "end": "green", "minutes": 40},
+            {"t": T - 2 * capacity.DAY, "event": "watch", "op": "done", "name": "app!3", "end": "green", "minutes": 500},
         )
         usage = lambda n: {"type": "assistant", "message": {"usage": {"input_tokens": n}}}  # noqa: E731
         typed = lambda text: {"type": "user", "origin": {"kind": "human"}, "message": {"content": text}}  # noqa: E731
@@ -781,11 +843,13 @@ class Capacity(unittest.TestCase):
         self.assertEqual((data["reclaims"], data["over_cap"], data["batches"]), (1, 1, 3))
         self.assertEqual(data["idle_with_queue"], {"day": 15 + 30, "nights": {"2026-11-10": 60}})
         self.assertEqual(len(data["collisions"]), 2)
+        self.assertEqual(data["watched"], {"count": 2, "minutes": 89, "fixes": 1})
         self.assertEqual((data["sessions"], data["over_slots_minutes"]), (2, 0))
         self.assertEqual(data["coordinators"], {"epic-coord": {"2026-11-10": {
             "typed": 2, "status": 1, "compactions": 1, "growth": 50_000 + 130_000}}})
         lines = capacity.report_lines(data)
         self.assertIn("coordinator     epic-coord: 11-10 180k, 1 compacted, 2 typed (1 status)", lines)
+        self.assertEqual(lines[-2], "watched         89 min over 2 watches · 1 fix slice")
         self.assertEqual(lines[-1], "pass            batches enough · idle nights pass · ETA error pass · growth pass"
                                     " (180k epic-coord 11-10) · status asks no baseline given · collisions FAIL")
         base = capacity.report(T, T + capacity.DAY, baseline=True)

@@ -1,4 +1,4 @@
-import type { CapacityStatus, Card, CardState, Chip, Snapshot, Step, TestLine } from '../types'
+import type { CapacityStatus, Card, CardState, Chip, Snapshot, Step, TestLine, Watch } from '../types'
 
 export const DAY = 86_400_000
 // A session promised by a close has this long to come up (trust prompt, start-up) before the
@@ -22,7 +22,7 @@ export type Stats = { ctx_pct?: number | null; cost_usd?: number | null }
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 export type Ticks = Readonly<Record<string, true>>
 
-export type Next = { kind: 'started' | 'pending' | 'queued' | 'none' | 'other'; names: string[]; text: string }
+export type Next = { kind: 'started' | 'pending' | 'queued' | 'watching' | 'none' | 'other'; names: string[]; text: string }
 export type Section = {
   name: string
   at: number
@@ -47,7 +47,7 @@ const clean = (text: string): string => text.replace(/\*\*/g, '').trim()
 
 const parseNext = (rest: string): Next => {
   const text = rest.trim()
-  const named = /^(started|spawned|pending|queued)\s+(.+)$/i.exec(text)
+  const named = /^(started|spawned|pending|queued|watching)\s+(.+)$/i.exec(text)
   if (named !== null) {
     const names = (named[2] ?? '')
       .replace(/\([^)]*\)/g, '')
@@ -56,7 +56,7 @@ const parseNext = (rest: string): Next => {
       .map(n => n.trim())
       .filter(n => n !== '' && n !== 'none')
     const word = named[1]?.toLowerCase()
-    return { kind: word === 'pending' || word === 'queued' ? word : 'started', names, text }
+    return { kind: word === 'pending' || word === 'queued' || word === 'watching' ? word : 'started', names, text }
   }
   return { kind: /^none\b/i.test(text) ? 'none' : 'other', names: [], text }
 }
@@ -190,7 +190,7 @@ const chipOf = (a: Agent, stats: ReadonlyMap<string, Stats>, reporter: string): 
 const list = (names: readonly string[], max = 2): string =>
   names.length <= max ? names.join(', ') : `${names.slice(0, max).join(', ')} +${names.length - max}`
 
-const cardOf = (story: Story, chips: readonly Chip[], now: number): Card => {
+const cardOf = (story: Story, chips: readonly Chip[], now: number, arms: readonly string[]): Card => {
   const closes = story.sections.filter(s => !s.isFinal)
   const last = story.sections[story.sections.length - 1]
   const lastClose = closes[closes.length - 1]
@@ -208,6 +208,12 @@ const cardOf = (story: Story, chips: readonly Chip[], now: number): Card => {
       if (!have.has(n) && !missing.some(m => m.name === n)) missing.push({ name: n, since: s.at })
     }
   }
+  // A watch is no session: a script polls a pipeline, and its name is open until its own section is
+  // in. The open ones come from status.json, since the last close may be another repo's, or the
+  // green of the story's first watch while its second still runs.
+  const watched = [
+    ...new Set([...arms, ...(lastClose?.next.kind === 'watching' ? lastClose.next.names : [])].filter(n => !have.has(n))),
+  ]
   const stalls: string[] = []
   const starting: string[] = []
   for (const m of missing) {
@@ -236,6 +242,9 @@ const cardOf = (story: Story, chips: readonly Chip[], now: number): Card => {
   } else if (starting.length > 0) {
     state = 'running'
     why = `${list(starting)} starting`
+  } else if (watched.length > 0) {
+    state = 'running'
+    why = `watching ${list(watched)}`
   } else if (lastClose?.next.kind === 'queued') {
     state = 'running'
     why = `queued: ${list(lastClose.next.names)}, launches when a slot frees`
@@ -270,6 +279,7 @@ export const buildSnapshot = (
   agents: readonly Agent[] | undefined,
   stats: ReadonlyMap<string, Stats>,
   now: number,
+  watches: readonly Watch[] = [],
 ): Snapshot => {
   // A session named in several stories belongs to the one whose newest section names it.
   const owner = new Map<string, { story: string; at: number }>()
@@ -291,7 +301,7 @@ export const buildSnapshot = (
     } else byStory.set(story, [...(byStory.get(story) ?? []), chip])
   }
   const cards = (stories ?? [])
-    .map(s => cardOf(s, byStory.get(s.name) ?? [], now))
+    .map(s => cardOf(s, byStory.get(s.name) ?? [], now, watches.filter(w => w.story === s.name).map(w => w.name)))
     .sort((a, b) => RANK[a.state] - RANK[b.state] || b.touchedMs - a.touchedMs)
   return { at: now, cards, loose, isAgentsKnown: agents !== undefined, isStoriesKnown: stories !== undefined }
 }
@@ -417,7 +427,7 @@ export const testLines = (tests: readonly TestLine[], indent: string): string[] 
 // capacity/status.json in a few words: slots, the queue, each resource, stalled sessions. The file
 // is a snapshot written by handoff's capacity.py on every take, release, launch and drain; one older
 // than STALE_MS says when it was written. Another version than this reader knows prints just that.
-const STATUS_VERSION = 2
+const STATUS_VERSION = 3
 const STALE_MS = 5 * 60_000
 const clockOf = (seconds: number): string => {
   const d = new Date(seconds * 1000)
@@ -457,6 +467,25 @@ export const capacityLines = (parts: readonly string[], width: number): string[]
   }
   if (line !== '') lines.push(line)
   return lines.map((l, i) => (i === 0 ? head : ' '.repeat(head.length)) + l)
+}
+
+// The open watches of a status.json this board reads; of another version, none.
+export const watchesOf = (status: CapacityStatus): Watch[] => (status.version === STATUS_VERSION ? status.watches : [])
+
+// The WATCHES block of /where, under CAPACITY: one line per open watch, with what it waits for.
+export const watchLines = (watches: readonly Watch[], width: number): string[] => {
+  const head = 'WATCHES   '
+  return watches.map((w, i) => {
+    const more =
+      w.state === 'fixing' && w.fix !== null
+        ? ` (${w.fix.name} ${w.fix.state})`
+        : w.state === 'waiting-base' && w.waits !== null
+          ? ` (${w.waits})`
+          : w.phase === '' || w.phase === 'pipeline'
+            ? ''
+            : ` (${w.phase})`
+    return cut(`${i === 0 ? head : ' '.repeat(head.length)}${w.name} · ${w.story} · ${w.state}${more} · armed ${clockOf(w.armed)}`, width)
+  })
 }
 
 export const storyLines = (cards: readonly Card[], ticks: Ticks, now: number, isAll: boolean): string[] => {

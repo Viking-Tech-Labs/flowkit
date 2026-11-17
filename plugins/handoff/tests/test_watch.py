@@ -292,6 +292,20 @@ class Answers(Watch):
         self.assertEqual(self.ops(), ["add", "green", "done"])
         self.assertEqual([p.name for p in self.dir.glob("repo*")], [], "the arm's file and lock go with its section")
 
+    def test_status_json_lists_an_arm_from_its_add_to_its_end(self):
+        def listed():
+            data = json.loads((self.claude / "capacity" / "status.json").read_text())
+            return [(w["name"], w["story"], w["state"], w["sha"][:7]) for w in data["watches"]]
+        self.add()
+        self.assertEqual(listed(), [("repo!12", "st", "pending", self.pushed[:7])])
+        self.add("--check", "exit 2", "--name", "smoke")
+        self.poll(T0 + 60, self.mr("running"))
+        self.assertEqual([name for name, *_ in listed()], ["repo!12", "smoke"])
+        self.poll(T0 + 120, self.mr("success"), name="repo!12")
+        self.assertEqual([name for name, *_ in listed()], ["smoke"], "gone with its section: a board reads no stale watch")
+        self.assertEqual(self.watch("drop", "smoke", at=T0 + 180).stdout, "dropped smoke\n")
+        self.assertEqual(listed(), [])
+
     def test_the_ends_that_need_the_user(self):
         link = "https://gitlab.com/g/p/-/pipelines/7"
         for n, (answer, what, where, op) in enumerate([
