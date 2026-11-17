@@ -32,6 +32,9 @@
 #   --force                spawn even when a session of that name runs or the tree is dirty
 #   --over-cap             start a new chain even when the machine's slots are all used (the gate)
 #   --from-queue <id>      set by `capacity.py drain` for a queued launch: the gate already passed
+#   --from-watch <arm>     set by `watch.py` for a session a watch starts (a red's fix slice, an
+#                          on-green prompt): never taken for the calling session's own next slice,
+#                          its story's slot back at once, the dirty-tree refusal after the gate
 #   --dry-run              print the pick and the command, launch nothing
 #   --tmux-socket <name>   the tmux server (tmux -L); needed when not run inside tmux
 #   --tmux-session <name>  the tmux session there (default: the current one, else the first)
@@ -83,7 +86,7 @@ reporter_on="$(setting reporter || true)"
 perm="$(setting permission_mode || true)"
 
 repo="$PWD"; name=""; story=""; model=""; effort=""; submodel=""
-rc=1; single=0; pane=""; force_new=0; force=0; dry=0; prompt=""; over_cap=0; from_queue=""
+rc=1; single=0; pane=""; force_new=0; force=0; dry=0; prompt=""; over_cap=0; from_queue=""; from_watch=""
 socket="${FLOWKIT_TMUX_SOCKET:-}"; sess="${FLOWKIT_TMUX_SESSION:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -102,9 +105,10 @@ while [ $# -gt 0 ]; do
     --dry-run) dry=1; shift ;;
     --over-cap) over_cap=1; shift ;;
     --from-queue) from_queue="$2"; shift 2 ;;
+    --from-watch) from_watch="$2"; shift 2 ;;
     --tmux-socket) socket="$2"; shift 2 ;;
     --tmux-session) sess="$2"; shift 2 ;;
-    -h|--help) sed -n '2,51p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) prompt="$1"; shift ;;
   esac
@@ -235,7 +239,8 @@ done
 # Refusal 1: the new session shares this working tree; uncommitted changes mean the session
 # spawning it has not landed its work. An untracked `.claude/` is not work: EnterWorktree keeps a
 # session's worktrees under `.claude/worktrees/`, and nothing ignores them. Run again before a
-# launch is typed a second time (start).
+# launch is typed a second time (start). A watch's launch is checked once the gate let it through:
+# into a repository's one checkout it is queued behind the slice whose changes these are.
 clean_tree() {
   local dirty
   [ "$force" -eq 0 ] && [ "$single" -eq 0 ] && git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
@@ -245,7 +250,7 @@ clean_tree() {
     exit 6
   fi
 }
-clean_tree
+[ -n "$from_watch" ] || clean_tree
 
 # Refusal 2: a live session of that name, as `claude agents` lists it or as a pane title
 # (Claude shows its --name there behind a status glyph, e.g. "✳ billing-s3").
@@ -364,9 +369,11 @@ if [ "$single" -eq 0 ] && [ -z "$from_queue" ]; then
   [ "$force_new" -eq 1 ] && again+=(--new)
   [ "$force" -eq 1 ] && again+=(--force)
   [ "$driver" = tmux ] && again+=(--tmux-socket "${socket:-$(basename "${TMUX%%,*}")}" --tmux-session "$sess")
+  [ -n "$from_watch" ] && again+=(--from-watch "$from_watch")
   [ -n "$prompt_copy" ] && again+=("$prompt_copy")
   gate=(gate --pid $$ --tree "$repo" --story "$slug" --name "$name" --prompt "$prompt_copy")
   [ "$over_cap" -eq 1 ] && gate+=(--over-cap)
+  [ -n "$from_watch" ] && gate+=(--from-watch "$from_watch")
   [ "$held" -eq 0 ] || gate+=(--held "$(( $(date +%s) - held_at ))")
   [ "$dry" -eq 1 ] && gate+=(--dry-run)
   verdict=""; code=0
@@ -387,6 +394,7 @@ elif [ -n "$from_queue" ]; then
   trap give_back EXIT
 fi
 trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+[ -z "$from_watch" ] || clean_tree
 spawned() { # after the SPAWNED line: the launch's resources go to the new session
   trap - EXIT
   python3 "$cap" launched --pid $$ --name "$name" >/dev/null 2>&1 || true
@@ -465,7 +473,7 @@ sys.exit(0 if any(a.get(sys.argv[1]) == sys.argv[2] for a in json.load(sys.stdin
     [ -z "$copied" ] || rm -f "$copied"; [ -z "$shared_file" ] || rm -f "$shared_file"
     exit 0
   fi
-  story_note "> launched $name · $(date '+%Y-%m-%d %H:%M')"
+  story_note "> launched $name · $(date '+%Y-%m-%d %H:%M')${from_watch:+ · launched-by: watch $from_watch}"
   if [ "$start_reporter" -eq 1 ]; then
     stories="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/stories"; mkdir -p "$stories"
     [ -f "$stories/$slug.md" ] || printf '# %s\n' "$slug" > "$stories/$slug.md"
@@ -493,7 +501,7 @@ if [ "$dry" -eq 1 ]; then
   [ -z "$copied" ] || rm -f "$copied"; [ -z "$shared_file" ] || rm -f "$shared_file"
   exit 0
 fi
-story_note "> launched $name · $(date '+%Y-%m-%d %H:%M')"
+story_note "> launched $name · $(date '+%Y-%m-%d %H:%M')${from_watch:+ · launched-by: watch $from_watch}"
 
 # Marks a window as the story's tab. The @flowkit_born stamp comes first, in the same command: the
 # story closer (flowkit-tmux waiting) runs at every status-line redraw, and opening a window is

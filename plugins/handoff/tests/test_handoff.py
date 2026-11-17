@@ -429,6 +429,46 @@ class Handoff(unittest.TestCase):
         self.assertEqual(self.capacity_state(), ({}, [], ["take", "launch", "release"]), "taken, then given back")
         self.assertRegex((self.tmp / "claude" / "stories" / "st.md").read_text(), r"> launched s2 · ")
 
+    def test_spawn_from_a_watch_is_marked_and_reads_the_tree_after_the_gate(self):
+        """A watch's fix slice for a repository of one checkout: queued behind the slice whose
+        uncommitted work is in the tree, refused for a dirty tree only once the gate let it through."""
+        repo = self.spawn_repo()
+        (self.tmp / "flowkit" / "capacity.conf").write_text(f"[{repo}]\ncheckouts = 1\n")
+        stub = self.tmp / "bin" / "claude"
+        stub.write_text(f"#!/bin/sh\nif [ \"$1\" = agents ]; then echo '[{{\"id\":\"abc123\",\"sessionId\":\"abc12300-0000-0000-0000-000000000000\"}}]'; "
+                        f"else echo \"$@\" >> {self.calls}; echo 'backgrounded · abc123'; fi\n")
+        prompt = self.tmp / "p.md"
+        prompt.write_text("Repo: /r   Session: st-fix-1\nNeeds: none\nLeft: 0\n\nToday: the fix.\n")
+        state = self.tmp / "claude" / "capacity"
+        lease = state / "resources" / "repo-checkout.json"
+        lease.parent.mkdir(parents=True)
+        lease.write_text(json.dumps({"session": f"launch:{os.getpid()}", "name": "st-s2", "taken": time.time()}))
+        (repo / "work.txt").write_text("the running slice's\n")
+
+        def spawn(*more):
+            return subprocess.run([str(SPAWN_BIN), "--no-rc", "--repo", str(repo), "--name", "st-fix-1", "--story", "st", *more,
+                                   str(prompt)], capture_output=True, text=True, env=self.env)
+
+        self.assertEqual(spawn().returncode, 6, "any other launch is refused for the dirty tree first")
+        out = spawn("--from-watch", "repo!12")
+        self.assertEqual(out.returncode, 11, out.stderr)
+        self.assertRegex(out.stdout, r"^QUEUED #1, ~\d\d:\d\d · id=1 · busy: repo-checkout is held by st-s2 since \d\d:\d\d\n$")
+        entry = json.loads((state / "queue" / "1.json").read_text())
+        self.assertEqual((entry["watch"], entry["by"], entry["argv"][-3:-1]), ("repo!12", "watch", ["--from-watch", "repo!12"]))
+        (state / "queue" / "1.json").unlink()
+        lease.unlink()
+        out = spawn("--from-watch", "repo!12")
+        self.assertEqual(out.returncode, 6, out.stderr)
+        self.assertEqual(self.capacity_state()[:2], ({}, []), "what the gate took is given back")
+        (repo / "work.txt").unlink()
+        out = spawn("--from-watch", "repo!12")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("SPAWNED driver=background id=abc123 story=st name=st-fix-1 ", out.stdout)
+        self.assertRegex((self.tmp / "claude" / "stories" / "st.md").read_text(),
+                         r"\n> launched st-fix-1 · \d{4}-\d\d-\d\d \d\d:\d\d · launched-by: watch repo!12\n")
+        log = [json.loads(line) for line in (state / "log.jsonl").read_text().splitlines()]
+        self.assertEqual([(e["by"], e["watch"]) for e in log if e["event"] == "launch"][-1], ("watch", "repo!12"))
+
     @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
     def test_a_full_machine_queues_and_a_close_drains_it(self):
         """slots = 1, held by a live chain `other`; a new chain is queued, and the close of other-s1

@@ -499,6 +499,71 @@ class Capacity(unittest.TestCase):
             time.sleep(0.05)
         self.assertIn("Usage: flowkit-spawn", out.read_text())
 
+    def one_checkout(self):
+        """app has one checkout (`checkouts = 1`) and a device; demo-s1 is a live slice of story demo in it."""
+        app = self.repo("app")
+        self.conf.write_text(f"[{app}]\ncheckouts = 1\nresource simulator = a device check\n")
+        sid = "d" * 8 + "-1111-1111-1111-" + "1" * 12
+        self.story("demo", "> launched demo-s1\n")
+        rows = [self.row("demo-s1", sid, app, pid=os.getpid())]
+        self.agents(rows)
+        return app, rows, {"sessionId": sid, "name": "demo-s1", "cwd": str(app)}
+
+    def test_one_checkout_is_a_resource_every_launch_into_it_takes(self):
+        app, rows, me = self.one_checkout()
+        cfg = capacity.load_config(self.conf)
+        self.assertEqual((capacity.checkout(cfg, app), capacity.repo_section(cfg, app)["resources"]["app-checkout"]),
+                         ("app-checkout", "the repository's one checkout"))
+        tree = self.tmp / "wt"
+        git("-C", str(app), "worktree", "add", "-q", str(tree), "-b", "side")
+        self.assertIsNone(capacity.checkout(cfg, tree), "a worktree is not the one checkout")
+        self.assertIsNone(capacity.checkout(cfg, self.repo("lib")))
+        pid = str(self.sleeper())
+        self.assertEqual(capacity.gate([], pid, app, "demo", "demo-s1", "", [], {}), (0, "new chain"))
+        self.assertEqual(self.held(), {"app-checkout": f"launch:{pid}"}, "no prompt names it")
+        code, msg = capacity.gate([], "4301", app, "side", "side-s1", "", [], {})
+        self.assertEqual(code, capacity.QUEUED)
+        self.assertIn("busy: app-checkout is held by demo-s1", msg)
+        capacity.launched(rows, pid, "demo-s1")
+        self.assertEqual(capacity.take(rows, me["sessionId"], {"simulator"}), (0, "took simulator"),
+                         "the checkout its launch took for it is no hold-and-wait")
+
+    def test_a_watchs_launch_takes_its_storys_slot_back_and_is_nobodys_next_slice(self):
+        app, rows, sid = self.full_machine()
+        pid = str(self.sleeper())
+        self.assertEqual(capacity.gate(rows, pid, app, "demo", "demo-fix-1", self.prompt("Needs: none\nLeft: 0"), [], {},
+                                       watch="app!12"), (0, "watch launch"))
+        events = self.log_events()
+        self.assertEqual([e["event"] for e in events], ["over-cap", "launch"])
+        self.assertEqual((events[1]["by"], events[1]["watch"], events[1]["kind"]), ("watch", "app!12", "watch launch"))
+        # the poller's children carry no session, and one that did would still not be that session's next slice
+        other = rows[0]["cwd"]
+        (self.claude / "sessions").mkdir()
+        (self.claude / "sessions" / "777.json").write_text(json.dumps({"sessionId": sid, "name": "other-s1", "cwd": other}))
+        gate = ("gate", "--pid", "4302", "--tree", other, "--story", "other", "--name", "other-fix-1", "--dry-run")
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "777"}):
+            self.assertEqual(self.cli(*gate).stdout, "continuation\n")
+            self.assertEqual(self.cli(*gate, "--from-watch", "other!3").stdout, "watch launch\n")
+
+    def test_a_watchs_fix_goes_before_the_chains_next_slice_in_one_checkout(self):
+        app, rows, me = self.one_checkout()
+        self.assertEqual(capacity.take(rows, me["sessionId"], {"app-checkout"})[0], 0)  # as its launch handed it over
+        self.assertEqual(capacity.gate(rows, "4400", app, "side", "side-s1", "", ["side"], {})[0], capacity.QUEUED)
+        code, msg = capacity.gate(rows, "4401", app, "demo", "demo-fix-1", "", ["fix"], {}, watch="app!12")
+        self.assertEqual(code, capacity.QUEUED)
+        self.assertIn("busy: app-checkout is held by demo-s1", msg)
+        self.assertEqual(capacity.entries()[1]["watch"], "app!12")
+        code, msg = capacity.gate(rows, "4402", app, "demo", "demo-s2", "", ["next"], me)  # the slice closes with spawn
+        self.assertEqual(code, capacity.QUEUED)
+        self.assertIn("app-checkout goes to a watch's launch first", msg)
+        self.assertEqual(self.held(), {}, "no hand-over past the fix: the closer gave the checkout back")
+        launched = []
+        with mock.patch.object(capacity, "spawn", side_effect=lambda e: launched.append(e["name"]) or self.sleeper()):
+            capacity.drain(rows, ending={me["sessionId"]})
+            self.assertEqual(launched, ["demo-fix-1"], "before the older launch and the chain's next slice")
+            self.assertEqual([name for name, _ in self.queue()], ["side-s1", "demo-s2"])
+            self.assertEqual(capacity.drain(rows, ending={me["sessionId"]}), [], "one works in the checkout at a time")
+
     def test_an_empty_queue_drains_in_one_read(self):
         self.agents([], "hang")
         start = time.monotonic()

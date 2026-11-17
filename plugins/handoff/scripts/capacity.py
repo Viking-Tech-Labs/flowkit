@@ -101,13 +101,17 @@ def load_config(path=None):
                 print(f"capacity.conf:{n}: a check belongs under a [<repo path>] section", file=sys.stderr)
             else:
                 section["check"] = m.group(1).strip()
-        elif (m := SETTING.match(line)) and (m.group(1) in DEFAULTS if section is None else m.group(1) == "slots"):
+        elif (m := SETTING.match(line)) and (m.group(1) in DEFAULTS if section is None else m.group(1) in ("slots", "checkouts")):
             try:
                 (cfg if section is None else section)[m.group(1)] = number(m.group(2))
             except ValueError:
                 print(f"capacity.conf:{n}: not a number: {m.group(2)}", file=sys.stderr)
         else:
             print(f"capacity.conf:{n}: not understood: {line}", file=sys.stderr)
+    for repo, section in cfg["repos"].items():
+        if section.get("checkouts") == 1:
+            section["checkout"] = re.sub(r"[^A-Za-z0-9._-]", "-", os.path.basename(repo)).lstrip("-._") + "-checkout"
+            section["resources"].setdefault(section["checkout"], "the repository's one checkout")
     for repo, lim in limits(now()).items():
         section = cfg["repos"].setdefault(repo, {"resources": {}})
         section["slots"] = max(1, section.get("slots", cfg["slots"]) + lim["delta"])
@@ -126,6 +130,14 @@ def main_checkout(tree):
 def repo_section(cfg, tree):
     """The `[<repo path>]` section tree's main checkout falls under, or None."""
     return cfg["repos"].get(main_checkout(tree))
+
+
+def checkout(cfg, tree):
+    """The resource every launch into tree takes without naming it: `<repo dir>-checkout`, when tree
+    is the main checkout of a repository whose section says `checkouts = 1` (its sessions switch
+    branches in the one checkout it has, so one works there at a time). Else None."""
+    repo = main_checkout(tree)
+    return (cfg["repos"].get(repo) or {}).get("checkout") if toplevel(tree) == repo else None
 
 
 def declared(cfg):
@@ -416,6 +428,7 @@ def take(rows, sid, names, why="take", t=None):
         refresh(rows, t)
         held = leases()
         mine = {n for n, lease in held.items() if lease["session"] == sid}
+        mine -= {section.get("checkout") for section in load_config()["repos"].values()}  # its launch took it for it
         if mine - names:
             return 3, (f"holding {', '.join(sorted(mine - names))} outside the set: release it first, "
                        f"then take {','.join(sorted(mine | names))} holding nothing")
@@ -749,7 +762,7 @@ def continues(me, story, tree):
     return stories()[0].get(name) == story or bool(me.get("cwd")) and toplevel(me["cwd"]) == tree
 
 
-def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=False, t=None, held=0):
+def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=False, t=None, held=0, watch=""):
     """flowkit-spawn's gate, before it types anything: (exit code, message). A launch that opens a
     new chain on a full machine (or while liveness is unknown) is queued, as is one whose needs
     are not all free, or one that would pass an earlier waiter; a chain's own next slice never
@@ -758,7 +771,10 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
     when every need is free at once; otherwise it gives back all it holds and the launch is queued
     holding nothing, so two closers never wait on each other. A launch that passes leaves the
     launching/<pid>.json marker for its slot until `launched` re-points or gives back. held: the
-    seconds flowkit-spawn sat in a load hold first, logged so slice medians leave them out."""
+    seconds flowkit-spawn sat in a load hold first, logged so slice medians leave them out. watch:
+    the arm a watch launches this for (a red's fix slice, an on-green prompt): its story's slot is
+    back at once, logged `over-cap`, and a continuation whose closer holds a resource it waits for
+    is queued behind it, so the fix runs in a one-checkout repository before the chain's next slice."""
     t = now() if t is None else t
     cfg = load_config()
     tree = toplevel(tree)
@@ -768,10 +784,14 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
         print(f"capacity: Needs names {', '.join(sorted(stray))}, not declared in {config_path()}: ignored",
               file=sys.stderr)
         needs -= stray
+    one = checkout(cfg, tree)
+    if one:
+        needs.add(one)
     sid = me.get("sessionId")
     cont = continues(me, story, tree)
-    by = "chain" if cont else "coordinator" if me.get("name") and (
+    by = "watch" if watch else "chain" if cont else "coordinator" if me.get("name") and (
         COORD_NAME.search(me["name"]) or me["name"] in coordinators()) else "user"
+    over_cap = over_cap or bool(watch)
     with lock():
         if not dry:
             refresh(rows, t)
@@ -792,9 +812,12 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
         wanted = {n for e in waiting for n in e.get("needs", [])}
         busy = {n: leased[n] for n in needs if n in leased and not (cont and n in mine)}
         later = sorted(n for n in needs - set(leased) if n in wanted)
-        if not why and (busy or later):
+        fixes = {n for e in waiting if e.get("watch") for n in e.get("needs", [])}
+        first = sorted(needs & mine & fixes) if cont else []  # no hand-over past a watch's launch
+        if not why and (busy or later or first):
             why = "; ".join(filter(None, [busy and f"busy: {busy_line(busy)}",
-                                          later and f"{', '.join(later)} wanted by an earlier launch"]))
+                                          later and f"{', '.join(later)} wanted by an earlier launch",
+                                          first and f"{', '.join(first)} goes to a watch's launch first"]))
         if why:
             position = len(waiting) + 1
             start = eta(cfg, found, waiting, {"tree": tree, "needs": needs, "left": left, "continuation": cont,
@@ -815,17 +838,20 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
             write_json(state_dir() / "queue" / f"{seq}.json",
                        {"name": name, "story": story, "tree": tree, "prompt": prompt, "argv": argv,
                         "needs": sorted(needs), "left": left, "continuation": cont, "queued": t, "by": by,
-                        "over_cap": over_cap, "launcher": me.get("name") or "", "why": why, "eta": start})
+                        "over_cap": over_cap, "launcher": me.get("name") or "", "why": why, "eta": start,
+                        **({"watch": watch} if watch else {})})
             log("queue", t, id=seq, name=name, story=story, tree=tree, needs=sorted(needs), why=why, by=by,
-                repo=repo_of(tree), left=left, launcher=me.get("name") or "", held=held, eta=start)
+                repo=repo_of(tree), left=left, launcher=me.get("name") or "", held=held, eta=start,
+                **({"watch": watch} if watch else {}))
             write_status(rows, t)
             return QUEUED, f"QUEUED #{position}, ~{clock(start)} · id={seq} · {why}"
-        kind = "continuation" if cont else "new chain"
+        kind = "continuation" if cont else "watch launch" if watch else "new chain"
         if dry:
             return 0, f"{kind}{', takes ' + ', '.join(sorted(needs)) if needs else ''}"
         reserve(pid, tree, story, name, needs, t, sid if cont else None)
         log("launch", t, name=name, story=story, tree=tree, needs=sorted(needs), kind=kind, by=by,
-            repo=repo_of(tree), left=left, launcher=me.get("name") or "", held=held)
+            repo=repo_of(tree), left=left, launcher=me.get("name") or "", held=held,
+            **({"watch": watch} if watch else {}))
         write_status(rows, t)
     return 0, kind
 
@@ -880,9 +906,9 @@ def spawn(entry):
 
 
 def drain(rows, t=None, ending=()):
-    """Under the lock, oldest first: launches every queued entry whose slot (a continuation needs
-    none) and needs are free, unless a load hold is set. An entry never passes an earlier one that
-    waits for a slot, or for a resource it needs too. Its marker and leases are written for the
+    """Under the lock, a watch's launches first, then oldest first: launches every queued entry
+    whose slot (a continuation needs none) and needs are free, unless a load hold is set. An entry
+    never passes an earlier one that waits for a slot, or for a resource it needs too. Its marker and leases are written for the
     new flowkit-spawn's pid before the lock goes, so the next gate counts them. ending: session
     ids whose close is being recorded right now (still busy). Returns the launched entries."""
     t = now() if t is None else t
@@ -898,7 +924,7 @@ def drain(rows, t=None, ending=()):
         found = chains(rows, t, ending)
         held = set(leases())
         slot_wait, wanted = False, set()
-        for e in entries():
+        for e in sorted(entries(), key=lambda e: not e.get("watch")):
             needs = set(e.get("needs", []))
             room = e.get("continuation") or e.get("over_cap") or (found is not None and not slot_wait and full(cfg, found, e["tree"]) is None)
             if room and not needs & (held | wanted):
@@ -1487,6 +1513,7 @@ def main(argv=None):
     p.add_argument("--name", required=True)
     p.add_argument("--prompt", default="")
     p.add_argument("--over-cap", action="store_true")
+    p.add_argument("--from-watch", default="", help="the watch arm this launch is for: never this session's own")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--held", type=float, default=0, help="seconds the launch sat in a load hold first")
     p.add_argument("argv", nargs="*", help="after --: flowkit-spawn's arguments for a queued launch")
@@ -1577,7 +1604,8 @@ def main(argv=None):
         return 0
     if args.cmd == "gate":
         code, msg = gate(rows, args.pid, args.tree, args.story, args.name, args.prompt, args.argv,
-                         self_session(rows), args.over_cap, args.dry_run, held=args.held)
+                         {} if args.from_watch else self_session(rows), args.over_cap, args.dry_run, held=args.held,
+                         watch=args.from_watch)
         print(msg)
         return code
     if args.cmd == "launched":
