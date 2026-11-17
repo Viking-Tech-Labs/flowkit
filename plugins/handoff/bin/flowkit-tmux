@@ -11,8 +11,9 @@
   flowkit-tmux list [client]  numbered list of every session, waiting first; a number jumps there
   flowkit-tmux help           the cheat sheet
 
-The kit's conf calls the copy at ~/.local/bin/flowkit-tmux, which the handoff plugin keeps at
-its own version at every session start. A session is mapped to its pane through its parent
+The kit's conf calls the copy at ~/.local/bin/flowkit-tmux, which the handoff plugin moves
+forward to its own version at every session start; the copy finds the plugin's other files
+through installed_plugins.json. A session is mapped to its pane through its parent
 processes, up to the pane's shell; background sessions have no pane and are listed apart.
 """
 import contextlib

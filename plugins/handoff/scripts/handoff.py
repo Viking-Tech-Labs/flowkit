@@ -66,8 +66,10 @@ KIT = {  # the tmux kit: where each file of the plugin is copied, so a tmux.conf
     "bin/flowkit-tmux": HOME / ".local" / "bin" / "flowkit-tmux",
     "bin/flowkit-away": HOME / ".local" / "bin" / "flowkit-away",
     "bin/flowkit-usage": HOME / ".local" / "bin" / "flowkit-usage",
+    "tmux/capacity-shim.py": HOME / ".local" / "scripts" / "capacity.py",  # where a 0.8.0 tick looks
 }
 KIT_CONF = KIT["tmux/tmux.conf"]
+KIT_STAMP = CONFIG / "kit-version"  # the plugin version the kit was copied from; refresh never goes back
 AWAY_BIN = Path(__file__).resolve().parent.parent / "bin" / "flowkit-away"
 USAGE_BIN = Path(__file__).resolve().parent.parent / "bin" / "flowkit-usage"
 STATS = CLAUDE / "session-stats"
@@ -845,6 +847,20 @@ def home_short(path):
     return "~/" + str(path.relative_to(HOME)) if path.is_relative_to(HOME) else str(path)
 
 
+def kit_version(text):
+    try:
+        return tuple(int(n) for n in text.strip().split("."))
+    except (AttributeError, ValueError):
+        return None
+
+
+def plugin_version(root):
+    try:
+        return json.loads((Path(root) / ".claude-plugin" / "plugin.json").read_text())["version"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def copy_kit(root):
     for rel, dest in KIT.items():
         source = Path(root) / rel
@@ -853,6 +869,9 @@ def copy_kit(root):
             shutil.copyfile(source, dest)
         if rel.startswith("bin/"):
             dest.chmod(0o755)
+    version = plugin_version(root)
+    if version:
+        KIT_STAMP.write_text(version + "\n")
 
 
 def tmux_kit(action, root):
@@ -907,7 +926,8 @@ def prune_spawned():
 
 def refresh(root):
     """Keep an installed status line and tmux kit at the plugin's version, and prune the old prompt
-    copies. Its output reaches context, so it says nothing unless something went."""
+    copies. The kit only goes forward: a session on an older plugin leaves a newer kit alone. Its
+    output reaches context, so it says nothing unless something went."""
     prune_spawned()
     source = Path(root) / "scripts" / "statusline.py"
     try:
@@ -916,7 +936,9 @@ def refresh(root):
     except OSError:
         pass
     try:
-        if KIT_CONF.is_file():
+        installed = kit_version(KIT_STAMP.read_text()) if KIT_STAMP.is_file() else None
+        own = kit_version(plugin_version(root))
+        if KIT_CONF.is_file() and not (installed and own and installed > own):
             copy_kit(root)
     except OSError:
         pass

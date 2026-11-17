@@ -489,6 +489,51 @@ class Handoff(unittest.TestCase):
         self.assertEqual(sorted(f.name for f in store.iterdir()), ["s2.md", "s3-20261027-120000.md"])
         self.assertEqual(self.handoff("refresh", str(PLUGIN)).stdout, "")
 
+    def installed_kit(self):
+        """A sandbox HOME and config dir with the kit installed (its tmux.conf in place)."""
+        home, conf = self.tmp / "home", self.tmp / "xdg" / "flowkit"
+        conf.mkdir(parents=True)
+        (conf / "tmux.conf").write_text("installed\n")
+        self.env.update(HOME=str(home), XDG_CONFIG_HOME=str(conf.parent))
+        return home / ".local" / "bin" / "flowkit-tmux", conf / "kit-version"
+
+    def plugin_root(self, version):
+        root = self.tmp / f"root-{version}"
+        for rel in ("tmux/tmux.conf", "tmux/cheatsheet.md", "tmux/capacity-shim.py", "bin/flowkit-tmux",
+                    "bin/flowkit-away", "bin/flowkit-usage"):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(f"{rel} {version}\n")
+        (root / ".claude-plugin").mkdir(exist_ok=True)
+        (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"version": version}))
+        return str(root)
+
+    def test_refresh_copies_the_kit_forward_only(self):
+        tick, stamp = self.installed_kit()
+        def refresh(version):
+            out = self.handoff("refresh", self.plugin_root(version))
+            self.assertEqual((out.returncode, out.stdout, out.stderr), (0, "", ""))
+            return tick.read_text(), stamp.read_text()
+        self.assertEqual(refresh("0.8.1"), ("bin/flowkit-tmux 0.8.1\n", "0.8.1\n"), "no stamp: the first copy")
+        self.assertEqual(refresh("0.8.0"), ("bin/flowkit-tmux 0.8.1\n", "0.8.1\n"), "an older root leaves it alone")
+        tick.write_text("bin/flowkit-tmux 0.8.0\n")  # a pre-stamp release's refresh put its copy back
+        self.assertEqual(refresh("0.8.1"), ("bin/flowkit-tmux 0.8.1\n", "0.8.1\n"), "the same version copies again")
+        self.assertEqual(refresh("0.10.0"), ("bin/flowkit-tmux 0.10.0\n", "0.10.0\n"), "versions compare as numbers")
+
+    def test_the_kit_hands_a_0_8_0_tick_drain_to_the_installed_capacity(self):
+        """A 0.8.0 tick starts ~/.local/scripts/capacity.py: the kit puts a resolver there."""
+        tick, _ = self.installed_kit()
+        self.assertEqual(self.handoff("refresh", str(PLUGIN)).returncode, 0)
+        newest = Path(self.plugin_root("9.9.9"))
+        (newest / "scripts").mkdir()
+        (newest / "scripts" / "capacity.py").write_text("import sys\nprint(__file__, *sys.argv[1:])\n")
+        (self.tmp / "claude" / "plugins").mkdir()
+        (self.tmp / "claude" / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": {
+            "handoff@flowkit": [{"installPath": str(self.tmp / "gone")}, {"installPath": str(PLUGIN)},
+                                {"installPath": str(newest)}]}}))
+        shim = tick.parent.parent / "scripts" / "capacity.py"
+        out = subprocess.run([sys.executable, str(shim), "drain"], capture_output=True, text=True, env=self.env)
+        self.assertEqual((out.returncode, out.stdout), (0, f"{newest / 'scripts' / 'capacity.py'} drain\n"), out.stderr)
+
     def test_record_says_what_the_doorbell_did(self):
         def recorded(name):
             out = self.handoff("record", "my-story", stdin=f"## {name} · 2026-10-27 12:00\nSession: x · Repo: /r\nNext: none\n")
