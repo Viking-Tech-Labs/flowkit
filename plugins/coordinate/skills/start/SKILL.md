@@ -173,8 +173,8 @@ Coordinator: <name> · Mission: <path or "pasted"> · Updated: <date time>
   is free; the watch's green, its one fix slice or its report arrives as a section of the story
   file. Never Monitor a pipeline, and never keep a worker open for one.
 - **Status replies** read `<cap> status` with the board, and run the self-check
-  (`/coordinate:waves`, "Self-check"). Its `watch` lines list every open watch with its state,
-  when it was armed and its last answer. Never poll the queue: it drains itself.
+  (`/coordinate:waves`, "Self-check"). The `watch` lines of `<cap> status` list every open watch
+  with its state, when it was armed and its last answer. Never poll the queue: it drains itself.
 - **BLOCKED**: record it. Blocked on the user: say so plainly, with the worker's name and its
   Remote Control link.
 - **To reach a worker**, `coordinate.py workers <worker>` first. `live`: SendMessage to its name;
