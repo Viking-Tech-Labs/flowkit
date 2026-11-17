@@ -40,7 +40,8 @@ The argument is a file (`docs/plan.md`), a section of one (`docs/plan.md#Rollout
 that heading, down to the next heading of the same level), or pasted text. Pull out:
 
 1. the repos involved and the slice of work in each;
-2. the workstreams and what each waits on (what starts now, what is held until something lands);
+2. the workstreams and what each needs of another (what starts now, what starts on another's
+   pushed branch, what starts only once something is green or merged);
 3. the decisions already made, which go into every brief word for word;
 4. the open questions only the user can answer, with the workstreams they block;
 5. the quality bars and traps the source records.
@@ -53,8 +54,19 @@ coordinate from the confirmed doc, saved next to the story's other docs. Away, w
 
 ## 2. Plan the workers
 
-- One worker per workstream per repo. A workstream held until another lands, with nothing else
-  to do, starts when that lands, not now.
+- One worker per workstream per repo.
+- A workstream that needs another's pushed code does not wait for it to land: it starts on that
+  pushed branch, its Draft MR targets that branch, and it merges the base in when the base moves;
+  its brief's branch line says all three. At most two unmerged bases deep (C on B on A; a fourth
+  waits until A merges). A base that goes red is fixed in the base's story, never in the
+  dependent's: the dependent's watch waits for it (`waiting-base`).
+- "When X lands, start Y" is a watch with an on-green prompt, never a held worker. Write Y's
+  brief now; the close that registers X's watch (the message that tells X to close says so) adds
+  `--on-green <Y's brief> --repo <Y's tree> --on-green-name <Y's worker>`, with `--until merged`
+  when Y needs X merged and not only green. For an X that no worker of yours closes, register it
+  yourself, in X's pushed tree: `"$(dirname <spawn>)/flowkit-watch" add --story <slug> --mr <url>`
+  with the same flags (handoff's README, "Watches"). The watch starts Y through the gate; no
+  session waits for X.
 - Two workers in one repo get a worktree each: `git -C <repo> worktree add ../<repo>-<slug>
   -b <branch>`, and the worker starts there. Two sessions on one checkout overwrite each other.
 - The story slug (`<slug>`): short, lowercase, from the mission. Worker names
@@ -77,10 +89,12 @@ coordinate from the confirmed doc, saved next to the story's other docs. Away, w
 
 Show, before anything starts:
 
-| Worker | Repo or worktree | Workstream | Model | Effort | Held until | Brief in one line |
+| Worker | Repo or worktree | Workstream | Model | Effort | Starts | Brief in one line |
 |---|---|---|---|---|---|---|
 
-plus the board path and the questions that will go to the user. Ask with AskUserQuestion: start
+Starts: `now`; `on <branch>` for a worker that builds on another's pushed branch, with its depth
+(1 or 2); `watch <X>` for one a watch starts once X is green or merged. Plus the board path and
+the questions that will go to the user. Ask with AskUserQuestion: start
 it (recommended), change it first, or stop. **Nothing launches before a yes.** Apply edits and
 go. Away, start it and mark the plan "(auto)" on the board.
 
@@ -145,7 +159,7 @@ Coordinator: <name> · Mission: <path or "pasted"> · Updated: <date time>
 - <worker>: session <session id>, <repo or worktree>
 ```
 
-- **DONE**: update the board, start or brief what was held on it, tell the user what moved.
+- **DONE**: update the board, start what builds on its pushed branch, tell the user what moved.
   While anything is queued (`<cap> status` lists `queue` lines), tell the worker to `/handoff:close` now: an idle worker holds its slot, and its close
   starts the next launch.
 - **The test queue**: whenever an item becomes testable, or its state or ETA moves, set its line
@@ -154,8 +168,13 @@ Coordinator: <name> · Mission: <path or "pasted"> · Updated: <date time>
   never by hand: the drain writes the same file. One line per item, `item · MR · device · state ·
   ETA` (the board plugin's README, "The test queue"); `/board` and `/where` show it under the
   story.
+- **A close with `Next: watching <name>`** (a worker that pushed last: its close registered a
+  watch on the pipeline) is the board's State `watching <name>`. The worker is gone and its slot
+  is free; the watch's green, its one fix slice or its report arrives as a section of the story
+  file. Never Monitor a pipeline, and never keep a worker open for one.
 - **Status replies** read `<cap> status` with the board, and run the self-check
-  (`/coordinate:waves`, "Self-check"). Never poll the queue: it drains itself.
+  (`/coordinate:waves`, "Self-check"). Its `watch` lines list every open watch with its state,
+  when it was armed and its last answer. Never poll the queue: it drains itself.
 - **BLOCKED**: record it. Blocked on the user: say so plainly, with the worker's name and its
   Remote Control link.
 - **To reach a worker**, `coordinate.py workers <worker>` first. `live`: SendMessage to its name;

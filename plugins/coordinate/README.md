@@ -17,7 +17,7 @@ coordinate@flowkit`. It needs `handoff`, whose `flowkit-spawn` starts every work
 ## The mission
 
 A file (`docs/plan.md`), one section of it (`docs/plan.md#Rollout`), or text you paste. It must
-say which repos, which workstreams and what each waits on, what is already decided, what only you
+say which repos, which workstreams and what each needs of another, what is already decided, what only you
 can answer, and the traps. When it cannot, the coordinator asks for the real source or writes the
 mission doc itself and shows it to you first: workers are briefed from a document, never from the
 coordinator's conversation. coordinate names no issue tracker; to start from a ticket, have your
@@ -27,6 +27,12 @@ own tracker tools write it into a file first.
 
 - One worker per workstream per repo, named `<story>-<workstream>`; two in one repo get a git
   worktree each, since two sessions on one checkout overwrite each other.
+- A workstream that needs another's pushed code starts on that pushed branch instead of waiting
+  for it to land: its Draft MR targets that branch and it merges the base in when the base moves,
+  at most two unmerged bases deep. A base that goes red is fixed in the base's own story.
+- "When X lands, start Y" is a watch with an on-green prompt (handoff's README, "Watches"), never
+  a worker held idle: Y's brief is written at once, and the watch on X starts it through the gate
+  once X is green, or merged with `--until merged`.
 - Each starts through `flowkit-spawn --story <story>` with its brief as its first prompt (kept in
   `~/.claude/coordination/<story>/<worker>.md`), so it follows your `handoff` settings: the tmux
   driver puts the workers in the story's tab, the background driver starts them with `claude
@@ -45,9 +51,15 @@ own tracker tools write it into a file first.
 
 The board, `~/.claude/coordination/<story>.md`, is rewritten on every report: each workstream's
 state and last report, what waits on you, what landed, and each worker's session id. A DONE
-releases what was held on it; a BLOCKED on you names the worker and its Remote Control link. At
-the end the coordinator tells each worker to close with `/handoff:close`; closing tabs and
-stopping sessions stays your call.
+starts what builds on its pushed branch; a BLOCKED on you names the worker and its Remote Control
+link. At the end the coordinator tells each worker to close with `/handoff:close`; closing tabs
+and stopping sessions stays your call.
+
+Nobody waits for a pipeline (handoff 0.9.0). A worker that pushed last closes with a watch on its
+merge request, recorded as `Next: watching <name>`: the board's State is `watching <name>`, the
+worker's slot is free, and green, the one fix slice of a first red, or a report arrives in the
+story file. The coordinator never Monitors a pipeline; its status replies read `flowkit-capacity
+status`, which lists every open watch with its state, when it was armed and its last answer.
 
 Workers sit idle by design, waiting for the next message. In tmux they wait as long as their pane
 is open. A background session that sits idle for hours is stopped by Claude, its conversation

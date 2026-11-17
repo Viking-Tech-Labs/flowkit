@@ -88,8 +88,12 @@ when its last line does.
 
 - **A worker's DONE while anything is queued** (`<cap> status` lists `queue` lines): tell it to
   `/handoff:close` now. An idle worker holds its slot, and its close is what starts the next one.
-- **Status replies** read `<cap> status` (slots, chains, resources, the queue with its ETAs) and
-  the board. Never poll and never sleep on the queue: it drains itself.
+- **A close with `Next: watching <name>`** is the board's State `watching <name>`: a script
+  watches that pipeline (handoff's README, "Watches") and the slot is free already. Never Monitor
+  a pipeline.
+- **Status replies** read `<cap> status` (slots, chains, resources, the queue with its ETAs, and
+  a `watch` line per open watch: its state, when it was armed, its last answer) and the board.
+  Never poll and never sleep on the queue: it drains itself.
 - **A batch added mid-way**: plan it with `waves` the same way; the queue already holds what
   waits, ahead of it.
 - A `reclaim` (a holder died) or a `stalled` chain in `<cap> status`: say so in the next status
