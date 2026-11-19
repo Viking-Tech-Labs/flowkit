@@ -84,7 +84,10 @@ Plan: 3 of 7 now (A, B, C) · 2 queued (D ~16:40, E ~18:10) · 2 shed (F, G) · 
   slot.
 - The test queue (`<story>.tests.md`) is written only through `capacity.py testq`, locked and
   logged, so planned and actual ready times can be compared; queued items get their lines from
-  `waves --write` and move to `running` when they start.
+  `waves --write` and move to `running` when they start. Each item's gate (`Gate: <text>`: what
+  it waits for between green and its merge) is set at planning with `testq set --gate`, from the
+  gates the repo names in its `CLAUDE.local.md` or `CLAUDE.md`; when it names none the
+  coordinator asks once and writes the answer there.
 - At each status reply the coordinator checks its own context growth over the last 24 hours
   (`coordinate.py self --growth`); over `coordinator_growth` it says so, sheds what it can and runs
   one repo slot fewer for a while (`capacity.py limit <repo> -1`).

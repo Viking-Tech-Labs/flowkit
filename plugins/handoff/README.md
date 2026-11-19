@@ -469,7 +469,7 @@ shape it does not know, the count is unknown, never zero: nothing is reclaimed.
 | `flowkit-capacity hold simulator --for me --minutes 60` | Your test hold: no slice takes it until the minutes run out or `release --for me`; run it again to renew. |
 | `flowkit-capacity drain` | Launches what the queue holds that can start now (it also runs on its own, see below). |
 | `flowkit-capacity waves a=/Users/me/app:2:simulator b=/Users/me/lib [--story s --write]` | Plans a batch (`NAME=TREE[:SLICES[:NEEDS]]`, needs joined by `+`, in launch order): each item's wave, start and ready times, and one plan line. See "Waves" below. |
-| `flowkit-capacity testq <story> [set\|drop <item>] [--state …] [--eta HH:MM] [--mr …] [--device …] [--launch name]` | The story's test queue, `<story>.tests.md`, one line at a time under the lock, each change logged as `test`. The file goes once its last line does. `--launch` ties a line to a queued launch: its drain sets it `running` with its ready time. |
+| `flowkit-capacity testq <story> [set\|drop <item>] [--state …] [--eta HH:MM] [--mr …] [--device …] [--gate …] [--launch name]` | The story's test queue, `<story>.tests.md`, one line at a time under the lock, each change logged as `test`. The file goes once its last line does. `--gate` sets what the item waits for before it merges ("The test queue's fields" below). `--launch` ties a line to a queued launch: its drain sets it `running` with its ready time. |
 | `flowkit-capacity limit /Users/me/app -1 [--hours 12]` | The repo runs one slot fewer (never under one) for the hours given; `0` ends it. Logged as `limit`. |
 | `flowkit-capacity report [--since 7d] [--until …] [--baseline] [--against base.json] [--json]` | The numbers of a week under the gate: see "Report" below. |
 | `flowkit-capacity note collision "two installs on the simulator"` | A line for the report, from any session or by hand, when two things met on one resource. |
@@ -532,9 +532,20 @@ it a chain of its own. The plan line reads
 Plan: 1 of 3 now (a) · 1 queued (c ~16:40) · 1 shed (b) · slots 3/3 · 1 wait on your testing
 ```
 
-the last part counting the story's test-queue lines whose state says `to test`. With `--write`,
-every item that does not start now gets a test-queue line (`queued, wave 2, needs simulator`, its
-ready time) tied to its launch name.
+the last part counting the story's test-queue lines whose state says `to test`, less those whose
+gate starts `merges on green`. With `--write`, every item that does not start now gets a
+test-queue line (`queued, wave 2, needs simulator`, its ready time) tied to its launch name.
+
+**The test queue's fields.** A line is `item · MR · device · state · ETA`; a sixth field and on
+are notes, kept as written whatever `testq set` changes. The **gate** is what the item waits for
+between a green pipeline and its merge: a whole field that starts `Gate:`, set with `testq set
+<item> --gate "<text>"` (an empty text removes it). The first such field after the item counts; a
+second one stays a note, and "held at the gate" inside a sentence is no gate. The text is free and
+flowkit knows one rule about it: a gate that starts `merges on green` waits on nobody, any other
+(and a line without one) waits on you once its state says `to test`, and `device` anywhere in it
+makes it a device test. Which gates a repository has is the repository's to say, in its
+`CLAUDE.local.md` or `CLAUDE.md`; a coordinator reads them there at planning (the `coordinate`
+plugin, `/coordinate:start`).
 
 **The audit hook.** A `PreToolUse` hook on Bash (`capacity.py audit`) logs `audit` when a command
 matches a resource's `audit` pattern and the session running it does not hold that resource: the

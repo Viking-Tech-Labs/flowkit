@@ -84,6 +84,13 @@ coordinate from the confirmed doc, saved next to the story's other docs. Away, w
   local backend). With more workers than free slots, or any worker that needs a resource, plan
   the batch with `/coordinate:waves` (its "Plan the batch"): it gives each worker its wave and
   times, and sheds what needs no resource to a chain of its own.
+- The gate: what each item waits for between a green pipeline and its merge. The repo names its
+  gates in its `CLAUDE.local.md`, else its `CLAUDE.md` (`merges on green`, `device test`, `your
+  look` are examples); read them there and set each item's gate on its test-queue line now, at
+  planning: `<cap> testq <slug> set "<item>" --gate "<text>"` (`/coordinate:waves`, "The test
+  queue"). When the repo names none, ask the user once and write the answer into its
+  `CLAUDE.local.md`; away, set no gate and put the question on the board under "Waiting on the
+  user". Each worker's brief carries its item's gate.
 
 ## 3. Confirm the plan
 
@@ -166,8 +173,8 @@ Coordinator: <name> · Mission: <path or "pasted"> · Updated: <date time>
   in `${CLAUDE_CONFIG_DIR:-~/.claude}/stories/<slug>.tests.md` with `<cap> testq <slug> set
   "<item>" --mr … --device … --state … --eta HH:MM` (`/coordinate:waves`, "The test queue"),
   never by hand: the drain writes the same file. One line per item, `item · MR · device · state ·
-  ETA` (the board plugin's README, "The test queue"); `/board` and `/where` show it under the
-  story.
+  ETA`, then its notes and the `Gate: <text>` field set at planning (the board plugin's README,
+  "The test queue"); `/board` and `/where` show it under the story.
 - **A close with `Next: watching <name>`** (a worker that pushed last: its close registered a
   watch on the pipeline) is the board's State `watching <name>`. The worker is gone and its slot
   is free; the watch's green, its one fix slice or its report arrives as a section of the story

@@ -14,6 +14,9 @@ DONE MEANS: <the end state you can observe: change request open, tests green, ..
 CHAIN END: <the story's own line, word for word from `handoff.py chain-end <slug>`: what the
 story's last session leaves behind; DONE MEANS serves it, and you push only as it says. With
 `none`: no line yet; never push>
+GATE: <the item's gate, word for word from its test-queue line (`Gate: …`): what stands between a
+green pipeline and the merge, e.g. `merges on green`, `device test`, `your look`; your DONE says
+when the item is ready for it. With no gate set: `none`>
 VERIFY BEFORE SAYING DONE: <the exact commands that must pass>
 
 SCOPE

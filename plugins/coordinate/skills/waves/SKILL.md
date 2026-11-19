@@ -77,12 +77,23 @@ logs each change, which is how planned and actual ready times are measured.
 ```sh
 <cap> testq <slug> set "<item>" --mr '!93' --device "iOS sim" --state "ready to test" --eta ""
 <cap> testq <slug> set "<item>" --state building --eta 15:10
+<cap> testq <slug> set "<item>" --gate "device test"
 <cap> testq <slug> drop "<item>"
 <cap> testq <slug>
 ```
 
-A state with `to test` in it counts toward the plan line's "wait on your testing". The file goes
-when its last line does.
+A line is `item · MR · device · state · ETA`; what follows are notes, kept as written, and the
+item's **gate**, a field `Gate: <text>`: what it waits for between a green pipeline and its merge.
+Set every item's gate at planning, right after `waves` (`--write` writes only the items that wait,
+and no gate), with `testq set --gate`. Which gates a repo has is the repo's to say: read them in
+its `CLAUDE.local.md`, else its `CLAUDE.md` (`merges on green`, `device test`, `your look` are
+examples, not a list). When neither names them, ask the user once and write the answer into the
+repo's `CLAUDE.local.md`, so the next plan reads it there; away, set no gate and put the question
+on the board.
+
+A gate that starts `merges on green` waits on nobody; any other gate, and a line without one,
+counts toward the plan line's "wait on your testing" once its state has `to test` in it. `device`
+in a gate marks a device test. The file goes when its last line does.
 
 ## 5. The loop
 

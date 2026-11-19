@@ -54,12 +54,13 @@ Nothing is written outside the plugin's own store (the ticks).
 
 What you can test now, and when the rest will be ready, kept by whoever runs the story (a
 `coordinate` coordinator, or any session or script) beside the story file as
-`~/.claude/stories/<story>.tests.md`. Plain text, one line per item, five fields between ` · `:
+`~/.claude/stories/<story>.tests.md`. Plain text, one line per item, five fields between ` · `,
+then any notes and the gate:
 
 ```
 # my-story test queue
-Login screen · !93 · iPhone 15 · ready to test · 14:30
-Settings toggle · !94 · Pixel 8 · building · 15:10
+Login screen · !93 · iPhone 15 · ready to test · 14:30 · Gate: device test
+Settings toggle · !94 · Pixel 8 · building · 15:10 · on the release build · Gate: merges on green
 ```
 
 | Field | Holds |
@@ -69,10 +70,16 @@ Settings toggle · !94 · Pixel 8 · building · 15:10
 | device | where to test it (a phone, a simulator, a browser) |
 | state | free words: `ready to test`, `building`, `waiting on review`, `tested` |
 | ETA | a clock time (`14:30`) when it will be ready to test, empty once it is |
+| notes | a sixth field and on: free words, kept as written |
+| gate | `Gate: <text>`, a field of its own: what the item waits for between green and its merge (`merges on green`, `device test`, `your look`); a line without one has no gate |
 
 Blank lines and `#` lines are skipped, a leading `- ` is dropped, and a missing field stays empty.
-The writer rewrites the whole file whenever a line changes and deletes it when the queue is empty.
-`/board` lists it on the story's card under TEST QUEUE, `/where` under the story's row; a story
+The gate is the first whole field after the item that starts `Gate:`, wherever it stands; a second
+one is a note, and so is "held at the gate" inside a sentence. The writer (handoff's
+`flowkit-capacity testq`, which reads the line the same way) rewrites the whole file whenever a
+line changes and deletes it when the queue is empty. `/board` lists each line whole on the story's
+card under TEST QUEUE; `/where` puts the five fields in columns under the story's row, with a gate
+column of at most 14 characters when a line has one, and no line wider than 100 columns. A story
 without the file shows nothing.
 
 ## Capacity
