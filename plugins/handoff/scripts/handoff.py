@@ -30,6 +30,10 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py api-error | api-ok                  StopFailure and Stop hooks: the retry record and line, and
                                                  the waiter (retry-wait <session id>): after a usage limit
                                                  unless limitresume=off, after an API error with autoretry=on
+  handoff.py remind --dry-run                    what a reminder would say now (a pane parked at a start-up
+                                                 prompt, a usage-limit stop flowkit cannot continue, the
+                                                 sessions and test items waiting on the user) and why it
+                                                 would stay silent; sends nothing and keeps no state
   handoff.py usage [--json]                      the plan's usage left (bin/flowkit-usage)
   handoff.py statusline diff|install <root>      the status line that records context and cost
   handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
@@ -96,6 +100,11 @@ LOCAL = ("<command-", "<local-command-", "<bash-")  # how the lines of a /comman
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 RESETS = re.compile(r"resets (?:at )?(?:(?P<mon>[A-Za-z]{3}) (?P<day>\d{1,2}),? (?:at )?)?(?P<h>\d{1,2})(?::(?P<m>\d\d))?"
                     r"(?: ?(?P<ap>[ap]m))?(?: \((?P<tz>[^)\s]+)\))?", re.I)
+REMIND = CLAUDE / "flowkit" / "remind.json"  # what the reminders have said: {once: {key: when}, digest: {at, keys}}
+REMIND_IDLE = 10  # minutes without keyboard or mouse input after which the user is not at the computer
+REMIND_EVERY = 120  # minutes between two digests
+PARKED = CLAUDE / "flowkit" / "parked.json"  # flowkit-tmux's: the panes parked at a start-up prompt
+PARKED_FRESH = 300  # seconds after which that file says nothing: the tick that writes it has stopped
 PROMPT_LINE = re.compile(r"^[│|\s]*[>❯]\s?(.*?)[\s│|]*$")
 DIALOG = re.compile(r"enter to (?:confirm|select|continue)|esc to (?!interrupt)\w+|^\s*(?:[❯>]\s*)?\d+\.\s", re.I | re.M)
 HEADING = "WHERE TO PICK UP"
@@ -1082,6 +1091,122 @@ def ring(slug, name):
         return "none"
 
 
+def idle_seconds(now):
+    """Seconds since the user's last keyboard or mouse input: macOS's HID idle time, elsewhere the
+    newest activity of a tmux client; None when neither answers."""
+    try:
+        out = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True, timeout=10).stdout
+        found = re.search(r'"HIDIdleTime" = (\d+)', out)
+        if found:
+            return int(found[1]) / 1e9
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        seen = [int(x) for x in tmux("list-clients", "-F", "#{client_activity}").stdout.split() if x.isdigit()]
+    except (OSError, subprocess.TimeoutExpired):
+        seen = []
+    return max(0, now - max(seen)) if seen else None
+
+
+def remind_quiet(now):
+    """Why a reminder says nothing now, a few words each: reminders are off, the user is away (they
+    asked for silence) or at the computer (input in the last REMIND_IDLE minutes)."""
+    why = [] if setting("remind", "off") == "on" else ["off (remind=on in handoff.conf turns it on)"]
+    since = away_since()
+    if since:
+        why.append(f"away since {since}")
+    idle = idle_seconds(now)
+    if idle is not None and idle < REMIND_IDLE * 60:
+        why.append(f"at the computer (last input {int(idle)} s ago)")
+    return why
+
+
+def remind_found(now):
+    """What waits on the user, one (key, at once, text) each, and whether parked.json is too old to
+    say anything. At once: what Claude Code's own pushes cannot see (a pane parked at a start-up
+    prompt, a usage-limit stop flowkit cannot continue, an item turning ready for a device test).
+    The rest (a session waiting on a prompt, an item ready to test) is for the digest alone."""
+    found, stale = [], False
+    try:
+        data = json.loads(PARKED.read_text())
+        stale = now - data["at"] > PARKED_FRESH
+        for p in [] if stale else data["panes"]:
+            where = f"tab {p['tab']}, pane {p['index']}" + (f", story {p['story']}" if p.get("story") else "")
+            found.append((f"parked:{p['pane']}:{p['since']}", True, f"a pane is parked at a start-up prompt: {p['line']} ({where})"))
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    for path in sorted(RETRY.glob("*.json")):
+        rec = retry_record(path.stem)
+        if isinstance(rec, dict) and rec.get("kind") == "rate_limit" and rec.get("state") == "unreachable":
+            found.append((f"limit:{path.stem}:{rec.get('at')}", True,
+                          f"{rec.get('name') or path.stem[:8]} stopped on the usage limit and flowkit cannot continue it"
+                          + (f" (story {rec['story']})" if rec.get("story") else "")))
+    try:
+        rows = agents_json()
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        rows = []
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("status") == "waiting":
+            what = row.get("waitingFor") or "a prompt"
+            found.append((f"waiting:{row.get('sessionId') or row.get('name')}:{what}", False,
+                          f"{row.get('name') or '?'} waits on {what}"))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import capacity  # the test queue's reader and its one rule about a gate
+    for path in sorted(STORIES.glob("*.tests.md")):
+        story = path.name[:-len(".tests.md")]
+        for line in capacity.read_tests(story)[1]:
+            gate = capacity.gate_of(line)
+            if capacity.TO_TEST.search(line[3]) and not capacity.ON_GREEN.match(gate):
+                found.append((f"test:{story}:{line[0]}", bool(capacity.DEVICE.search(gate)),
+                              f"{story}: {line[0]} is ready to test" + (f" on {line[2]}" if line[2] else "")
+                              + (f" · Gate: {gate}" if gate else "")))
+    return found, stale
+
+
+def remind_state():
+    try:
+        data = json.loads(REMIND.read_text())
+    except (OSError, ValueError):
+        data = None
+    return data if isinstance(data, dict) else {}
+
+
+def remind_mark(state):
+    """Keep what a reminder has said, once it is said."""
+    REMIND.parent.mkdir(parents=True, exist_ok=True)
+    fresh = REMIND.with_suffix(".tmp")
+    fresh.write_text(json.dumps(state))
+    os.replace(fresh, REMIND)
+
+
+def remind_pass(found, stale, said, now):
+    """One look at what waits: (heading, lines, state), no lines when there is nothing to say.
+    Every REMIND_EVERY minutes the digest, everything found, unless it is the set the last look
+    of that kind saw. Else what is said at once and no reminder has said yet. The state is what
+    to keep once the lines are said: a key that is gone is forgotten, so an item that turns ready
+    again is said again, except a parked pane's while parked.json is too old to tell."""
+    keys = {key for key, _, _ in found}
+    once = said.get("once") if isinstance(said.get("once"), dict) else {}
+    once = {k: v for k, v in once.items() if k in keys or (stale and k.startswith("parked:"))}
+    digest = said.get("digest") if isinstance(said.get("digest"), dict) else {}
+    heading, lines = "Needs you now", [text for key, at_once, text in found if at_once and key not in once]
+    if now - (digest.get("at") or 0) >= REMIND_EVERY * 60:
+        if keys and keys != set(digest.get("keys") or []):
+            heading, lines = "Waiting on you", [text for _, _, text in found]
+        digest = {"at": now, "keys": sorted(keys)}
+    once.update({key: now for key, at_once, _ in found if at_once and key not in once})
+    return heading, lines, {"once": once, "digest": digest}
+
+
+def remind_dry():
+    now = time.time()
+    quiet = remind_quiet(now)
+    found, stale = remind_found(now)
+    heading, lines, _ = remind_pass(found, stale, remind_state(), now)
+    print(f"remind: silent, {'; '.join(quiet)}" if quiet else "remind: not silent")
+    print("\n".join([f"{heading}:"] + [f"- {x}" for x in lines]) if lines else "nothing to say")
+
+
 def record(story):
     slug = slugify(story)
     STORIES.mkdir(parents=True, exist_ok=True)
@@ -1407,6 +1532,8 @@ def main(argv):
             context_hook()
         except Exception:
             pass
+    elif cmd == "remind" and args == ["--dry-run"]:
+        remind_dry()
     elif cmd == "usage" and args in ([], ["--json"]):
         sys.exit(usage(*args))
     elif cmd == "wake" and len(args) == 2:

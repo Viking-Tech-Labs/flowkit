@@ -16,6 +16,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 PLUGIN = Path(__file__).resolve().parent.parent
@@ -1306,6 +1307,153 @@ class Handoff(unittest.TestCase):
         self.assertTrue(lock.exists(), "the new waiter stays beside the record")
         self.api_error("rate_limit")  # woken while limited: the stop is noted, without another line
         self.assertEqual(len([l for l in self.log() if l.startswith("> retry")]), 1)
+
+    PARKED = "a pane is parked at a start-up prompt: Accessing workspace: (tab demo, pane 2, story demo)"
+    LIMIT = "demo-s2 stopped on the usage limit and flowkit cannot continue it (story demo)"
+    WAITS = "demo-s5 waits on permission prompt"
+    LOGIN = "demo: Login is ready to test on iPhone 15 · Gate: device test"
+    COLOURS = "demo: Colours is ready to test on sim · Gate: your look (after the release)"
+    RECEIPTS = "side: Receipts is ready to test"
+
+    def idle(self, seconds):
+        """A stub `ioreg` whose HID idle time is `seconds`; None: it prints no such line (not a Mac)."""
+        stub = self.tmp / "bin" / "ioreg"
+        stub.write_text("#!/bin/sh\n" + ("" if seconds is None else f"echo '    | |   \"HIDIdleTime\" = {int(seconds * 1e9)}'\n"))
+        stub.chmod(0o755)
+
+    def park(self, now, *panes):
+        """flowkit/parked.json as the tick writes it: pane ids parked since 90 s before `now`'s first write."""
+        path = self.tmp / "claude" / "flowkit" / "parked.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"at": int(now), "panes": [
+            {"pane": p, "tab": "demo", "index": n, "story": "demo", "line": "Accessing workspace:", "since": 1000 + n}
+            for n, p in enumerate(panes, 2)]}))
+
+    def limit_record(self, sid, **fields):
+        path = self.tmp / "claude" / "flowkit" / "retry" / f"{sid}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"kind": "rate_limit", "state": "unreachable", "at": 100.5, **fields}))
+
+    def remind_world(self, now):
+        """Reminders on, nobody at the computer, and one of everything a reminder reads beside what
+        it leaves out: a limit stop flowkit still waits on, an API error, a busy session, an item
+        that merges on green, one still building, a line of prose."""
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp)
+        self.handoff("conf", "remind", "on")
+        self.idle(3600)
+        self.park(now, "%4")
+        self.limit_record("s-unreachable", name="demo-s2", story="demo")
+        self.limit_record("s-waiting", name="demo-s3", state="waiting")
+        self.limit_record("s-error", name="demo-s4", kind="server_error")
+        self.agents([{"name": "demo-s5", "sessionId": "s5", "status": "waiting", "waitingFor": "permission prompt"},
+                     {"name": "demo-s6", "sessionId": "s6", "status": "busy"}, "noise"])
+        self.stories = self.tmp / "claude" / "stories"
+        self.stories.mkdir()
+        (self.stories / "demo.tests.md").write_text(
+            "# demo test queue\n"
+            "Login · !1 · iPhone 15 · ready to test ·  · Gate: device test\n"
+            "Fonts · !2 · sim · ready to test ·  · Gate: merges on green\n"
+            "Colours · !3 · sim · ready to test · Gate: your look (after the release)\n"
+            "Maps · !4 · Pixel 8 · building · 15:00 · Gate: device test\n"
+            "A sentence that names no field\n")
+        (self.stories / "side.tests.md").write_text("Receipts · !9 ·  · ready to test\n")
+
+    def test_remind_dry_run_says_what_waits_and_sends_nothing(self):
+        self.remind_world(time.time())
+        r = self.handoff("remind", "--dry-run")
+        self.assertEqual(r.stdout.splitlines(), ["remind: not silent", "Waiting on you:"] + [
+            f"- {x}" for x in (self.PARKED, self.LIMIT, self.WAITS, self.LOGIN, self.COLOURS, self.RECEIPTS)])
+        self.assertEqual(self.handoff("remind", "--dry-run").stdout, r.stdout, "a dry run keeps no state: the same again")
+        self.assertFalse((self.tmp / "claude" / "flowkit" / "remind.json").exists())
+        self.assertFalse(self.calls.exists(), "nothing typed, rung or started")
+        self.assertEqual(self.handoff("remind").returncode, 1, "sending is not built yet")
+
+    def test_remind_is_silent_when_off_away_or_at_the_computer(self):
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp)
+        first = lambda: self.handoff("remind", "--dry-run").stdout.splitlines()
+        self.idle(3600)
+        self.assertEqual(first(), ["remind: silent, off (remind=on in handoff.conf turns it on)", "nothing to say"])
+        self.handoff("conf", "remind", "on")
+        self.assertEqual(first()[0], "remind: not silent")
+        self.idle(599)
+        self.assertEqual(first()[0], "remind: silent, at the computer (last input 599 s ago)")
+        self.idle(600)
+        self.assertEqual(first()[0], "remind: not silent", "ten minutes without a key or the mouse: not at the computer")
+        self.flag.write_text("2026-11-19 23:10\n")
+        self.idle(5)
+        self.assertEqual(first()[0], "remind: silent, away since 2026-11-19 23:10; at the computer (last input 5 s ago)")
+        self.flag.unlink()
+        # not a Mac: the newest tmux client activity stands in, and no answer at all is not "at the computer"
+        self.idle(None)
+        self.assertEqual(first()[0], "remind: not silent")
+        (self.tmp / "bin" / "tmux").write_text(
+            f"#!/bin/sh\n[ \"$1\" = list-clients ] && printf '%s\\n' {int(time.time()) - 4000} {int(time.time()) - 30}\n")
+        self.assertRegex(first()[0], r"^remind: silent, at the computer \(last input 3\d s ago\)$")
+
+    def test_remind_says_at_once_once_and_the_digest_only_when_the_set_changed(self):
+        T, H = time.time(), 3600
+        self.remind_world(T)
+        second = self.PARKED.replace("pane 2", "pane 3")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            loader = importlib.machinery.SourceFileLoader("flowkit_handoff_remind", str(HANDOFF))
+            handoff = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+            loader.exec_module(handoff)
+
+            def look(now, panes=("%4", "%5"), mark=True):
+                if panes is not None:
+                    self.park(now, *panes)  # the tick writes it again at every run
+                found, stale = handoff.remind_found(now)
+                heading, lines, state = handoff.remind_pass(found, stale, handoff.remind_state(), now)
+                if mark:
+                    handoff.remind_mark(state)
+                return (heading, lines) if lines else None
+
+            everything = [self.PARKED, self.LIMIT, self.WAITS, self.LOGIN, self.COLOURS, self.RECEIPTS]
+            self.assertEqual(look(T, ["%4"]), ("Waiting on you", everything), "the first look is a digest")
+            self.assertIsNone(look(T + 60, ["%4"]), "said once")
+            self.assertEqual(look(T + 120), ("Needs you now", [second]), "a second pane parks: that one alone, at once")
+            self.assertIsNone(look(T + 180))
+            # what was found but not kept as said (a silent pass, a push that did not arrive) is still to say
+            self.limit_record("s-zz", name="demo-s7", at=200)
+            other = "demo-s7 stopped on the usage limit and flowkit cannot continue it"
+            self.assertEqual(look(T + 200, mark=False), ("Needs you now", [other]))
+            self.assertEqual(look(T + 210), ("Needs you now", [other]))
+            self.assertIsNone(look(T + 220))
+            # a session that waits and an item with another gate never go at once: they wait for the digest
+            self.agents([{"name": "demo-s5", "sessionId": "s5", "status": "waiting", "waitingFor": "permission prompt"},
+                         {"name": "demo-s8", "sessionId": "s8", "status": "waiting"}])
+            self.assertIsNone(look(T + 300))
+            # two hours after the last digest: all of it, since the set is not the one that digest saw
+            grown = [self.PARKED, second, self.LIMIT, other, self.WAITS, "demo-s8 waits on a prompt",
+                     self.LOGIN, self.COLOURS, self.RECEIPTS]
+            self.assertIsNone(look(T + 2 * H - 1))
+            self.assertEqual(look(T + 2 * H), ("Waiting on you", grown))
+            self.assertIsNone(look(T + 4 * H + 1), "the same set two hours on: no digest")
+            (self.stories / "side.tests.md").unlink()
+            self.assertIsNone(look(T + 4 * H + 60), "a change between two digests waits for the next")
+            self.assertEqual(look(T + 6 * H + 2), ("Waiting on you", grown[:-1]))
+            # an item that leaves ready and turns ready again is said again, at once
+            queue = self.stories / "demo.tests.md"
+            ready = queue.read_text()
+            queue.write_text(ready.replace("Login · !1 · iPhone 15 · ready to test", "Login · !1 · iPhone 15 · tested"))
+            self.assertIsNone(look(T + 6 * H + 60))
+            queue.write_text(ready)
+            self.assertEqual(look(T + 6 * H + 120), ("Needs you now", [self.LOGIN]))
+            # the tick stops (no tmux client): parked.json goes stale and says nothing, and its panes are
+            # not said again when it runs again
+            self.assertIsNone(look(T + 6 * H + 120 + 301, panes=None))
+            self.assertNotIn("parked:%4:1002", {key for key, _, _ in handoff.remind_found(T + 6 * H + 500)[0]})
+            self.assertIsNone(look(T + 6 * H + 600))
+            # nothing waits: no digest, and what waits again later is a change
+            queue.unlink()
+            self.agents([])
+            shutil.rmtree(self.tmp / "claude" / "flowkit" / "retry")
+            self.assertIsNone(look(T + 8 * H + 10, []))
+            self.agents([{"name": "demo-s5", "sessionId": "s5", "status": "waiting", "waitingFor": "permission prompt"}])
+            self.assertIsNone(look(T + 9 * H, []))
+            self.assertEqual(look(T + 10 * H + 20, []), ("Waiting on you", [self.WAITS]))
+            state = json.loads((self.tmp / "claude" / "flowkit" / "remind.json").read_text())
+            self.assertEqual(state, {"once": {}, "digest": {"at": T + 10 * H + 20, "keys": ["waiting:s5:permission prompt"]}})
 
 
 if __name__ == "__main__":
