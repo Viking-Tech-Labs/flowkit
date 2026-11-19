@@ -36,7 +36,8 @@ your phone. Two drivers, set once with `/handoff:setup`. The tmux driver:
   two sessions on one working tree overwrite each other's work (an untracked `.claude/`, where
   EnterWorktree keeps a session's worktrees, does not count);
 - it waits until `claude agents` lists the new session and prints its Remote Control link; a
-  session that does not come up in 15 seconds is most often waiting at a folder-trust prompt;
+  session that does not come up in 15 seconds is most often waiting at a folder-trust prompt,
+  and a pane that sits at one is reported with the prompt's first line (see "Start-up prompts");
 - a claude that exits at start-up (a bad flag, a broken install: within those 15 seconds the
   pane is a bare shell again and nothing is listed) gets the launch typed once more into the
   same pane, after the same refusals, with `warning: session '<name>' exited at start-up in
@@ -94,6 +95,7 @@ so an update or an uninstall keeps them, and readable by the scripts that run ou
 | `autoclose` | `off` | `on` lets the tmux kit's status-bar tick close a finished story's tab on its own (see "The tmux kit"). `/handoff:setup` offers it. |
 | `autoretry` | `off` | `on` lets a session an API error stopped carry on by itself while you are away (see "API errors"). `/handoff:setup` offers it. |
 | `limitresume` | `on` | `off` leaves a session that a usage limit stopped where it is; by default it is continued after the limit resets (see "Usage limits"). |
+| `chrome` | empty | `on` never passes `--no-chrome` to a spawned session. Empty passes it only while Claude Code's Chrome question has never been answered on this machine (see "Start-up prompts"). |
 | `chain_end` | `mr-ready` | What a story's chain ends with, proposed when its first prompt is drafted (see "Where a chain ends"): `branch`, `draft-mr`, `mr-ready` or `merge`. `/handoff:setup` offers it. |
 | `report_to` | `off` | `on` writes `Report-to: <the launching session>` into the brief of a helper (`/handoff:spawn` with a prompt, or a close's review or investigation beside the chain), so its close sends the verdict back (see "A helper reports back"); a name sends every helper's verdict to that session. `/handoff:setup` offers it. |
 
@@ -115,7 +117,8 @@ every redraw that falls in a new second, not every 15 seconds. Put your own chan
 Sessions started in the background have no pane and are not counted; `prefix a` lists them.
 
 The tab's word is its most urgent session's state, in this order: **needs you** (a question or a
-permission), **error** (the last turn failed on an API error), **limit** (it stopped on a usage
+permission, or a pane left at a start-up prompt, see "Start-up prompts"), **error** (the last turn
+failed on an API error), **limit** (it stopped on a usage
 limit and waits for the reset, see "Usage limits"), **stalled** (idle 15 minutes or
 more, transcript and forks untouched, no close recorded), **running**, **watching** (closed, but a
 watch or background task still runs; also a story with an open `flowkit-watch` and nothing more
@@ -261,6 +264,47 @@ The record (`~/.claude/flowkit/retry/<session id>.json`) keeps what the waiter k
 `due`, `continues`, a `state` (`waiting`, `continued`, `moved`, `native`, `unreachable`, or what is
 in the way: `not idle`, `copy mode`, `draft`, `dialog`, `no prompt box`), and the session's status
 and bottom pane rows as it stopped and at rest.
+
+## Start-up prompts
+
+New in 0.10.0. Claude Code can ask a question before a session exists: whether you trust the
+folder, whether to use Chrome by default. A spawned pane
+that gets one sits there unseen: `claude agents` lists no session for it, so no tab says `needs
+you` and nothing pushes to your phone. flowkit shows such a pane and never answers it: what a
+start-up prompt asks is yours to decide.
+
+**What is detected.** A dialog is a screen whose bottom 8 rows carry its key hints (`Enter to
+confirm`, `Enter to select`, `Enter to continue`, `Esc to cancel` or any other `Esc to …` but
+`esc to interrupt`). Its first line, the first row with a letter below the last rule row above
+the hints (`Accessing workspace:`, `Claude will use your Chrome browser by default …`), is what
+every report carries. A prompt that shows no such hints is not recognised.
+
+- `flowkit-spawn`: a pane where no session came up in the 15 seconds and whose screen ends on a
+  dialog gets `warning: session '<name>' is parked at a start-up prompt in <pane> (<first
+  line>); answer it in the pane` instead of the plain warning, `parked=<first line>` at the end of
+  the `SPAWNED` line, and `> parked <name> · <time> · <first line>` in the story file. The close
+  that launched it puts the prompt, the tab and the slot under FOR ME.
+- The tmux kit's tick: a pane that runs claude with no session listed for it, its screen ending
+  on a dialog for a minute (since `flowkit-spawn` typed the launch, or since the tick first saw
+  the dialog), is marked like a session that waits on you: `NEEDS YOU` on the pane's border, the
+  tab's `needs you`, a count in **⚑ n need you**, and a row in `prefix a` with the dialog's first
+  line as its name. A claude pane with no dialog on it (`claude agents`, a picker, a `-p` job) is
+  left alone, and the mark goes when the dialog does.
+- `~/.claude/flowkit/parked.json` lists those panes while they wait: `at` (when the tick last
+  wrote it) and `panes`, each with `pane`, `tab`, `index`, `story` (empty outside a story tab),
+  `line` and `since`. The tick writes it again at every run and removes it with the last pane; a
+  file older than 5 minutes is a tick that stopped (no tmux client attached) and is read as
+  empty. The [`board`](../board/README.md) turns the story's card to NEEDS YOU from it.
+
+**What is prevented.** One prompt can be skipped without deciding anything for you. Until you
+have answered Claude Code's Chrome question once (`claudeInChromeDefaultEnabled` in
+`~/.claude.json`), every new session asks it; `flowkit-spawn` then starts its sessions with
+`--no-chrome`, so they come up without the question and without Chrome, and the question waits
+for a session you start yourself. The flag is passed only when `claude --help` lists it (asked
+once for each Claude Code version, kept in `~/.claude/flowkit/no-chrome`) and never once you
+have answered, whatever the answer. `chrome=on` in `handoff.conf` (`handoff.py conf chrome on`)
+leaves it out always, for chains that use Chrome on a machine where the question is still open:
+answer it once in a session of your own first.
 
 ## Keeping the computer awake
 
