@@ -38,6 +38,7 @@ class Labels(unittest.TestCase):
         self.ft.run = self.run_stub
         self.rows, self.pane_list, self.windows, self.writes = [], [], {}, []
         self.later, self.listed, self.asked = None, 0, 0  # a second pane list, served from the second list-panes on
+        self.screens = {}  # pane id → what capture-pane shows
 
     def run_stub(self, *cmd):
         if cmd[:2] == ("claude", "agents"):
@@ -49,6 +50,8 @@ class Labels(unittest.TestCase):
             self.listed += 1
             panes = self.later if self.later is not None and self.listed > 1 else self.pane_list
             return "".join(SEP.join(p) + "\n" for p in panes)
+        if cmd[:2] == ("tmux", "capture-pane"):
+            return self.screens.get(cmd[-1], "")
         if cmd[:2] == ("tmux", "list-windows"):
             return "".join(SEP.join([wid, "", label]) + "\n" for wid, label in self.windows.items())
         self.writes.append(cmd[1:])
@@ -60,10 +63,10 @@ class Labels(unittest.TestCase):
         self.wid = wid
         self.hold = hold
 
-    def pane(self, pid, n, cmd, born=""):
+    def pane(self, pid, n, cmd, born="", parked=""):
         slug = "" if self.story == "adhoc" else self.story
         self.pane_list.append([pid, f"%{n}", "work", self.wid, "1", "w", str(n), cmd, "", self.story, slug, self.hold, "",
-                               born])
+                               born, parked])
 
     def session(self, n, status, live=None, idle_for=0, closed=False, retry=False, touched=None, name=""):
         """A claude pane in the current window, its agents row and, optionally, its sessions file."""
@@ -190,6 +193,149 @@ class Labels(unittest.TestCase):
     def test_a_label_goes_when_its_sessions_do(self):
         self.window("@1", "st", label="running")
         self.assertIsNone(self.label("@1"))
+
+
+# Claude Code's folder-trust prompt as a pane shows it: a rule row, the text, the options, the key hints.
+TRUST = "\n" + "─" * 120 + """
+ Accessing workspace:
+
+ /Users/me/repo
+
+ Quick safety check: Is this a project you created or one you trust? If not, take a moment to
+ review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+""" + "\n" * 20
+CHROME = """  Claude will use your Chrome browser by default — navigating sites, filling forms, and capturing screenshots.
+  ❯ No, keep browser tools off
+    Yes, use my browser
+  Enter to confirm · Esc to keep browser tools off
+"""
+SESSIONS = """ 3 sessions
+
+ ❯ demo-s1   working   2m
+   demo-s2   idle      1h
+"""
+WORKING = """⏺ Reading the plan.
+
+✻ Working… (12s · esc to interrupt)
+
+""" + "─" * 120 + "\n❯ \n" + "─" * 120 + "\n  ⏵⏵ auto mode on\n"
+
+
+class Parked(Labels):
+    """A claude pane no session is listed for, its screen ending on a dialog for a minute: a start-up
+    prompt nobody answered. The pane waits on the user, its tab says `needs you`, and
+    flowkit/parked.json lists it while it does."""
+
+    def setUp(self):
+        super().setUp()
+        self.window("@1", "st")
+        self.now = int(time.time())
+        self.file = self.tmp / "flowkit" / "parked.json"
+
+    def tick(self):
+        """One tick: what it printed and the tmux options it wrote, one tuple each."""
+        self.writes.clear()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.ft.waiting()
+        sets, cmd = [], []
+        for arg in [a for args in self.writes for a in (*args, ";")]:
+            if arg == ";":
+                sets.append(tuple(cmd))
+                cmd = []
+            else:
+                cmd.append(arg)
+        return out.getvalue(), sets
+
+    def test_a_dialog_is_a_screen_that_ends_on_key_hints(self):
+        first = self.ft.dialog
+        self.assertEqual(first(TRUST.splitlines()), "Accessing workspace:")
+        self.assertEqual(first(CHROME.splitlines()), CHROME.splitlines()[0].strip()[:80])
+        self.assertEqual(first(SESSIONS.splitlines()), "", "a list has no key hints")
+        self.assertEqual(first(WORKING.splitlines()), "", "a session at work")
+        self.assertEqual(first((TRUST.rstrip() + "\n" + "a reply\n" * 8).splitlines()), "",
+                         "hints above the bottom 8 rows are quoted text")
+        self.assertEqual(first([]), "")
+
+    def test_a_start_up_prompt_needs_you_once_it_has_stood_a_minute(self):
+        self.pane("900", 1, "2.1.328", born=str(self.now - 20))
+        self.screens["%1"] = TRUST
+        out, sets = self.tick()
+        self.assertEqual(out, "", "a launch 20 s old may still be answered")
+        self.assertEqual([s[:5] for s in sets], [("set-option", "-p", "-t", "%1", "@flowkit_parked")], "first seen")
+        self.assertFalse(self.file.exists())
+
+        self.pane_list[0][14] = str(self.now - 61)
+        out, sets = self.tick()
+        self.assertIn("⚑ 1 needs you", out)
+        self.assertEqual(sets, [("set-option", "-p", "-t", "%1", "@flowkit_state", "waiting"),
+                                ("set-option", "-w", "-t", "@1", "@flowkit_wait", "1"),
+                                ("set-option", "-w", "-t", "@1", "@flowkit_tab", "needs you")])
+        listed = json.loads(self.file.read_text())
+        self.assertAlmostEqual(listed["at"], self.now, delta=5)
+        self.assertEqual(listed["panes"], [{"pane": "%1", "tab": "w", "index": "1", "story": "st",
+                                            "line": "Accessing workspace:", "since": self.now - 61}])
+
+        self.pane_list[0][8], self.windows["@1"] = "waiting", "needs you"
+        out, sets = self.tick()
+        self.assertIn("⚑ 1 needs you", out)
+        self.assertEqual([s for s in sets if "@flowkit_wait" not in s], [], "marked once, not again at every tick")
+        self.assertTrue(self.file.exists())
+
+        # answered: the session comes up, claude agents lists it
+        self.screens["%1"] = WORKING
+        self.rows.append({"kind": "interactive", "pid": 900, "status": "busy", "name": "st-s2"})
+        out, sets = self.tick()
+        self.assertEqual(out, "")
+        self.assertIn(("set-option", "-p", "-u", "-t", "%1", "@flowkit_parked"), sets)
+        self.assertIn(("set-option", "-p", "-t", "%1", "@flowkit_state", "working"), sets)
+        self.assertIn(("set-option", "-w", "-t", "@1", "@flowkit_tab", "running"), sets)
+        self.assertFalse(self.file.exists(), "the file drops a pane that no longer waits")
+
+    def test_a_launch_stamped_a_minute_ago_needs_you_at_first_sight(self):
+        self.window("@2")  # no story: the pane and the count, no tab word
+        self.pane("900", 1, "2.1.328", born=str(self.now - 61))
+        self.screens["%1"] = CHROME
+        out, sets = self.tick()
+        self.assertIn("⚑ 1 needs you", out)
+        self.assertIn(("set-option", "-p", "-t", "%1", "@flowkit_state", "waiting"), sets)
+        self.assertNotIn("@flowkit_tab", [s[4] for s in sets])
+        self.assertEqual(json.loads(self.file.read_text())["panes"][0]["story"], "")
+
+    def test_a_claude_pane_with_no_dialog_on_it_is_left_alone(self):
+        self.pane("900", 1, "2.1.328", born=str(self.now - 3600))  # `claude agents`, a picker, a `-p` job
+        self.screens["%1"] = SESSIONS
+        self.pane("901", 2, "2.1.328", born=str(self.now - 3600))  # a session claude agents has not listed yet
+        self.screens["%2"] = WORKING
+        self.assertEqual(self.tick(), ("", []))
+        self.assertFalse(self.file.exists())
+
+    def test_a_pane_used_again_starts_from_nothing(self):
+        self.pane("900", 1, "zsh", parked=str(self.now - 3600))  # its claude exited at the prompt
+        self.screens["%1"] = TRUST  # still on the screen, above the shell's prompt
+        self.file.write_text(json.dumps({"at": self.now - 10, "panes": [{"pane": "%1"}]}))
+        out, sets = self.tick()
+        self.assertEqual((out, sets), ("", [("set-option", "-p", "-u", "-t", "%1", "@flowkit_parked")]))
+        self.assertFalse(self.file.exists())
+        self.pane_list[0][7], self.pane_list[0][14] = "2.1.328", ""  # a claude started there by hand
+        out, sets = self.tick()
+        self.assertEqual(out, "", "its prompt is new: a minute from now")
+        self.assertEqual([s[4] for s in sets], ["@flowkit_parked"])
+
+    def test_the_list_shows_a_parked_pane_among_those_that_wait(self):
+        self.pane("900", 1, "2.1.328", born=str(self.now - 61))
+        self.screens["%1"] = TRUST
+        self.ft.input = lambda prompt="": "1"
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.ft.list_sessions()
+        self.assertRegex(out.getvalue(), r"\n  1   work:w\.1 +Accessing workspace: +NEEDS YOU \(start-up\) +0m\n")
+        self.assertEqual(self.writes[-1], ("switch-client", "-t", "%1"), "its number jumps there")
 
 
 class Cache(Labels):

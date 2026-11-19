@@ -46,9 +46,10 @@
 #       10 claude exited twice at start-up (tmux: the launch is typed once more when the pane is
 #       a bare shell again within the 15 s; its output is in the pane) · 11 queued by the gate
 #       (see "The gate" below; its one line: QUEUED #<n>, ~<HH:MM> · id=<id> · <why>)
-# Last lines, machine-readable (try=2 when the launch was typed a second time):
-#   REPORTER pane=<n> id=<%id> tab=<tab> name=<slug>-report rc=<url|pending> try=<1|2>   (reporter only)
-#   SPAWNED pane=<n> id=<%id> tab=<tab> story=<slug> name=<name> rc=<url|pending> prompt=<file> created=<0|1> try=<1|2>
+# Last lines, machine-readable (try=2 when the launch was typed a second time; parked=, to the
+# line's end, only when the pane sits at a start-up prompt after the 15 s: its first line):
+#   REPORTER pane=<n> id=<%id> tab=<tab> name=<slug>-report rc=<url|pending> try=<1|2> [parked=<line>]   (reporter only)
+#   SPAWNED pane=<n> id=<%id> tab=<tab> story=<slug> name=<name> rc=<url|pending> prompt=<file> created=<0|1> try=<1|2> [parked=<line>]
 # background driver, <id> being the id `claude attach`, `logs` and `stop` take:
 #   REPORTER driver=background id=<id> name=<slug>-report rc=<url|pending>   (reporter only)
 #   SPAWNED driver=background id=<id> story=<slug> name=<name> rc=<url|pending> prompt=<file>
@@ -108,7 +109,7 @@ while [ $# -gt 0 ]; do
     --from-watch) from_watch="$2"; shift 2 ;;
     --tmux-socket) socket="$2"; shift 2 ;;
     --tmux-session) sess="$2"; shift 2 ;;
-    -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) prompt="$1"; shift ;;
   esac
@@ -568,11 +569,14 @@ fi
 # bare shell again within the 15 s with no session of the name listed means claude exited at
 # start-up, so the launch is typed once more into that pane, after refusals 1 and 2 pass again;
 # a second exit is exit 10, the output left in the pane. A pane still running something unlisted
-# at 15 s (a prompt, a slow start) gets the warning, never a second launch. Never types
+# at 15 s (a prompt, a slow start) gets the warning, never a second launch; when its screen ends
+# on a dialog (`flowkit-tmux dialog`) the warning, the story file and `parked` carry the dialog's
+# first line. A dialog is never answered here: what it asks is the user's to decide. Never types
 # /remote-control: with the flag passed that opens the Remote Control panel, which holds back
 # background-task results while open.
 type_launch() { # pane command
-  tm set-option -p -t "$1" @flowkit_born "$(date +%s)" # the story closer leaves a starting pane alone
+  # the story closer leaves a starting pane alone; a pane used again is not parked at its last session's prompt
+  tm set-option -p -t "$1" @flowkit_born "$(date +%s)" \; set-option -p -u -t "$1" @flowkit_parked
   tm send-keys -t "$1" C-u # anything half-typed would prefix the command
   tm send-keys -t "$1" "cd '$repo' && $2" Enter
 }
@@ -613,7 +617,16 @@ start() { # pane command session-name
       [ -n "$rcurl" ] && break
     done
   fi
-  [ "$up" -eq 1 ] || echo "warning: no session '$3' came up in $1 within 15s; check the pane (a folder trust prompt?)" >&2
+  parked=""
+  if [ "$up" -eq 0 ]; then
+    parked="$(tm capture-pane -p -t "$1" 2>/dev/null | "$me/bin/flowkit-tmux" dialog 2>/dev/null || true)"
+    if [ -n "$parked" ]; then
+      echo "warning: session '$3' is parked at a start-up prompt in $1 ($parked); answer it in the pane" >&2
+      story_note "> parked $3 · $(date '+%Y-%m-%d %H:%M') · $parked"
+    else
+      echo "warning: no session '$3' came up in $1 within 15s; check the pane (a folder trust prompt?)" >&2
+    fi
+  fi
   if [ "$rc" -eq 0 ]; then rcurl=off; else rcurl="${rcurl:-pending}"; fi
 }
 
@@ -626,8 +639,8 @@ if [ -n "$rpane" ]; then
   rprompt="$store/${slug}-report-${stamp}.md"
   sed -e "s/<slug>/$slug/g" "$(dirname "$0")/../scripts/reporter.md" > "$rprompt"
   start "$rpane" "clear; claude ${base}--model sonnet --name '$slug-report' \"\$(cat $rprompt)\"" "$slug-report"
-  echo "REPORTER pane=$(tm display-message -p -t "$rpane" '#{pane_index}') id=$rpane tab=$tab name=$slug-report rc=$rcurl try=$try"
+  echo "REPORTER pane=$(tm display-message -p -t "$rpane" '#{pane_index}') id=$rpane tab=$tab name=$slug-report rc=$rcurl try=$try${parked:+ parked=$parked}"
 fi
 start "$pane" "$launch" "$name"
-echo "SPAWNED pane=$(tm display-message -p -t "$pane" '#{pane_index}') id=$pane tab=$tab story=$slug name=$name rc=$rcurl prompt=${prompt_copy:--} created=$created try=$try"
+echo "SPAWNED pane=$(tm display-message -p -t "$pane" '#{pane_index}') id=$pane tab=$tab story=$slug name=$name rc=$rcurl prompt=${prompt_copy:--} created=$created try=$try${parked:+ parked=$parked}"
 spawned

@@ -157,7 +157,11 @@ other session still uses them, and ends with what is ready for the user to try i
         own; its slot is in the line). Step 10 writes `Next: started <name>`. A `warning: no
         session … came up` before it means the command was typed but the session did not
         confirm within 15 s, most often a folder-trust prompt waiting for a yes: still
-        `started`, plus a FOR ME step to look at that tab and slot. Before anything else after
+        `started`, plus a FOR ME step to look at that tab and slot. `parked=<line>` at the
+        line's end (stderr: `warning: session '<name>' is parked at a start-up prompt …`) means
+        the pane sits at the start-up prompt that begins with that line: still `started`, and
+        the FOR ME step names the prompt, the tab and the slot; never answer it yourself, what
+        it asks is the user's to decide. Before anything else after
         that warning, look at `claude agents --json` and the pane
         (`tmux capture-pane -p -t <id>`): the session is usually there, starting or at a prompt.
         A pane at a shell may be relaunched through `flowkit-spawn` again without `--pane`

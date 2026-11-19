@@ -5,12 +5,16 @@
                               (@flowkit_state: working, waiting, idle), each tab with how many
                               of its sessions wait on you (@flowkit_wait), each story and adhoc
                               tab with its most urgent state (@flowkit_tab), prints the total;
+                              a claude pane left at a start-up prompt waits on you too, and is
+                              listed in ~/.claude/flowkit/parked.json while it does;
                               starts again the waiter of a session stopped on a usage limit;
                               with autoclose=on in handoff.conf it also closes a finished slice's
                               pane once its successor runs or its watch is open, and finished
                               story tabs
   flowkit-tmux closable       dry run: the panes the tick would close, closing nothing
   flowkit-tmux list [client]  numbered list of every session, waiting first; a number jumps there
+  flowkit-tmux dialog         reads a pane's screen on stdin: prints the first line of the dialog
+                              it ends on, exit 1 when it ends on none (flowkit-spawn asks)
   flowkit-tmux help           the cheat sheet
 
 The kit's conf calls the copy at ~/.local/bin/flowkit-tmux, which the handoff plugin moves
@@ -53,6 +57,9 @@ BACKFILL = 15 * 60  # an unfinished story this quiet rings its reporter, who rec
 GRACE = 5 * 60  # the story file sits this long after its last write before the tab goes
 RING_EVERY = 5 * 60
 SPAWN_GRACE = 2 * 60  # a pane flowkit-spawn stamped @flowkit_born this recently is still starting its claude
+HINT = re.compile(r"enter to (?:confirm|select|continue)|esc to (?!interrupt)\w+", re.I)  # the key hints under a dialog
+RULE = re.compile(r"^\s*[─-╿]{10,}\s*$")  # a row of box-drawing characters
+PARKED = 60  # a dialog this long on a claude pane with no session listed is a start-up prompt nobody answered
 CACHE = Path(tempfile.gettempdir()) / f"flowkit-tmux-{os.getuid()}.json"  # the last status line and when
 FRESH = 10  # a status line this young is printed again without asking `claude agents`
 
@@ -79,9 +86,9 @@ def panes():
     fmt = SEP.join(["#{pane_pid}", "#{pane_id}", "#{session_name}", "#{window_id}", "#{window_index}",
                     "#{window_name}", "#{pane_index}", "#{pane_current_command}", "#{@flowkit_state}",
                     "#{@flowkit_story}#{@flowkit_adhoc}", "#{@flowkit_story}", "#{@flowkit_hold}#{@cc_hold}",
-                    "#{@flowkit_rung}", "#{@flowkit_born}"])
+                    "#{@flowkit_rung}", "#{@flowkit_born}", "#{@flowkit_parked}"])
     keys = ("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "state", "story", "slug", "hold", "rung",
-            "born")
+            "born", "parked")
     return [dict(zip(keys, line.split(SEP)))
             for line in tmux("list-panes", "-a", "-F", fmt).splitlines() if line]
 
@@ -239,6 +246,65 @@ def starting(pane, now):
     return born.isdigit() and now - int(born) < SPAWN_GRACE
 
 
+def dialog(rows):
+    """The first line of the dialog a screen ends on, "" when it ends on none. A dialog shows its
+    key hints (`Enter to confirm · Esc to cancel`) in the bottom 8 rows; a hint quoted further up,
+    or a session at work (`esc to interrupt`), is none. Its first line is the first row with a
+    letter below the last rule row above the hints, without its frame."""
+    rows = [row.rstrip() for row in rows]
+    while rows and not rows[-1]:
+        rows.pop()
+    hint = next((i for i in range(len(rows) - 1, max(len(rows) - 9, -1), -1) if HINT.search(rows[i])), None)
+    if hint is None:
+        return ""
+    top = max((i for i in range(hint) if RULE.match(rows[i])), default=-1)
+    for row in rows[top + 1:hint + 1]:
+        text = " ".join(row.strip(" \t│┃|").split())
+        if re.search(r"[^\W\d_]", text):
+            return text[:80]
+    return ""
+
+
+def parked(pane_list, listed, now):
+    """The panes parked at a start-up prompt, as (pane, the dialog's first line, since), and the
+    tmux writes that keep @flowkit_parked. Such a pane runs claude, no session is listed for it
+    (before a start-up prompt is answered there is none), and its screen ends on a dialog that has
+    stood for a minute: the launch was stamped (@flowkit_born) or the dialog first seen
+    (@flowkit_parked, kept here) that long ago. A claude pane with no dialog on it (`claude
+    agents`, a picker, a `-p` job) is none."""
+    out, cmds = [], []
+    for p in pane_list:
+        line = ""
+        if p["id"] not in listed and VERSION.match(p["cmd"]):
+            line = dialog(tmux("capture-pane", "-p", "-t", p["id"]).splitlines())
+        seen = p.get("parked") or ""
+        if line and not seen:
+            cmds += [";", "set-option", "-p", "-t", p["id"], "@flowkit_parked", str(int(now))]
+        elif seen and not line:
+            cmds += [";", "set-option", "-p", "-u", "-t", p["id"], "@flowkit_parked"]
+        if line and any(at.isdigit() and now - int(at) > PARKED for at in (seen, p.get("born") or "")):
+            out.append((p, line, int(seen) if seen.isdigit() else int(now)))
+    return out, cmds
+
+
+def note_parked(stuck, now):
+    """flowkit/parked.json, for the board and the reminders: the panes parked at a start-up prompt,
+    written again at every tick while there is one (`at` says how fresh it is), gone with the last."""
+    path = CLAUDE / "flowkit" / "parked.json"
+    try:
+        if not stuck:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fresh = path.with_suffix(".tmp")
+        fresh.write_text(json.dumps({"at": int(now), "panes": [
+            {"pane": p["id"], "tab": p["wname"], "index": p["pidx"], "story": p.get("slug") or "", "line": line,
+             "since": since} for p, line, since in stuck]}))
+        os.replace(fresh, path)
+    except OSError:
+        pass
+
+
 def terminate(pid):
     """SIGTERM, then up to 5 s for the process to go; True once it has."""
     try:
@@ -383,11 +449,18 @@ def waiting():
         word = words[p["id"]] = tab_state(r, p.get("story")) if p.get("story") else ""
         if word and (p["wid"] not in tab or URGENCY.index(word) < URGENCY.index(tab[p["wid"]])):
             tab[p["wid"]] = word
+    now = time.time()
+    stuck, cmds = parked(pane_list, set(want), now)
+    for p, _, _ in stuck:  # no session to ask: the pane itself waits on the user
+        want[p["id"]] = "waiting"
+        count[p["wid"]] = count.get(p["wid"], 0) + 1
+        if p.get("story"):
+            tab[p["wid"]] = "needs you"
+    note_parked(stuck, now)
     arms = watched()
     for p in pane_list:  # a story with a watch open is watched, while nothing in its tab is more urgent
         if p.get("slug") in arms and tab.get(p["wid"], "done") == "done":
             tab[p["wid"]] = "watching"
-    cmds = []
     for p in pane_list:
         if p["id"] in want and want[p["id"]] != p["state"]:
             cmds += [";", "set-option", "-p", "-t", p["id"], "@flowkit_state", want[p["id"]]]
@@ -590,8 +663,11 @@ def list_sessions(client=""):
         return
     here = tmux("display-message", "-p", "#{session_name}").strip()
     order = {"waiting": 0, "busy": 1}
-    found = sorted(placed(rows, panes()),
-                   key=lambda pr: (order.get(pr[1].get("status"), 2), int(pr[0]["widx"] or 0), int(pr[0]["pidx"] or 0)))
+    pane_list = panes()
+    found = placed(rows, pane_list)
+    found += [(p, {"status": "waiting", "name": line, "waitingFor": "start-up", "startedAt": since * 1000})
+              for p, line, since in parked(pane_list, {p["id"] for p, _ in found}, time.time())[0]]
+    found.sort(key=lambda pr: (order.get(pr[1].get("status"), 2), int(pr[0]["widx"] or 0), int(pr[0]["pidx"] or 0)))
     print(f"\n  {'#':<3} {'where':<22} {'session':<40} {'state':<22} up")
     for i, (p, r) in enumerate(found, 1):
         where = f"{p['wname']}.{p['pidx']}" if p["sess"] == here else f"{p['sess']}:{p['wname']}.{p['pidx']}"
@@ -653,6 +729,10 @@ def main(argv):
         closable()
     elif cmd == "list":
         list_sessions(argv[1] if len(argv) > 1 else "")
+    elif cmd == "dialog":
+        line = dialog(sys.stdin.read().splitlines())
+        print(line)
+        sys.exit(0 if line else 1)
     elif cmd == "help":
         help_text()
     else:

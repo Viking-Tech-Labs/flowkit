@@ -400,14 +400,16 @@ class Handoff(unittest.TestCase):
         self.assertRegex(out.stderr, r"^launch held: free memory 9%; a launch would wait until \S+ is gone\n$")
         self.assertFalse((self.tmp / "claude" / "stories" / "st.md").exists())
 
-    def spawn_in_tmux(self, exits):
+    def spawn_in_tmux(self, exits, dialog=""):
         """A throwaway tmux server whose one pane runs bash with a fake `claude` first on its PATH:
         the first `exits` launches exit 1 at once, the next writes its pid and sleeps; `claude
-        agents --json` lists that pid once the file is there. Returns the pane id and the run."""
+        agents --json` lists that pid once the file is there. With `dialog` the launch prints it
+        and sleeps, never listed. Returns the pane id and the run."""
         repo = self.spawn_repo()
         (self.tmp / "flowkit" / "handoff.conf").write_text("driver=tmux\nreporter=off\n")
         (self.tmp / "bin" / "tmux").unlink()
-        pidfile, launches = self.tmp / "claude.pid", self.tmp / "launches"
+        pidfile, launches, screen = self.tmp / "claude.pid", self.tmp / "launches", self.tmp / "screen"
+        screen.write_text(dialog)
         fake = self.tmp / "bin" / "claude"
         fake.write_text(
             "#!/bin/sh\n"
@@ -418,14 +420,15 @@ class Handoff(unittest.TestCase):
             "fi\n"
             f"echo launch >> {launches}\n"
             f"if [ \"$(wc -l < {launches})\" -le {exits} ]; then echo 'claude: boom' >&2; exit 1; fi\n"
-            f"echo $$ > {pidfile}\n"
+            + (f"cat {screen}\n" if dialog else f"echo $$ > {pidfile}\n") +
             "exec sleep 30\n")
         fake.chmod(0o755)
         sock = f"flowkit-test-{os.getpid()}"
-        real = lambda *a: subprocess.run(["tmux", "-L", sock, *a], capture_output=True, text=True)
+        self.tmux = real = lambda *a: subprocess.run(["tmux", "-L", sock, *a], capture_output=True, text=True)
         self.addCleanup(real, "kill-server")
         real("-f", "/dev/null", "new-session", "-d", "-x", "200", "-y", "50", "/bin/bash --noprofile --norc")
         pane = real("list-panes", "-F", "#{pane_id}").stdout.split()[0]
+        real("set-option", "-p", "-t", pane, "@flowkit_parked", "1")  # the tick's stamp of the pane's last session
         # Typed, not `new-session -e`: tmux starts the command through the user's shell, whose rc
         # files rewrite PATH. The pane must never reach the real claude.
         which = self.tmp / "which"
@@ -456,6 +459,24 @@ class Handoff(unittest.TestCase):
         self.assertEqual(out.stderr, f"warning: session 's2' exited at start-up in {pane}; typed again\n"
                          f"session 's2' exited twice at start-up in pane {pane}; its output is in the pane\n")
         self.assertEqual(launches.read_text(), "launch\nlaunch\n")
+
+    @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+    def test_spawn_reports_a_session_parked_at_a_start_up_prompt(self):
+        hints = " Enter to confirm · Esc to cancel"
+        pane, out, launches = self.spawn_in_tmux(exits=0, dialog="─" * 60 + "\n Accessing workspace:\n\n /Users/me/repo\n\n"
+                                                 " ❯ No, exit\n   Yes, I trust this folder\n\n" + hints + "\n")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertRegex(out.stdout, rf"^SPAWNED pane=\d+ id={pane} tab=\S+ story=s2 name=s2 rc=off prompt=\S+ created=0 try=1 "
+                         r"parked=Accessing workspace:\n$")
+        self.assertEqual(out.stderr, f"warning: session 's2' is parked at a start-up prompt in {pane} "
+                         "(Accessing workspace:); answer it in the pane\n")
+        self.assertRegex((self.tmp / "claude" / "stories" / "s2.md").read_text(),
+                         r"\n> parked s2 · \d{4}-\d\d-\d\d \d\d:\d\d · Accessing workspace:\n$")
+        self.assertEqual(launches.read_text(), "launch\n", "typed once")
+        self.assertEqual(self.tmux("capture-pane", "-p", "-t", pane).stdout.rstrip().splitlines()[-1], hints,
+                         "nothing was typed at the prompt")
+        self.assertEqual(self.tmux("show-options", "-pqv", "-t", pane, "@flowkit_parked").stdout, "",
+                         "the launch clears the stamp of the pane's last session")
 
     def capacity_state(self):
         """What the capacity state holds: resource -> holder, the launching pids, the log's events."""

@@ -55,6 +55,8 @@ file:
    with `try=2` (claude exited at start-up once, stderr said `warning: session '<name>' exited at
    start-up in <pane>; typed again`, and the second launch came up) add "launched at the second
    try". `SPAWNED driver=background …` gives its id and link, and `claude attach <name>` opens it.
+   `parked=<line>` at the line's end means the pane sits at the start-up prompt that begins with
+   that line: tell the user the prompt, the tab and the slot; it is theirs to answer, never yours.
    A `warning: no session … came up` means it most likely waits at a folder-trust prompt: tell the
    user which tab and slot to look at, then look at `claude agents --json` and the pane
    (`tmux capture-pane -p -t <id>`) yourself: a pane at a shell may be relaunched through
