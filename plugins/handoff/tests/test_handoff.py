@@ -2,17 +2,21 @@
 dir and temp dir, a stub `claude` that serves a session list and a usage answer and records what
 else it was called with, and a stub `tmux` that serves a pane list, so nothing reaches a real
 session or the user's files."""
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 PLUGIN = Path(__file__).resolve().parent.parent
 HANDOFF = PLUGIN / "scripts" / "handoff.py"
@@ -893,7 +897,7 @@ class Handoff(unittest.TestCase):
         self.assertEqual(self.typed(0.5), "", "one continue per record")
 
     def test_retry_leaves_the_rest_alone(self):
-        for kw, error in ((dict(), "rate_limit"), (dict(), "authentication_failed"), (dict(), "invalid_request"),
+        for kw, error in ((dict(), "authentication_failed"), (dict(), "invalid_request"),
                           (dict(), "unknown"), (dict(away=False), "server_error"),
                           (dict(autoretry="off"), "server_error")):
             self.retry_setup(**kw)
@@ -970,6 +974,273 @@ class Handoff(unittest.TestCase):
         time.sleep(0.2)
         self.assertIn(f"--bg --resume {self.SID} Your last turn ended on an API error (overloaded)",
                       self.calls.read_text())
+
+    def iso(self, when):
+        return datetime.fromtimestamp(when, timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def line(self, kind, text, later=1, **extra):
+        """A transcript line stamped `later` seconds after the limit line."""
+        return {"type": kind, "timestamp": self.iso(self.limit_at + later), "message": {"content": text}, **extra}
+
+    def limit_setup(self, reset=None, text="You've hit your weekly limit", model="claude-fable-5-2", after=(),
+                    conf="", settings=None, remote=True, **kw):
+        """retry_setup with no autoretry and no away flag, and a transcript that ends as a real one does
+        on a usage limit: a model's reply, the limit line (with its quota answer when `reset` is given),
+        the harness's own unstamped lines, then `after`."""
+        self.retry_setup(autoretry="off", away=False, **kw)
+        retry = self.tmp / "claude" / "flowkit" / "retry"
+        (retry / f"{self.SID}.json").unlink(missing_ok=True)  # the previous case's waiter goes with its record
+        deadline = time.time() + 3
+        while list(retry.glob("*.lock")) and time.time() < deadline:
+            time.sleep(0.02)
+        for path in (self.tmp / "claude" / "flowkit" / "retries.log", self.tmp / "claude" / "settings.json",
+                     self.tmp / "usage.jsonl", self.tmp / "probes", self.tmp / "holds", self.calls):
+            path.unlink(missing_ok=True)
+        stub = self.tmp / "bin" / "caffeinate"
+        stub.write_text(f"#!/bin/sh\necho \"$@\" >> {self.tmp / 'holds'}\nexec sleep 5\n")
+        stub.chmod(0o755)
+        (self.tmp / "flowkit" / "handoff.conf").write_text(conf)
+        if settings is not None:
+            (self.tmp / "claude" / "settings.json").write_text(json.dumps(settings))
+        (self.tmp / "claude" / "sessions" / f"{self.pid}.json").write_text(json.dumps(
+            {"sessionId": self.SID, "name": "s4", "kind": "interactive", "status": kw.get("status", "idle"),
+             **({"bridgeSessionId": "session_x"} if remote else {})}))
+        self.limit_at = time.time()
+        limit = {"type": "assistant", "timestamp": self.iso(self.limit_at), "isApiErrorMessage": True,
+                 "error": "rate_limit", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": text}]}}
+        if reset is not None:
+            limit["quotaLimits"] = {"status": "rejected", "resetsAt": reset, "rateLimitType": "seven_day"}
+        rows = [{"type": "assistant", "timestamp": self.iso(self.limit_at - 5), "message": {"model": model, "content": "ok"}},
+                limit, {"type": "custom-title", "customTitle": "s4"}, {"type": "mode", "mode": "normal"}, *after]
+        self.transcript.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def log(self):
+        path = self.tmp / "claude" / "flowkit" / "retries.log"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def sent(self, wait=3.0):
+        """What a limit waiter typed into %7 within `wait` seconds; it lives on, so its lock stays."""
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            text = self.calls.read_text() if self.calls.exists() else ""
+            if "Enter" in text:
+                return text
+            time.sleep(0.02)
+        return self.calls.read_text() if self.calls.exists() else ""
+
+    def rec_when(self, test, wait=4.0):
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            rec = self.record()
+            if rec and test(rec):
+                return rec
+            time.sleep(0.02)
+        self.fail(f"the record never got there: {self.record()}")
+
+    def buckets(self, week=(49, 7200), five_hour=(9, 3600), **models):
+        """A usage answer: (percent, seconds until the reset) for the week, the 5 hours and each model's
+        bucket by display name. Returns the second the resets are counted from."""
+        base = int(time.time())
+        stamp = lambda secs: datetime.fromtimestamp(base + secs, timezone.utc).isoformat()
+        limits = [{"kind": "session", "percent": five_hour[0], "resets_at": stamp(five_hour[1]), "scope": None},
+                  {"kind": "weekly_all", "percent": week[0], "resets_at": stamp(week[1]), "scope": None}]
+        limits += [{"kind": "weekly_scoped", "percent": pct, "resets_at": stamp(secs),
+                    "scope": {"model": {"id": None, "display_name": name}, "surface": None}}
+                   for name, (pct, secs) in models.items()]
+        answer = {"type": "control_response", "response": {
+            "subtype": "success", "request_id": "flowkit-usage", "response": {"rate_limits": {"limits": limits}}}}
+        (self.tmp / "usage.jsonl").write_text(json.dumps(answer) + "\n")
+        return base
+
+    def test_limit_resumes_present_or_away_without_a_conf(self):
+        reset = time.time() + 3.0  # its waiter is up well before the last "30 minutes" (1.5 s) begin
+        self.limit_setup(reset=reset)
+        self.api_error("rate_limit")
+        typed = self.sent(6.0)
+        self.assertIn("tmux send-keys -t %7 -l Your last turn stopped on the usage limit at ", typed)
+        self.assertIn("; it has reset. Carry on from where you were. ; run-shell sleep 0.5 ; send-keys -t %7 Enter", typed)
+        rec = self.rec_when(lambda r: r.get("state") == "continued")
+        self.assertEqual((rec["continues"], rec["continued_for"], rec["reset"], rec["handled"]), (1, reset, reset, rec["at"]))
+        self.assertGreaterEqual(rec["continued_at"], reset + 3 * 0.05, "three minutes after the reset")
+        self.assertEqual((rec["status"], rec["screen"], rec["rest"]),
+                         ("idle", ["│ > "], {"status": "idle", "screen": ["│ > "]}), "what it looked like, kept")
+        self.assertEqual(self.probes(), 0, "the limit line names its reset: no usage call")
+        self.assertEqual((self.tmp / "holds").read_text(), f"-i -w {self.pid}\n", "kept awake for the last 30 minutes")
+        log = self.log()
+        self.assertRegex(log[0], r"^> retry s4 · \d{4}-\d\d-\d\d \d\d:\d\d · rate_limit$")
+        self.assertRegex(log[1], r"^> limit s4 · \d{4}-\d\d-\d\d \d\d:\d\d · continues at \d{4}-\d\d-\d\d \d\d:\d\d, "
+                                 r"once the limit has reset: the computer must be awake then$")
+        self.assertEqual(len(log), 2)
+
+    def test_limit_resume_off_by_the_settings_or_the_conf(self):
+        for kw in (dict(settings={"autoContinueAtUsageLimit": False}), dict(conf="limitresume=off\n")):
+            self.limit_setup(reset=time.time() + 0.2, **kw)
+            self.api_error("rate_limit")
+            self.assertEqual(self.sent(0.8), "", kw)
+            rec = self.record()
+            self.assertEqual((rec["kind"], rec["resume"], "due" in rec), ("rate_limit", False, False), kw)
+        self.limit_setup(reset=time.time() + 2.5)
+        self.api_error("rate_limit")
+        self.rec_when(lambda r: r.get("due"))
+        (self.tmp / "flowkit" / "handoff.conf").write_text("limitresume=off\n")
+        self.assertEqual(self.sent(3.2), "", "turned off while its waiter waits")
+        self.assertFalse(self.record()["resume"])
+
+    def test_limit_without_remote_control_is_claude_codes_own_within_a_day(self):
+        on = {"autoContinueAtUsageLimit": True}
+        self.limit_setup(reset=time.time() + 0.2, remote=False, settings=on)
+        self.api_error("rate_limit")
+        rec = self.rec_when(lambda r: r.get("handled"))
+        self.assertEqual((rec["state"], rec["remote"], self.sent(0.6)), ("native", False, ""))
+        far = time.time() + 25 * 3600
+        self.limit_setup(reset=far, remote=False, settings=on)
+        self.api_error("rate_limit")
+        rec = self.rec_when(lambda r: r.get("due"))
+        self.assertEqual(rec["state"], "waiting", "a reset more than 24 hours away is not")
+        self.assertAlmostEqual(rec["due"], far + 3 * 0.05)
+        self.limit_setup(reset=time.time() + 0.2, remote=False)
+        self.api_error("rate_limit")
+        self.assertIn("usage limit", self.sent(), "nor any reset while the settings do not turn its wait on")
+
+    def test_limit_due_from_a_live_reading_per_bucket_and_model(self):
+        capped = dict(week=(100, 7200), five_hour=(100, 3600), Fable=(100, 10800), Opus=(100, 18000))
+        for model, kw, secs in (("claude-fable-5-2", capped, 10800),  # its own bucket, not the other model's
+                                ("claude-haiku-5-5", capped, 18000),  # no bucket by its name: every capped one
+                                ("claude-fable-5-2", dict(week=(100, 7200), Fable=(37, 10800)), 7200),
+                                ("claude-fable-5-2", dict(week=(99, 7200), five_hour=(100, 3600)), 3600)):
+            self.limit_setup(model=model)
+            base = self.buckets(**kw)
+            self.api_error("rate_limit")
+            rec = self.rec_when(lambda r: r.get("due"))
+            self.assertEqual((rec["reset"], self.probes()), (base + secs, 1), (model, kw))
+            self.assertAlmostEqual(rec["due"], base + secs + 3 * 0.05)
+        time.sleep(0.3)
+        self.assertFalse((self.tmp / "holds").exists(), "hours before the reset the computer is not held awake")
+
+    def test_limit_refuses_a_cached_an_old_and_a_passed_reading(self):
+        self.limit_setup()
+        self.buckets(week=(100, 7200))
+        self.assertEqual(self.handoff("usage").returncode, 0)  # the 10-minute cache now holds that answer
+        base = self.buckets(week=(100, 9000))
+        self.api_error("rate_limit")
+        rec = self.rec_when(lambda r: r.get("due"))
+        self.assertEqual((rec["reset"], self.probes()), (base + 9000, 2), "asked again, the cache not read")
+        self.limit_setup()
+        weeks = self.tmp / "claude" / "usage-stats"
+        weeks.mkdir(exist_ok=True)
+        (weeks / "week-1.json").write_text(json.dumps({"seven_day_pct": 100, "resets_at": int(time.time()) + 7200}))
+        self.api_error("rate_limit")
+        rec = self.rec_when(lambda r: r.get("due"))
+        self.assertEqual((rec["reset"], self.probes()), (None, 1), "old figures name no reset")
+        self.assertIn("usage limit", self.sent(), "so it is tried like an API error: after 2 minutes")
+        self.limit_setup()
+        self.buckets(week=(100, -60))
+        self.api_error("rate_limit")
+        self.assertIsNone(self.rec_when(lambda r: r.get("due"))["reset"], "a reset that has passed")
+
+    def test_limit_reads_the_reset_from_the_message(self):
+        self.limit_setup(text="You've hit your weekly limit · resets 2am (Europe/Berlin)")
+        self.api_error("rate_limit")
+        rec = self.rec_when(lambda r: r.get("due"))
+        at = datetime.fromtimestamp(self.limit_at, ZoneInfo("Europe/Berlin"))
+        two = at.replace(hour=2, minute=0, second=0, microsecond=0)
+        self.assertEqual(rec["reset"], (two if two > at else two + timedelta(days=1)).timestamp())
+        loader = importlib.machinery.SourceFileLoader("flowkit_handoff", str(HANDOFF))
+        handoff = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(handoff)
+        berlin, new_york = ZoneInfo("Europe/Berlin"), ZoneInfo("America/New_York")
+        base = datetime(2026, 11, 17, 23, 54, tzinfo=berlin)
+        for text, want in (("resets 2am (Europe/Berlin)", datetime(2026, 11, 18, 2, 0, tzinfo=berlin)),
+                           ("resets 11:30pm (Europe/Berlin)", datetime(2026, 11, 18, 23, 30, tzinfo=berlin)),
+                           ("resets 12am (Europe/Berlin)", datetime(2026, 11, 18, 0, 0, tzinfo=berlin)),
+                           ("resets 14:00 (Europe/Berlin)", datetime(2026, 11, 18, 14, 0, tzinfo=berlin)),
+                           ("resets Nov 25, 2am (Europe/Berlin)", datetime(2026, 11, 25, 2, 0, tzinfo=berlin)),
+                           ("resets Nov 25 at 2:30pm (America/New_York)", datetime(2026, 11, 25, 14, 30, tzinfo=new_york)),
+                           ("resets Jan 3, 9am (Europe/Berlin)", datetime(2027, 1, 3, 9, 0, tzinfo=berlin)),
+                           ("resets soon", None), ("resets 2", None), ("resets Foo 3, 9am", None), ("try again later", None)):
+            self.assertEqual(handoff.spoken_reset(f"You've hit your limit · {text}", base.timestamp()),
+                             want and want.timestamp(), text)
+        local = handoff.spoken_reset("resets 2am (No/Such_Zone)", base.timestamp())
+        self.assertEqual(datetime.fromtimestamp(local).strftime("%H:%M"), "02:00", "an unknown zone: the computer's")
+
+    def test_limit_a_prompt_or_a_reply_cancels_metadata_and_commands_do_not(self):
+        self.limit_at = time.time()
+        command = [{"type": "file-history-snapshot"},
+                   self.line("user", "<local-command-caveat>The command below was run directly</local-command-caveat>", isMeta=True),
+                   self.line("user", "<command-name>/usage</command-name>"),
+                   self.line("system", "", subtype="local_command"),
+                   self.line("user", "<local-command-stdout>Week 100% used</local-command-stdout>"),
+                   {"type": "bridge-session", "bridgeSessionId": "session_x"}]
+        self.limit_setup(reset=time.time() + 0.2, after=command)
+        self.api_error("rate_limit")
+        self.assertIn("usage limit", self.sent(), "the harness's lines and a /usage are no turn")
+        for row in (("user", "do the other thing first"), ("assistant", "On it.")):
+            self.limit_setup(reset=time.time() + 0.2)
+            with self.transcript.open("a") as f:
+                f.write(json.dumps(self.line(*row)) + "\n")
+            self.api_error("rate_limit")
+            rec = self.rec_when(lambda r: r.get("handled"))
+            self.assertEqual((rec["state"], self.sent(0.5)), ("moved", ""), row)
+
+    def test_limit_types_only_into_a_free_prompt_box(self):
+        menu = "│ > \n  1. Stop and wait for the limit to reset\n  2. Switch to extra usage\n  Enter to confirm · Esc to cancel\n"
+        self.limit_setup(reset=time.time() + 0.2, screen=menu)
+        self.api_error("rate_limit")
+        self.rec_when(lambda r: r.get("state") == "dialog")
+        time.sleep(1.8)  # the next slot, 30 minutes on, finds it still open
+        self.assertEqual(self.sent(0.1), "")
+        said = [l for l in self.log() if "not continued" in l]
+        self.assertEqual(len(said), 1, said)
+        self.assertRegex(said[0], r"^> limit s4 · .* · not continued: a dialog is open below its prompt box; looked at "
+                                  r"again every 30 minutes$")
+        quoted = ("  ❯ 1. Yes\n  Enter to confirm · Esc to cancel\n\n────\n❯ \n────\n"
+                  "  main   Model high\n  ⏵⏵ auto mode on (shift+tab to cycle)\n")
+        self.limit_setup(reset=time.time() + 0.2, screen=quoted)
+        self.api_error("rate_limit")
+        self.assertIn("usage limit", self.sent(), "a dialog quoted above the prompt box is none")
+        for kw, state in ((dict(screen="│ > half a thought\n"), "draft"), (dict(screen="  1. Yes\n  2. No\n"), "no prompt box"),
+                          (dict(in_mode="1"), "copy mode"), (dict(status="busy"), "not idle")):
+            self.limit_setup(reset=time.time() + 0.2, **kw)
+            self.api_error("rate_limit")
+            rec = self.rec_when(lambda r: r.get("state") == state)
+            self.assertEqual((self.sent(0.3), rec.get("handled")), ("", None), f"{kw}: the next slot")
+        self.limit_setup(reset=time.time() + 0.2)
+        stub = self.tmp / "bin" / "tmux"
+        stub.write_text(stub.read_text().replace(f"'{self.pid} %7", "'999999 %7"))
+        self.api_error("rate_limit")
+        rec = self.rec_when(lambda r: r.get("handled"))
+        self.assertEqual((rec["state"], self.sent(0.3)), ("unreachable", ""))
+        self.assertIn("· not continued: it does not run in a tmux pane; it waits for you", self.log()[-1])
+
+    def test_limit_with_no_reset_known_is_tried_like_an_api_error_three_times(self):
+        self.limit_setup(text="API Error: 429 rate_limit_error")
+        for n in (1, 2, 3):
+            self.api_error("rate_limit")
+            self.assertIn("usage limit", self.sent())
+            rec = self.rec_when(lambda r: r.get("continues") == n)
+            self.assertEqual((rec["reset"], rec["state"]), (None, "continued"))
+            self.calls.unlink()
+        self.api_error("rate_limit")
+        rec = self.rec_when(lambda r: r.get("state") == "unreachable")
+        self.assertEqual((rec["handled"], self.sent(0.8)), (rec["at"], ""))
+        self.assertEqual([l.split(" · ", 2)[2] for l in self.log()],
+                         ["rate_limit", "not continued: 3 continues ended on the limit again; it waits for you"])
+
+    def test_limit_one_waiter_and_one_continue_however_many_are_started(self):
+        self.limit_setup(reset=time.time() + 0.8)
+        self.api_error("rate_limit")
+        extra = [subprocess.Popen(["python3", str(HANDOFF), "retry-wait", self.SID], env=self.env) for _ in range(2)]
+        self.addCleanup(lambda: [(p.kill(), p.wait()) for p in extra])
+        self.assertIn("usage limit", self.sent())
+        self.rec_when(lambda r: r.get("state") == "continued")
+        lock = self.tmp / "claude" / "flowkit" / "retry" / f"{self.SID}.lock"
+        os.kill(int(lock.read_text()), signal.SIGKILL)  # the waiter dies; its lock file stays, unlocked
+        extra.append(subprocess.Popen(["python3", str(HANDOFF), "retry-wait", self.SID], env=self.env))
+        time.sleep(1.0)
+        self.assertEqual(self.calls.read_text().count("-l Your last turn"), 1, "a continue is typed once")
+        self.assertTrue(lock.exists(), "the new waiter stays beside the record")
+        self.api_error("rate_limit")  # woken while limited: the stop is noted, without another line
+        self.assertEqual(len([l for l in self.log() if l.startswith("> retry")]), 1)
 
 
 if __name__ == "__main__":

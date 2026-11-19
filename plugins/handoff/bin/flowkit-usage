@@ -3,6 +3,7 @@
 
   flowkit-usage           Week 49% used, resets Tue 02:59 (in 15 h) · <model> 37% of its bucket, ...
   flowkit-usage --json    the same fields as JSON
+  flowkit-usage --live    ask now, whatever the cache holds (with or without --json)
 
 Claude Code answers it itself: a `get_usage` control request through `claude -p` stream-json,
 with no model call and no transcript left behind. An answer is kept 10 minutes per config folder
@@ -128,12 +129,12 @@ def line(f, now):
     return " · ".join(parts) or "no usage figures in the answer"
 
 
-def usage():
+def usage(live=False):
     """(fields, source, error): source is live, cache or old; fields None when nothing is known."""
     now = time.time()
     try:
         cached = json.loads(CACHE.read_text())
-        if now - cached["at"] < CACHE_SECONDS:
+        if not live and now - cached["at"] < CACHE_SECONDS:
             return {**cached["fields"], "as_of": cached["at"]}, "cache", None
     except (OSError, ValueError, KeyError, TypeError):
         pass
@@ -150,10 +151,10 @@ def usage():
 
 
 def main(argv):
-    if argv not in ([], ["--json"]):
+    if set(argv) - {"--json", "--live"} or len(set(argv)) != len(argv):
         sys.exit(__doc__)
-    f, source, error = usage()
-    if argv:
+    f, source, error = usage("--live" in argv)
+    if "--json" in argv:
         print(json.dumps({"source": source, "error": error, **(f or {})}, indent=2))
     elif source != "old":
         print(line(f, time.time()))

@@ -28,14 +28,17 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py question-gate                       PreToolUse hook on AskUserQuestion: denied while away
   handoff.py context                             UserPromptSubmit and PostToolBatch hook: the context line
   handoff.py api-error | api-ok                  StopFailure and Stop hooks: the retry record and line, and
-                                                 with autoretry=on the waiter (retry-wait <session id>)
+                                                 the waiter (retry-wait <session id>): after a usage limit
+                                                 unless limitresume=off, after an API error with autoretry=on
   handoff.py usage [--json]                      the plan's usage left (bin/flowkit-usage)
   handoff.py statusline diff|install <root>      the status line that records context and cost
   handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
   handoff.py refresh <root>                      update an installed status line and tmux kit, prune the
                                                  prompt copies older than 30 days (SessionStart)
 """
+import contextlib
 import difflib
+import fcntl
 import json
 import os
 import re
@@ -45,6 +48,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 HOME = Path.home()
@@ -79,11 +83,21 @@ CTX_WARM = 30  # requests before a session hears anything: a successor that star
 AWAKE = CLAUDE / "awake"  # out but reachable: written by the user's own setup, read like the away flag
 RETRY = CLAUDE / "flowkit" / "retry"  # <session id>.json while a session sits on an API error
 RETRIES_LOG = CLAUDE / "flowkit" / "retries.log"  # retry lines of sessions outside a story
-RETRY_KINDS = ("server_error", "overloaded")  # what the waiter continues; rate_limit is Claude Code's own
+RETRY_KINDS = ("server_error", "overloaded")  # what the API-error waiter continues; rate_limit has limit_wait
 RETRY_STEPS = (2, 5, 10, 20, 30)  # minutes the waiter waits before each continue, then every 30
 RETRY_HOURS = 12
 SETTLE = 10  # seconds after the error before the transcript is read as the session's resting state
+LIMIT_GRACE = 3  # minutes after a usage limit's reset before the session is continued
+LIMIT_HOLD = 30  # minutes before that from which the computer is kept awake
+LIMIT_CONTINUES = 3  # continues that ended on the limit again, no clean turn end in between: then it waits for the user
+NATIVE_HOURS = 24  # a reset this near is Claude Code's own to wait for, in a session without Remote Control
+TAIL = 2 * 1024 * 1024  # bytes of a transcript's end read for its last limit line and what follows it
+LOCAL = ("<command-", "<local-command-", "<bash-")  # how the lines of a /command or a ! shell line start: no turn
+MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+RESETS = re.compile(r"resets (?:at )?(?:(?P<mon>[A-Za-z]{3}) (?P<day>\d{1,2}),? (?:at )?)?(?P<h>\d{1,2})(?::(?P<m>\d\d))?"
+                    r"(?: ?(?P<ap>[ap]m))?(?: \((?P<tz>[^)\s]+)\))?", re.I)
 PROMPT_LINE = re.compile(r"^[│|\s]*[>❯]\s?(.*?)[\s│|]*$")
+DIALOG = re.compile(r"enter to (?:confirm|select|continue)|esc to (?!interrupt)\w+|^\s*(?:[❯>]\s*)?\d+\.\s", re.I | re.M)
 HEADING = "WHERE TO PICK UP"
 NAMES = ("PLAN.md", "BUILD-PLAN.md", "HANDOFF.md", "ROADMAP.md", "docs/PLAN.md", "docs/plan.md", "docs/HANDOFF.md")
 SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -385,10 +399,68 @@ def retry_record(sid):
         return None
 
 
+@contextlib.contextmanager
+def retry_lock():
+    """One writer of the retry records at a time: the hooks and a limit waiter all change them."""
+    RETRY.mkdir(parents=True, exist_ok=True)
+    with (RETRY / ".mutex").open("w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def retry_update(sid, change):
+    """Read a session's retry record, let `change` edit it (it gets None when there is none, and
+    returns None to write nothing) and put it back whole, so a reader never sees half of one."""
+    with retry_lock():
+        rec = change(retry_record(sid))
+        if rec is not None:
+            fresh = RETRY / f".{sid}.tmp"
+            fresh.write_text(json.dumps(rec))
+            os.replace(fresh, RETRY / f"{sid}.json")
+        return rec
+
+
+def retry_set(sid, **fields):
+    """Set fields of a session's retry record, if it still has one."""
+    return retry_update(sid, lambda rec: rec and {**rec, **fields})
+
+
+def once(rec, key):
+    """True the first time `key` is asked of a record: one story line per record and kind."""
+    said = rec.setdefault("lines", [])
+    if key in said:
+        return False
+    said.append(key)
+    return True
+
+
+def retry_log(rec, text):
+    """One line into the story file of the session's tab, or into retries.log outside a story."""
+    path = STORIES / f"{rec['story']}.md" if rec.get("story") else None
+    with (path if path and path.is_file() else RETRIES_LOG).open("a") as f:
+        f.write(text + "\n")
+
+
+def auto_continue():
+    """autoContinueAtUsageLimit of the user's settings: True, False, or None when they do not say."""
+    try:
+        value = json.loads(SETTINGS.read_text()).get("autoContinueAtUsageLimit")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, bool) else None
+
+
+def limit_resume():
+    """A session stopped on a usage limit is continued after the reset, the user away or not, unless
+    their settings say autoContinueAtUsageLimit: false or handoff.conf says limitresume=off."""
+    return setting("limitresume", "on") != "off" and auto_continue() is not False
+
+
 def api_error_hook():
     """StopFailure: an API error ended the turn, so Stop (and its idle hold) did not fire. Writes
-    the retry record that labels the tab `error`, logs one line, and, with autoretry=on while the
-    user is away or awake, starts the waiter that continues the session."""
+    the retry record that labels the tab `error` (`limit` for a usage limit), logs one line, and
+    starts the waiter that continues the session: after a usage limit unless limit resume is off,
+    after an API error with autoretry=on while the user is away or awake."""
     data = json.load(sys.stdin)
     sid = str(data.get("session_id") or "")
     if data.get("agent_id") or not SAFE.match(sid):
@@ -396,27 +468,36 @@ def api_error_hook():
     kind = str(data.get("error") or "unknown")
     pid = os.environ.get("CLAUDE_PID", "")
     now = time.time()
-    rec = retry_record(sid) or {"first": now, "attempts": 0}
     info = session_file(pid, sid)
-    rec.update(session=sid, kind=kind, at=now, pid=int(pid) if pid.isdigit() else None,
-               name=info.get("name") or sid[:8], background=info.get("kind") == "background",
-               transcript=str(data.get("transcript_path") or ""))
-    RETRY.mkdir(parents=True, exist_ok=True)
-    (RETRY / f"{sid}.json").write_text(json.dumps(rec))
-    details = " ".join(str(data.get("error_details") or "").split())[:160]
-    entry = f"> retry {rec['name']} · {time.strftime('%Y-%m-%d %H:%M')} · {kind}{' · ' + details if details else ''}\n"
-    story = ""
+    story, screen = "", []
     try:
         if os.environ.get("TMUX_PANE"):
             story = tmux("show-options", "-wqv", "-t", os.environ["TMUX_PANE"], "@flowkit_story").stdout.strip()
+            if kind == "rate_limit":
+                screen = bottom(os.environ["TMUX_PANE"])
     except (OSError, subprocess.TimeoutExpired):
         pass
-    path = STORIES / f"{story}.md" if SAFE.match(story) else None
-    with (path if path and path.is_file() else RETRIES_LOG).open("a") as f:
-        f.write(entry)
-    if setting("autoretry", "off") != "on" or not reachable() or not rec["pid"]:
+    fresh = [True]
+
+    def change(rec):
+        rec = rec or {"first": now, "attempts": 0}
+        rec.update(session=sid, kind=kind, at=now, pid=int(pid) if pid.isdigit() else None,
+                   name=info.get("name") or sid[:8], background=info.get("kind") == "background",
+                   transcript=str(data.get("transcript_path") or ""), story=story if SAFE.match(story) else "")
+        if kind == "rate_limit":  # what the session looked like as it stopped, and one line however often it is woken
+            rec.update(remote=bool(info.get("bridgeSessionId")), resume=limit_resume(),
+                       status=info.get("status"), screen=screen)
+            fresh[0] = once(rec, "retry")
+        return rec
+
+    rec = retry_update(sid, change)
+    details = " ".join(str(data.get("error_details") or "").split())[:160]
+    if fresh[0]:
+        retry_log(rec, f"> retry {rec['name']} · {time.strftime('%Y-%m-%d %H:%M')} · {kind}{' · ' + details if details else ''}")
+    if not rec["pid"] or not (rec["resume"] if kind == "rate_limit" else
+                              setting("autoretry", "off") == "on" and reachable()):
         return
-    if kind in RETRY_KINDS or (kind == "max_output_tokens" and rec["attempts"] == 0):
+    if kind in RETRY_KINDS + ("rate_limit",) or (kind == "max_output_tokens" and rec["attempts"] == 0):
         subprocess.Popen([sys.executable, __file__, "retry-wait", sid], start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -439,8 +520,8 @@ def snapshot(path):
         return None
 
 
-def session_pane(pid):
-    """The tmux pane the live process `pid` runs in, if it is not in copy mode."""
+def pane_of(pid):
+    """(pane id, in copy mode) of the tmux pane the live process `pid` runs in, or None."""
     panes = {}
     for line in tmux("list-panes", "-a", "-F", "#{pane_pid} #{pane_id} #{pane_in_mode}").stdout.splitlines():
         p, pane, in_mode = (line.split() + ["", "", ""])[:3]
@@ -451,17 +532,53 @@ def session_pane(pid):
     for _ in range(4):
         if pid in panes:
             pane, in_mode = panes[pid]
-            return pane if in_mode == "0" else None
+            return pane, in_mode != "0"
         pid = parents.get(pid)
         if pid is None:
             return None
     return None
 
 
+def session_pane(pid):
+    """The tmux pane the live process `pid` runs in, if it is not in copy mode."""
+    found = pane_of(pid)
+    return found[0] if found and not found[1] else None
+
+
 def draft(pane):
     """Text sitting in the pane's prompt box (the last line that starts with the prompt mark)."""
     lines = [l for l in tmux("capture-pane", "-p", "-t", pane).stdout.splitlines() if PROMPT_LINE.match(l)]
     return bool(lines) and bool(PROMPT_LINE.match(lines[-1]).group(1))
+
+
+def bottom(pane):
+    """The bottom 8 rows of what a pane shows, as a list."""
+    rows = tmux("capture-pane", "-p", "-t", pane).stdout.splitlines()
+    while rows and not rows[-1].strip():
+        rows.pop()
+    return rows[-8:]
+
+
+def parked(pane):
+    """Why the pane's prompt box cannot take a typed line, "" when it can: there is none on screen,
+    dialog rows sit below it (a menu's numbered options, its Enter or Esc hint), or it holds a
+    draft. Only rows below the last prompt-box line count, so a dialog quoted in the conversation
+    above it never does."""
+    rows = tmux("capture-pane", "-p", "-t", pane).stdout.splitlines()
+    last = max((i for i, row in enumerate(rows) if PROMPT_LINE.match(row)), default=None)
+    if last is None:
+        return "no prompt box"
+    if DIALOG.search("\n".join(rows[last + 1:])):
+        return "dialog"
+    return "draft" if PROMPT_LINE.match(rows[last]).group(1) else ""
+
+
+def type_line(pane, text):
+    """Type `text` into the pane and press Enter. One tmux call, so nothing else typing into panes
+    lands in between; the pause lets the TUI take the text as typed before Enter, which it would
+    otherwise read as part of a paste."""
+    return tmux("send-keys", "-t", pane, "-l", text, ";", "run-shell", "sleep 0.5",
+                ";", "send-keys", "-t", pane, "Enter").returncode == 0
 
 
 def continue_session(rec, text):
@@ -480,10 +597,7 @@ def continue_session(rec, text):
     pane = session_pane(rec["pid"])
     if pane is None or draft(pane):
         return False
-    # one tmux call, so nothing else typing into panes lands in between; the pause lets the TUI take
-    # the text as typed before Enter, which it would otherwise read as part of a paste
-    return tmux("send-keys", "-t", pane, "-l", text, ";", "run-shell", "sleep 0.5",
-                ";", "send-keys", "-t", pane, "Enter").returncode == 0
+    return type_line(pane, text)
 
 
 def retry_wait(sid):
@@ -494,6 +608,8 @@ def retry_wait(sid):
     rec = retry_record(sid)
     if not rec or not rec.get("pid"):
         return
+    if rec["kind"] == "rate_limit":
+        return limit_wait(sid)
     pid = rec["pid"]
     lock = RETRY / f"{sid}-{pid}.lock"
     try:
@@ -520,7 +636,8 @@ def retry_wait(sid):
         at, seen = None, None
         while True:
             rec = retry_record(sid)
-            if not rec or rec["pid"] != pid or not alive(pid) or time.time() > rec["first"] + RETRY_HOURS * 3600:
+            if not rec or rec["pid"] != pid or not alive(pid) or rec["kind"] == "rate_limit" or \
+                    time.time() > rec["first"] + RETRY_HOURS * 3600:
                 return
             if rec["at"] != at:  # a new error: wait the next step from it, the count kept
                 at = rec["at"]
@@ -555,11 +672,302 @@ def retry_wait(sid):
         lock.unlink(missing_ok=True)
 
 
+def transcript_tail(path):
+    """The parsed lines of a transcript's end (its last TAIL bytes)."""
+    try:
+        with open(path, "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            f.seek(max(size - TAIL, 0))
+            lines = f.read().decode(errors="replace").splitlines()
+    except (OSError, TypeError):
+        return []
+    rows = []
+    for line in lines[size > TAIL:]:  # a cut starts mid-line
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def limit_line(rows):
+    """Where the last usage-limit line sits in a transcript's rows, or None."""
+    return next((i for i in range(len(rows) - 1, -1, -1)
+                 if rows[i].get("isApiErrorMessage") and rows[i].get("error") == "rate_limit"), None)
+
+
+def row_text(row):
+    message = row.get("message") if isinstance(row.get("message"), dict) else {}
+    content = message.get("content")
+    if isinstance(content, list):
+        content = " ".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
+    return str(content or "")
+
+
+def stamp(row):
+    """A transcript line's time as an epoch; None for the harness's own lines, which carry none."""
+    try:
+        return datetime.fromisoformat(str(row.get("timestamp")).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def moved_on(rows, at):
+    """The session went on after its last limit line: a model's reply or a prompt follows it. The
+    harness's own lines (title, mode, bridge session) carry no time and never count, nor do the
+    lines a /command or a ! shell line leaves, which someone looking at /usage writes. With no
+    limit line in the tail, a line counts when it is stamped after the stop."""
+    last = limit_line(rows)
+    for row in rows if last is None else rows[last + 1:]:
+        when = stamp(row)
+        if when is None or row.get("type") not in ("user", "assistant") or row.get("isMeta") or \
+                row.get("isApiErrorMessage") or (last is None and when <= at):
+            continue
+        if row["type"] == "assistant" or not row_text(row).lstrip().startswith(LOCAL):
+            return True
+    return False
+
+
+def last_model(rows):
+    """The model of the transcript's last real reply (a limit line's is <synthetic>), or ""."""
+    for row in reversed(rows):
+        message = row.get("message") if isinstance(row.get("message"), dict) else {}
+        if row.get("type") == "assistant" and message.get("model") not in (None, "", "<synthetic>"):
+            return str(message["model"])
+    return ""
+
+
+def usage_reset(model, after):
+    """From a live usage reading, the latest reset among the capped buckets that bind a session on
+    `model`: the week, the 5 hours and the model's own (the first word of its display name inside
+    the model id; when none matches, every model's). None without a live reading (never the cache
+    or old figures, whose reset may have passed) or a capped bucket that resets after `after`."""
+    try:
+        out = subprocess.run([sys.executable, str(USAGE_BIN), "--json", "--live"],
+                             capture_output=True, text=True, timeout=60).stdout
+        reading = json.loads(out)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if not isinstance(reading, dict) or reading.get("source") != "live":
+        return None
+    models = [m for m in reading.get("models") or [] if isinstance(m, dict)]
+    own = [m for m in models if str(m.get("model") or "?").split()[0].lower() in model.lower()]
+    resets = [b["resets_at"] for b in [reading.get("week"), reading.get("five_hour"), *(own or models)]
+              if isinstance(b, dict) and isinstance(b.get("percent"), (int, float)) and b["percent"] >= 100
+              and isinstance(b.get("resets_at"), (int, float)) and b["resets_at"] > after]
+    return max(resets, default=None)
+
+
+def spoken_reset(text, base):
+    """The reset a limit message names ("resets 2am (Europe/Berlin)", "resets Nov 25, 2:30pm") as an
+    epoch: the first such moment after `base`, in the zone it names, else the computer's. None when
+    it names no time."""
+    m = RESETS.search(text)
+    if not m or not (m["ap"] or m["m"]):
+        return None
+    zone = None
+    try:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(m["tz"]) if m["tz"] else None
+    except Exception:  # no zoneinfo (Python 3.8), no such zone, no zone data
+        pass
+    start = datetime.fromtimestamp(base, zone) if zone else datetime.fromtimestamp(base).astimezone()
+    try:
+        hour = int(m["h"]) % 12 + (12 if m["ap"].lower() == "pm" else 0) if m["ap"] else int(m["h"])
+        when = start.replace(hour=hour, minute=int(m["m"] or 0), second=0, microsecond=0)
+        if m["mon"]:
+            when = when.replace(month=MONTHS.index(m["mon"].lower()) + 1, day=int(m["day"]))
+            if when <= start:
+                when = when.replace(year=when.year + 1)
+        elif when <= start:
+            when += timedelta(days=1)
+    except ValueError:
+        return None
+    return when.timestamp()
+
+
+def limit_reset(rec, rows, now):
+    """When the limit that stopped the session resets, as an epoch, from the first source that
+    knows: the limit line's own quota answer, a live usage reading, the limit line's words; None
+    when none does. Never a reset the session was already continued for. A reset that has passed
+    counts only from the limit line (the computer slept through it), never from a reading."""
+    floor = rec.get("continued_for") or 0
+    last = limit_line(rows)
+    line = rows[last] if last is not None else {}
+    quota = line.get("quotaLimits") if isinstance(line.get("quotaLimits"), dict) else {}
+    reset = quota.get("resetsAt") if isinstance(quota.get("resetsAt"), (int, float)) else None
+    if reset and reset > floor:
+        return reset
+    live = usage_reset(last_model(rows), max(now, floor))
+    if live or reset:  # a quota answer already continued for: the line's words say nothing newer
+        return live
+    said = spoken_reset(row_text(line), stamp(line) or rec["at"])
+    return said if said and said > floor else None
+
+
+def limit_mark(sid, key=None, line=None, **fields):
+    """Set fields of a limit record and, the first time for `key`, write `line` where its lines go."""
+    tell = []
+
+    def change(rec):
+        if rec is None:
+            return None
+        rec.update(fields)
+        if key and once(rec, key):
+            tell.append(rec)
+        return rec
+
+    retry_update(sid, change)
+    if tell:
+        retry_log(tell[0], line)
+
+
+def limit_pane(rec):
+    """pane_of for a limit record's session; None too when there is no tmux to ask."""
+    try:
+        return pane_of(rec["pid"])
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def limit_plan(sid, rec, unit):
+    """A new stop on the limit. Stores what the session looks like at rest and returns (when to
+    continue, the reset that is for, or None when no source names one: then RETRY_STEPS, as after
+    an API error). Returns None, the record marked handled, after LIMIT_CONTINUES continues that
+    ended on the limit again, and for a session Claude Code's own wait covers: no Remote Control,
+    autoContinueAtUsageLimit: true, the reset within NATIVE_HOURS."""
+    at, now = rec["at"], time.time()
+    found = None if rec.get("background") else limit_pane(rec)
+    rest = {"status": session_file(rec["pid"], sid).get("status"), "screen": bottom(found[0]) if found else []}
+    head = f"> limit {rec['name']} · {time.strftime('%Y-%m-%d %H:%M')} · "
+    if rec.get("continues", 0) >= LIMIT_CONTINUES:
+        limit_mark(sid, "stopped", f"{head}not continued: {LIMIT_CONTINUES} continues ended on the limit again; "
+                   "it waits for you", handled=at, state="unreachable", rest=rest)
+        return None
+    reset = limit_reset(rec, transcript_tail(rec.get("transcript")), now)
+    if reset and not rec.get("remote") and not rec.get("background") and auto_continue() and \
+            reset - now <= NATIVE_HOURS * 3600:
+        limit_mark(sid, handled=at, state="native", rest=rest)
+        return None
+    due = reset + LIMIT_GRACE * unit if reset else \
+        at + RETRY_STEPS[min(rec.get("continues", 0), len(RETRY_STEPS) - 1)] * unit
+    limit_mark(sid, f"due {int(reset)}" if reset else None,
+               f"{head}continues at {time.strftime('%Y-%m-%d %H:%M', time.localtime(due))}, once the limit has "
+               "reset: the computer must be awake then", rest=rest, reset=reset, due=due, state="waiting")
+    return due, reset
+
+
+def limit_continue(rec, text):
+    """continue_session for a limit stop, saying why not: "" once typed, "unreachable" when the
+    session has no tmux pane to type into, else what the next slot may find gone (not idle, copy
+    mode, and parked's: no prompt box, a dialog, a draft)."""
+    if rec.get("background"):
+        return "" if continue_session(rec, text) else "not idle"
+    if session_file(rec["pid"], rec["session"]).get("status") != "idle":
+        return "not idle"
+    found = limit_pane(rec)
+    if found is None:
+        return "unreachable"
+    if found[1]:
+        return "copy mode"
+    return parked(found[0]) or ("" if type_line(found[0], text) else "not typed")
+
+
+def limit_lock(sid):
+    """The limit waiter's lock: an flock on retry/<sid>.lock, which the kernel drops with its
+    holder, so a dead waiter never blocks the next. The open file, or None when another waiter
+    holds it (a few tries: the tick tests the lock for a moment, a waiter on its way out removes
+    the file)."""
+    path = RETRY / f"{sid}.lock"
+    for _ in range(10):
+        f = path.open("a")
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.fstat(f.fileno()).st_ino == path.stat().st_ino:
+                f.truncate(0)
+                f.write(str(os.getpid()))
+                f.flush()
+                return f
+        except OSError:
+            pass
+        f.close()
+        time.sleep(0.2)
+    return None
+
+
+def limit_wait(sid):
+    """The waiter of a session stopped on a usage limit. One per record (limit_lock), alive until
+    the record goes (a clean turn end) or the session does, so nothing starts a second one beside
+    it. Each new stop is planned once (limit_plan). The computer is kept awake only from LIMIT_HOLD
+    minutes before the continue. When that is due the session gets one line, if it has not gone on
+    by itself and its pane can take it; else the next slot, or a line saying it waits for the
+    user. No 12-hour cap and no away or autoretry test: limit resume is its own setting."""
+    lock = limit_lock(sid)
+    if lock is None:
+        return
+    unit = float(os.environ.get("FLOWKIT_RETRY_MINUTE") or 60)
+    nap = max(min(5.0, unit / 12), 0.05)
+    awake, at, due, reset = None, None, None, None
+    try:
+        while True:
+            rec = retry_record(sid)
+            if not rec or rec.get("kind") != "rate_limit" or not rec.get("pid") or not alive(rec["pid"]) or \
+                    not session_file(rec["pid"], sid):
+                return
+            if (rec["at"] != at or (due is not None and time.time() >= due)) and not limit_resume():
+                retry_set(sid, resume=False)  # turned off since: read before each plan and each continue
+                return
+            if rec["at"] != at:  # a new stop: the first, a continue that hit the limit again, a prompt typed meanwhile
+                at, due = rec["at"], None
+                if rec.get("handled") != at:
+                    time.sleep(max(at + SETTLE * unit / 60 - time.time(), 0))
+                    due, reset = limit_plan(sid, rec, unit) or (None, None)
+                continue
+            now = time.time()
+            if due is None or now < due:
+                if due is not None and awake is None and now >= due - LIMIT_HOLD * unit and shutil.which("caffeinate"):
+                    awake = subprocess.Popen(["caffeinate", "-i", "-w", str(rec["pid"])], stdin=subprocess.DEVNULL,
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(nap if due is None else min(nap, due - now))
+                continue
+            when = time.strftime("%H:%M", time.localtime(at))
+            why = "moved" if moved_on(transcript_tail(rec.get("transcript")), at) else limit_continue(
+                rec, f"Your last turn stopped on the usage limit at {when}; it has reset. Carry on from where you were.")
+            head = f"> limit {rec['name']} · {time.strftime('%Y-%m-%d %H:%M')} · not continued: "
+            if why == "":
+                retry_update(sid, lambda r: r and {
+                    **r, "continues": r.get("continues", 0) + 1, "continued_at": time.time(),
+                    "continued_for": reset or time.time(), "handled": at, "state": "continued"})
+            elif why == "moved":
+                limit_mark(sid, handled=at, state="moved")
+            elif why == "unreachable":
+                limit_mark(sid, "unreachable", f"{head}it does not run in a tmux pane; it waits for you",
+                           handled=at, state="unreachable")
+            else:  # at work, copy mode, a draft, a dialog: the next slot
+                limit_mark(sid, "dialog" if why == "dialog" else None,
+                           f"{head}a dialog is open below its prompt box; looked at again every "
+                           f"{RETRY_STEPS[-1]} minutes", state=why)
+                due = time.time() + RETRY_STEPS[-1] * unit
+                continue
+            due = None
+            if awake:
+                awake.terminate()
+                awake = None
+    finally:
+        if awake:
+            awake.terminate()
+        Path(lock.name).unlink(missing_ok=True)
+        lock.close()
+
+
 def api_ok_hook():
     """Stop: the turn ended cleanly, so the session's retry record goes."""
     sid = str(json.load(sys.stdin).get("session_id") or "")
-    if SAFE.match(sid):
-        (RETRY / f"{sid}.json").unlink(missing_ok=True)
+    if SAFE.match(sid) and (RETRY / f"{sid}.json").exists():
+        with retry_lock():
+            (RETRY / f"{sid}.json").unlink(missing_ok=True)
 
 
 def tmux(*args):
