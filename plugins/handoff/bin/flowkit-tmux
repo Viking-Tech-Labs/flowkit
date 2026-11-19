@@ -5,6 +5,7 @@
                               (@flowkit_state: working, waiting, idle), each tab with how many
                               of its sessions wait on you (@flowkit_wait), each story and adhoc
                               tab with its most urgent state (@flowkit_tab), prints the total;
+                              starts again the waiter of a session stopped on a usage limit;
                               with autoclose=on in handoff.conf it also closes a finished slice's
                               pane once its successor runs or its watch is open, and finished
                               story tabs
@@ -37,7 +38,8 @@ SEP = "\x1f"
 VERSION = re.compile(r"^\d+\.\d+\.\d+$")  # a pane running claude shows its version as the command
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "flowkit"
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-URGENCY = ("needs you", "error", "stalled", "running", "watching", "done")  # a tab shows its first
+URGENCY = ("needs you", "error", "limit", "stalled", "running", "watching", "done")  # a tab shows its first
+STOPPED = ("error", "limit")  # the last turn ended on an API error, or on a usage limit
 STALL = 15 * 60
 SESSION_LINE = re.compile(r"^Session: ([0-9a-f-]{36})\b", re.M)  # a recorded close names its session
 HEADING = re.compile(r"^## (.+?) · \d{4}-\d\d-\d\d", re.M)  # a close section, or the reporter's final report
@@ -150,8 +152,14 @@ def tab_state(row, slug):
     status = row.get("status")
     if status == "waiting":
         return "needs you"
-    if sid and (CLAUDE / "flowkit" / "retry" / f"{sid}.json").exists():
-        return "error"
+    if sid:
+        try:
+            rec = json.loads((CLAUDE / "flowkit" / "retry" / f"{sid}.json").read_text())
+            return "limit" if isinstance(rec, dict) and rec.get("kind") == "rate_limit" else "error"
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError):
+            return "error"
     info = live(row) if sid else {}
     if status == "busy":
         return "watching" if info.get("status") == "shell" and sid in closed(slug) else "running"
@@ -268,8 +276,8 @@ def close_stories(pane_list, found, words):
         if any(p["id"] not in rows and p["cmd"].lstrip("-") not in SHELLS for p in members):
             continue  # a pane runs something else, or a claude that claude agents does not list
         claudes = [(p, rows[p["id"]]) for p in members if p["id"] in rows]
-        if any(r.get("status") != "idle" or words.get(p["id"]) == "error" for p, r in claudes):
-            continue  # at work, waiting on the user, watching or in error
+        if any(r.get("status") != "idle" or words.get(p["id"]) in STOPPED for p, r in claudes):
+            continue  # at work, waiting on the user, watching, in error or at a usage limit
         report = [p for p, r in claudes if (r.get("name") or "").endswith("-report")]
         reported, complete = story_reported(text), story_complete(text)
         if not (reported or not claudes or (complete and not report)):
@@ -322,8 +330,8 @@ def successors(slug, sid):
 def finished_panes(rows, found, words):
     """Story panes whose slice is over: the close is recorded and a session it launched runs, or a
     watch it registered is open. Never the reporter, a coordinator, the adhoc tab (no story mark),
-    a held tab, or a session at work, waiting on the user, in error or touched in the last 5
-    minutes."""
+    a held tab, or a session at work, waiting on the user, in error, at a usage limit or touched
+    in the last 5 minutes."""
     now = time.time()
     live = {r.get("name") for r in rows if r.get("pid")}  # a successor in the background has no pane
     arms = watched()
@@ -333,7 +341,7 @@ def finished_panes(rows, found, words):
         name, sid = r.get("name") or "", r.get("sessionId") or ""
         if not p.get("slug") or p.get("hold") or starting(p, now) or not sid:
             continue
-        if r.get("status") != "idle" or words.get(p["id"]) == "error":
+        if r.get("status") != "idle" or words.get(p["id"]) in STOPPED:
             continue
         if name.endswith("-report") or name in coords or COORD_NAME.search(name):
             continue
@@ -481,6 +489,51 @@ def watch():
         pass
 
 
+def limits():
+    """A session stopped on a usage limit needs its waiter (`handoff.py retry-wait`), which the
+    StopFailure hook starts and which lives until the record goes: one that died is started again,
+    at most once a minute. Never for a record its waiter is done with (continued, left to the user
+    or to Claude Code's own wait), with limit resume off, or whose session is gone. No record costs
+    one directory read."""
+    state = CLAUDE / "flowkit" / "retry"
+    try:
+        names = [e.name for e in os.scandir(state) if e.name.endswith(".json") and not e.name.startswith(".")]
+    except OSError:
+        return
+    if not names:
+        return
+    try:
+        if time.time() - (state / ".tick").stat().st_mtime < 60:
+            return
+    except OSError:
+        pass
+    try:
+        (state / ".tick").touch()
+    except OSError:
+        return
+    for name in names:
+        try:
+            rec = json.loads((state / name).read_text())
+            if rec.get("kind") != "rate_limit" or not rec.get("resume") or rec.get("handled") == rec.get("at"):
+                continue
+            os.kill(int(rec["pid"]), 0)
+        except (OSError, ValueError, TypeError, AttributeError, KeyError):
+            continue
+        try:
+            with (state / f"{name[:-5]}.lock").open() as lock:  # its waiter holds an flock on it while it lives
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            continue
+        try:
+            subprocess.Popen([sys.executable, str(plugin_root() / "scripts" / "handoff.py"), "retry-wait", name[:-5]],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError:
+            pass
+
+
 def status_line():
     """`waiting` for the status bar. tmux reruns a #() job at every redraw that falls in a new
     second, not every status-interval, so the line comes from the cache while it is younger than
@@ -507,6 +560,7 @@ def status_line():
             waiting()
         drain()
         watch()
+        limits()
         line = out.getvalue()
         fresh = CACHE.with_suffix(".tmp")
         fresh.write_text(json.dumps({"at": time.time(), "line": line}))

@@ -83,7 +83,7 @@ class Labels(unittest.TestCase):
             with (self.tmp / "stories" / f"{self.story or 'other'}.md").open("a") as f:
                 f.write(f"\n## s{n} · 2026-10-20 12:00\nSession: {sid} · Repo: /repo\n")
         if retry:
-            (self.tmp / "flowkit" / "retry" / f"{sid}.json").write_text("{}")
+            (self.tmp / "flowkit" / "retry" / f"{sid}.json").write_text(json.dumps(retry if isinstance(retry, dict) else {}))
         return sid
 
     def arm(self, name, story="st"):
@@ -113,6 +113,8 @@ class Labels(unittest.TestCase):
     def test_each_state(self):
         self.assertEqual(self.one(status="waiting"), "needs you")
         self.assertEqual(self.one(status="busy", retry=True), "error")
+        self.assertEqual(self.one(status="idle", retry={"kind": "server_error"}), "error")
+        self.assertEqual(self.one(status="idle", retry={"kind": "rate_limit"}), "limit")
         self.assertEqual(self.one(status="busy"), "running")
         self.assertEqual(self.one(status="busy", live="shell"), "running")
         self.assertEqual(self.one(status="busy", live="shell", closed=True), "watching")
@@ -156,6 +158,8 @@ class Labels(unittest.TestCase):
         self.session(3, status="busy")
         self.session(4, status="idle", idle_for=20 * 60)
         self.assertEqual(self.label("@1"), "stalled")
+        self.session(8, status="idle", retry={"kind": "rate_limit"})
+        self.assertEqual(self.label("@1"), "limit")
         self.session(5, status="busy", retry=True)
         self.assertEqual(self.label("@1"), "error")
         self.session(6, status="waiting")
@@ -274,6 +278,40 @@ class Cache(Labels):
             os.utime(state / ".tick", (0, 0))
             self.ft.watch()
             self.assertEqual(popen.call_count, 2, "a fresh heartbeat of a process that is gone")
+
+    def test_the_tick_starts_a_limit_waiter_that_went(self):
+        state = self.tmp / "flowkit" / "retry"
+        sid = "00000001-0000-0000-0000-000000000000"
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        rec = {"kind": "rate_limit", "resume": True, "at": 5.0, "pid": os.getpid()}
+
+        def tick(**change):
+            (state / f"{sid}.json").write_text(json.dumps({**rec, **change}))
+            (state / ".tick").unlink(missing_ok=True)
+            self.ft.limits()
+
+        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
+            self.line()
+            self.assertEqual(popen.call_count, 0, "no record: one directory read")
+            (state / f"{sid}.json").write_text(json.dumps(rec))
+            self.ft.CACHE.unlink()
+            self.line()
+            self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "handoff.py"), "retry-wait", sid])
+            self.ft.limits()
+            self.assertEqual(popen.call_count, 1, "at most once a minute")
+            for change in ({"kind": "server_error"}, {"resume": False}, {"handled": 5.0, "state": "continued"},
+                           {"handled": 5.0, "state": "unreachable"}, {"pid": gone.pid}, {"pid": None}):
+                tick(**change)
+                self.assertEqual(popen.call_count, 1, change)
+            tick(handled=4.0)
+            self.assertEqual(popen.call_count, 2, "a stop newer than the one its waiter was done with")
+            with (state / f"{sid}.lock").open("w") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                tick()
+                self.assertEqual(popen.call_count, 2, "its waiter lives: it holds the lock")
+            tick()
+            self.assertEqual(popen.call_count, 3, "a lock file nobody holds is a dead waiter's")
 
     def test_a_line_younger_than_ten_seconds_comes_from_the_cache(self):
         self.session(1, status="waiting")
@@ -554,7 +592,8 @@ class PaneCloser(Closer):
         self.assertEqual(self.closes(), [], "named on a coordination board")
 
     def test_a_busy_waiting_or_lately_touched_session_stays(self):
-        for kw in ({"status": "busy"}, {"status": "waiting"}, {"touched": 60}, {"retry": True}):
+        for kw in ({"status": "busy"}, {"status": "waiting"}, {"touched": 60}, {"retry": True},
+                   {"retry": {"kind": "rate_limit"}}):
             self.setUp()
             self.slice_done(**kw)
             self.successor()

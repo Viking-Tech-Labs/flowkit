@@ -34,8 +34,8 @@ Sessions keep working while you are detached. Closing the terminal window is a d
 - **⚑ 2 need you** on the right: two sessions wait on you (a question or a permission).
 - **⚑1** after a tab's name: one of them is in that tab.
 - **· running** after a story or adhoc tab's name: its most urgent session's state, one of
-  needs you, error, stalled (idle 15 min, no close recorded), running, watching (closed, a watch
-  still runs), done.
+  needs you, error, limit (stopped on a usage limit, continued after the reset), stalled (idle
+  15 min, no close recorded), running, watching (closed, a watch still runs), done.
 - With `autoclose=on` (`/handoff:setup`), a finished story's tab closes on its own;
   `tmux set-option -w @flowkit_hold 1` in a tab keeps it.
 - A story tab's panes show their slot, the session's name and its state on the top border:
