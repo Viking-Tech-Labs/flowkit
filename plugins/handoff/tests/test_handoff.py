@@ -61,9 +61,19 @@ class Handoff(unittest.TestCase):
     def away(self, *args):
         return subprocess.run(["python3", str(AWAY_BIN), *args], capture_output=True, text=True, env=self.env)
 
-    def gate(self):
-        out = self.handoff("question-gate", stdin=json.dumps({"tool_name": "AskUserQuestion"})).stdout
+    def gate(self, sid=None):
+        data = {"tool_name": "AskUserQuestion", **({"session_id": sid} if sid else {})}
+        out = self.handoff("question-gate", stdin=json.dumps(data)).stdout
         return json.loads(out)["hookSpecificOutput"] if out else None
+
+    def set_flag(self, at, by=None, written=None):
+        """The away flag taking effect at epoch `at` (by `away --by <by>`; without: written raw, its
+        stamp alone), its file written at `written` (default now)."""
+        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
+        self.flag.write_text(f"{stamp}\nby: {by}\nset: {stamp}\n" if by else f"{stamp}\n")
+        if written is not None:
+            os.utime(self.flag, (written, written))
+        return stamp
 
     def test_question_gate_follows_the_flag(self):
         self.assertIsNone(self.gate())
@@ -730,20 +740,150 @@ class Handoff(unittest.TestCase):
         self.assertEqual(self.away("waiting").stdout.strip(), "nobody waits on you")
         self.assertEqual(self.away("nudge", "--what").returncode, 2)
 
-    def test_away_writes_the_flag_then_nudges_and_back_lists(self):
+    def test_away_writes_the_flag_the_tick_nudges_once_in_effect_and_back_lists(self):
         self.agents([
             {"name": "s3", "kind": "interactive", "pid": 1, "status": "waiting", "waitingFor": "permission prompt"},
         ])
         self.usage_answer()
         out = self.handoff("away").stdout.splitlines()
         self.assertTrue(self.flag.is_file())
-        self.assertTrue(out[0].startswith("away: since "))
+        self.assertTrue(out[0].startswith("away: from "))
         self.assertTrue(out[1].startswith("Week 49% used, resets "))
-        self.assertEqual(out[2], "permission s3: waits on a permission prompt; answer it from the phone")
+        self.assertEqual(len(out), 2, "no nudge before the flag takes effect")
+        nudge = lambda: self.handoff("away-nudge").stdout
+        self.assertEqual(nudge(), "", "not in effect yet")
+        self.set_flag(time.time() - 60, by="coord-a")
+        self.assertEqual(nudge(), "permission s3: waits on a permission prompt; answer it from the phone\n")
+        self.assertEqual(nudge(), "", "once per flag")
+        self.set_flag(time.time() - 13 * 3600, by="coord-b", written=time.time() - 13 * 3600)
+        self.assertEqual(nudge(), "", "an expired flag gets none")
         out = self.handoff("back").stdout.splitlines()
         self.assertFalse(self.flag.exists())
         self.assertEqual(out, ["away: off", "s3: waits on permission prompt"])
         self.assertFalse(self.calls.exists())
+        self.assertEqual(nudge(), "")
+
+    def test_away_takes_effect_five_minutes_on_and_counts_twelve_hours_from_then(self):
+        self.usage_answer()
+        out = self.handoff("away", "--by", "coord-a").stdout.splitlines()
+        lines = self.flag.read_text().splitlines()
+        at = datetime.strptime(lines[0], "%Y-%m-%d %H:%M").timestamp()
+        self.assertTrue(time.time() + 240 < at <= time.time() + 360, "five minutes on, up to the minute")
+        self.assertEqual(lines[1], "by: coord-a")
+        self.assertRegex(lines[2], r"^set: \d{4}-\d\d-\d\d \d\d:\d\d$")
+        self.assertLess(at - datetime.strptime(lines[2][5:], "%Y-%m-%d %H:%M").timestamp(), 7 * 60)
+        self.assertEqual(out[0], f"away: from {lines[0]} (set by coord-a; questions go through until then; "
+                                 "clears with back or after 12 hours)")
+        self.assertIsNone(self.gate(), "not in effect before")
+        self.assertEqual(self.handoff("away-status").stdout, f"away: from {lines[0]} (set by coord-a at {lines[2][5:]})\n")
+        again = self.handoff("away", "--by", "coord-b").stdout.splitlines()[0]
+        self.assertEqual(again, f"away: from {lines[0]} (already set by coord-a at {lines[2][5:]}; clears with back "
+                                "or after 12 hours)")
+        self.assertEqual(self.flag.read_text().splitlines(), lines, "a flag already set stays as it is")
+        stamp = self.set_flag(time.time() - 60, by="coord-a")
+        self.assertEqual(self.gate()["permissionDecision"], "deny", "in effect once its stamp has passed")
+        self.assertEqual(self.handoff("away-status").stdout, f"away: since {stamp}\n")
+        self.set_flag(time.time() - 12 * 3600 + 120, by="coord-a", written=time.time() - 12 * 3600 - 180)
+        self.assertIsNotNone(self.gate(), "12 hours from the stamp it took effect, not from its write")
+        self.set_flag(time.time() - 12 * 3600 - 120, by="coord-a", written=time.time() - 12 * 3600 - 420)
+        self.assertIsNone(self.gate())
+        self.assertEqual(self.handoff("away-status").stdout, "away: off\n")
+        stamp = self.set_flag(time.time() - 60)
+        self.assertEqual(self.gate()["permissionDecision"], "deny", "a raw one-line flag is in effect from its stamp")
+        self.assertIn(f"since {stamp}", self.gate()["permissionDecisionReason"])
+        self.set_flag(time.time() + 600)
+        self.assertIsNone(self.gate(), "a raw stamp still ahead is not in effect yet")
+
+    def test_away_rings_each_idle_coordinator_once(self):
+        (self.tmp / "claude" / "coordination").mkdir()
+        (self.tmp / "claude" / "coordination" / "demo.md").write_text("# demo\nCoordinator: `boss` · since 09:00\n")
+        rows = [("boss", "idle"), ("demo-coord", "idle"), ("coord-b", "busy"), ("coord-demo-report", "idle"),
+                ("demo-s2", "idle"), ("coord-c", "idle"), ("coord-d", "idle"), ("coord-w", "waiting")]
+        self.agents([{"name": n, "kind": "interactive", "pid": 101 + i, "status": s} for i, (n, s) in enumerate(rows)]
+                    + [{"name": "coord-e", "kind": "background", "pid": 120, "status": "idle"}])
+        stub = self.tmp / "bin" / "tmux"
+        stub.write_text("#!/bin/sh\ncase \"$1\" in\n"
+                        "list-panes) printf '%s\\n' " + " ".join(f"'{101 + i} %{i + 1} 0'" for i in range(8)) + ";;\n"
+                        "capture-pane) if [ \"$4\" = %7 ]; then echo '│ > half typed'; else echo '│ > '; fi;;\n"
+                        f"*) echo tmux \"$@\" >> {self.calls};; esac\n")
+        stub.chmod(0o755)
+        self.usage_answer()
+        out = self.handoff("away", "--by", "coord-c").stdout.splitlines()
+        when = self.flag.read_text().splitlines()[0][-5:]
+        self.assertEqual(out[2:], ["last call boss (tmux %1)", "last call demo-coord (tmux %2)",
+                                   "no last call coord-b: busy", "no last call coord-d: draft",
+                                   "no last call coord-w: waiting", "no last call coord-e: not in a tmux pane"])
+        typed = self.calls.read_text().splitlines()
+        self.assertEqual([t.split(" -l ")[0] for t in typed], ["tmux send-keys -t %1", "tmux send-keys -t %2"])
+        self.assertTrue(typed[0].split(" -l ")[1].startswith(f"last call: the user goes away at {when}. Ask now "
+                                                             "anything you need from them;"))
+        self.assertTrue(typed[0].endswith("; run-shell sleep 0.5 ; send-keys -t %1 Enter"))
+        self.handoff("away", "--by", "coord-b")
+        self.assertEqual(len(self.calls.read_text().splitlines()), 2, "a flag already set rings nobody again")
+
+    def test_the_gate_lets_a_session_ask_within_five_minutes_of_a_prompt_the_user_typed(self):
+        self.set_flag(time.time() - 60, by="coord-a")
+        mark = self.tmp / "flowkit-context-s1.json"
+        denied = lambda: (self.gate("s1") or {}).get("permissionDecision") == "deny"
+        self.context(10, "Repo: /Users/me/repo   Session: demo-s1\n\nToday: …")
+        self.assertTrue(denied(), "a session's first prompt is its launch brief")
+        for prompt in ("<task-notification>\n<task-id>b1</task-id>", "Another Claude session sent a message: "
+                       '<cross-session-message from="uds:/tmp/x">hi</cross-session-message>',
+                       "[Cross-session idle notice] demo-s2 is idle", "<command-name>/model</command-name>",
+                       "<local-command-stdout>Set model</local-command-stdout>", "<bash-input>ls</bash-input>",
+                       "Your last turn stopped on the usage limit at 03:00. Carry on from where you were.",
+                       "Your last turn ended on an API error (overloaded) at 03:00. Carry on from where you were.",
+                       "Your last turn hit the output token limit at 03:00. Carry on, in smaller pieces.",
+                       "away since 2026-11-19 23:15: I am off. Answer the question you asked with the recommended option",
+                       "away: I am off. Answer the question", "report now", "closed demo-s2",
+                       "last call: the user goes away at 23:15. Ask now anything you need from them"):
+            self.context(10, prompt)
+            self.assertTrue(denied(), prompt)
+        self.context(10, "go with 2, and keep the old name")
+        self.assertFalse(denied(), "typed by the user a moment ago")
+        self.assertEqual(self.gate("s2")["permissionDecision"], "deny", "another session is still denied")
+        mark.write_text(json.dumps({**json.loads(mark.read_text()), "typed": time.time() - 301}))
+        self.assertTrue(denied(), "five minutes on")
+        self.handoff("context", stdin=json.dumps({"session_id": "s1", "hook_event_name": "PostToolUse",
+                                                   "tool_name": "AskUserQuestion", "tool_response": {}}))
+        self.assertFalse(denied(), "an answered question counts too")
+        self.flag.unlink()
+        self.assertIsNone(self.gate("s2"))
+
+    def test_every_session_hears_the_set_and_the_clear_once(self):
+        self.usage_answer()
+        hear = lambda sid, prompt=None: self.context(10, prompt, sid=sid)
+        self.assertIsNone(hear("s1", "hi"))
+        self.handoff("away", "--by", "coord-a")
+        stamp, _, now = self.flag.read_text().splitlines()
+        line = (f"Away flag set by coord-a at {now[5:]}: the user is away from {stamp}. Until then questions go "
+                "through; from then on a question is denied unless the user typed to this session in the 5 "
+                'minutes before it, and you take the recommended option, marked "(auto)".')
+        self.assertEqual(hear("s1"), line, "mid-run, at the next batch of tool calls")
+        self.assertIsNone(hear("s1"))
+        self.assertIsNone(hear("s1", "next"))
+        self.assertEqual(hear("s2", "hi"), line)
+        self.assertIsNone(hear("s2", "hi"))
+        self.handoff("back", "--by", "coord-b")
+        now = json.loads((self.tmp / "claude" / "flowkit" / "away-cleared").read_text())["at"]
+        cleared = f"Away flag cleared by coord-b at {now}: the user is back, questions go to them again."
+        self.assertEqual(hear("s1"), cleared)
+        self.assertIsNone(hear("s1"))
+        self.assertEqual(hear("s2", "hi"), cleared)
+        self.assertIsNone(hear("s3", "hi"), "a session that never heard of it hears nothing")
+        stamp = self.set_flag(time.time() - 60)
+        self.assertEqual(hear("s1"), f"Away flag set by unknown at {stamp}, in effect since {stamp}: a question is "
+                                     "denied unless the user typed to this session in the last 5 minutes; take the "
+                                     'recommended option, marked "(auto)".')
+        old = time.time() - 13 * 3600
+        self.set_flag(old, written=old)
+        self.assertEqual(hear("s1"), "Away flag expired (12 hours after it took effect): questions go to the user again.")
+        self.set_flag(time.time() - 60)
+        hear("s1")
+        self.flag.unlink()
+        self.assertEqual(hear("s1"), "Away flag removed: the user is back, questions go to them again.")
+        ctx = self.context(45, "again", sid="s1")
+        self.assertTrue(ctx.startswith("Context ~45%"), "the context line comes alone when the flag did not move")
 
     def test_restamp_keeps_an_unattended_chain_unattended(self):
         self.assertEqual(self.handoff("restamp").stdout, "away: off\n")
@@ -1379,9 +1519,9 @@ class Handoff(unittest.TestCase):
         self.assertEqual(first()[0], "remind: silent, at the computer (last input 599 s ago)")
         self.idle(600)
         self.assertEqual(first()[0], "remind: not silent", "ten minutes without a key or the mouse: not at the computer")
-        self.flag.write_text("2026-11-19 23:10\n")
+        self.flag.write_text("2026-11-18 23:10\n")
         self.idle(5)
-        self.assertEqual(first()[0], "remind: silent, away since 2026-11-19 23:10; at the computer (last input 5 s ago)")
+        self.assertEqual(first()[0], "remind: silent, away since 2026-11-18 23:10; at the computer (last input 5 s ago)")
         self.flag.unlink()
         # not a Mac: the newest tmux client activity stands in, and no answer at all is not "at the computer"
         self.idle(None)

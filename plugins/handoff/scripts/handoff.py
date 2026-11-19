@@ -19,14 +19,25 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py wake --id <session id> <text>       resume a background session with <text> once it is idle
   handoff.py conf <key> <value>                  set a key of ~/.config/flowkit/handoff.conf
   handoff.py settings diff|install <key=json>…   values for the user's settings.json (a.b nests)
-  handoff.py away | back | away-status           the ~/.claude/away flag (12 hours); `away` then nudges
-                                                 the sessions parked on a question (bin/flowkit-away),
-                                                 `back` lists the sessions waiting on the user
+  handoff.py away [--by <session>]               the ~/.claude/away flag: in effect 5 minutes from now (its
+                                                 first line), for 12 hours; names who set it and when; a
+                                                 last call is typed into every idle coordinator now; a flag
+                                                 already set stays as it is
+  handoff.py back [--by <session>]               clear the flag, then list the sessions waiting on the user
+  handoff.py away-status                         away: since <stamp> (in effect), from <stamp> (set, not
+                                                 yet in effect) or off
+  handoff.py away-nudge                          the tick's: once the flag is in effect, nudge the sessions
+                                                 parked on a question (bin/flowkit-away), once per flag
   handoff.py restamp                             an unattended close: the flag's 12 hours start again
                                                  while it exists (no nudge, no usage), so a chain
                                                  longer than that stays unattended
-  handoff.py question-gate                       PreToolUse hook on AskUserQuestion: denied while away
-  handoff.py context                             UserPromptSubmit and PostToolBatch hook: the context line
+  handoff.py question-gate                       PreToolUse hook on AskUserQuestion: denied while the flag
+                                                 is in effect, unless the user typed to this session in
+                                                 the last 5 minutes
+  handoff.py context                             UserPromptSubmit, PostToolBatch and PostToolUse (on
+                                                 AskUserQuestion) hook: the context line, the away flag's
+                                                 set and clear once each, the stamp of a prompt the user
+                                                 typed or a question they answered
   handoff.py api-error | api-ok                  StopFailure and Stop hooks: the retry record and line, and
                                                  the waiter (retry-wait <session id>): after a usage limit
                                                  unless limitresume=off, after an API error with autoretry=on
@@ -59,6 +70,12 @@ HOME = Path.home()
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or HOME / ".claude")
 AWAY = CLAUDE / "away"
 AWAY_HOURS = 12
+AWAY_DELAY = 5  # minutes from `away` to the flag taking effect: the coordinators' last call
+AWAY_NUDGED = CLAUDE / "flowkit" / "away-nudged"  # the flag the tick's nudge ran for
+AWAY_CLEARED = CLAUDE / "flowkit" / "away-cleared"  # who cleared the flag last, when, and which flag it was
+PRESENT = 5  # minutes after the user typed to a session (or answered its question) in which it may still ask
+COORDINATOR = re.compile(r"^Coordinator: (\S+)", re.M)  # a coordination board names its coordinator
+COORD_NAME = re.compile(r"(?:^|-)coord")  # coord-1, story-coord, story-coordinator
 SPAWNED = CLAUDE / "spawned"
 PRUNE_DAYS = 30
 COPY = re.compile(r"-\d{8}-\d{6}(-shared)?\.md$")  # flowkit-spawn's stamped copies, never a saved <name>.md
@@ -97,6 +114,10 @@ LIMIT_CONTINUES = 3  # continues that ended on the limit again, no clean turn en
 NATIVE_HOURS = 24  # a reset this near is Claude Code's own to wait for, in a session without Remote Control
 TAIL = 2 * 1024 * 1024  # bytes of a transcript's end read for its last limit line and what follows it
 LOCAL = ("<command-", "<local-command-", "<bash-")  # how the lines of a /command or a ! shell line start: no turn
+WRAPPERS = ("<task-notification", "Another Claude session sent a message", "<cross-session-message",
+            "[Cross-session") + LOCAL  # prompts nobody typed: a task's notice, another session's message
+FLOWKIT_LINE = re.compile(r"Your last turn (?:stopped on the usage limit|ended on an API error|hit the output token limit)"
+                          r"|away(?: since .+?)?: I am off\.|report now$|closed [\w.-]+$|last call: ")  # lines flowkit types
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 RESETS = re.compile(r"resets (?:at )?(?:(?P<mon>[A-Za-z]{3}) (?P<day>\d{1,2}),? (?:at )?)?(?P<h>\d{1,2})(?::(?P<m>\d\d))?"
                     r"(?: ?(?P<ap>[ap]m))?(?: \((?P<tz>[^)\s]+)\))?", re.I)
@@ -185,14 +206,155 @@ def setting(key, default):
     return default
 
 
-def away_since():
-    """The stamp in the away flag when it is younger than AWAY_HOURS, else None."""
+def away_flag():
+    """The away flag while it counts, as {text, stamp, at, by, set}, else None. Its first line is the
+    stamp it takes effect (`at`; one that does not parse: when the file was written), then `by:` who
+    set it and `set:` when; a flag written raw, its stamp alone, is in effect from that stamp, set by
+    `unknown`. It counts until AWAY_HOURS after its stamp or its last re-stamp, whichever is later."""
     try:
-        if time.time() - AWAY.stat().st_mtime > AWAY_HOURS * 3600:
-            return None
-        return AWAY.read_text().strip() or "set"
+        text, mtime = AWAY.read_text(), AWAY.stat().st_mtime
     except OSError:
         return None
+    lines = text.splitlines() or [""]
+    stamp = lines[0].strip()
+    try:
+        at = datetime.strptime(stamp, "%Y-%m-%d %H:%M").timestamp()
+    except ValueError:
+        at = mtime
+    if time.time() > max(at, mtime) + AWAY_HOURS * 3600:
+        return None
+    fields = dict(line.split(": ", 1) for line in lines[1:] if ": " in line)
+    return {"text": text, "stamp": stamp or "set", "at": at, "by": fields.get("by", "unknown"),
+            "set": fields.get("set") or time.strftime("%Y-%m-%d %H:%M", time.localtime(min(at, mtime)))}
+
+
+def away_since():
+    """The away flag's stamp while it is in effect, else None."""
+    flag = away_flag()
+    return flag["stamp"] if flag and flag["at"] <= time.time() else None
+
+
+def away_status():
+    flag = away_flag()
+    if not flag:
+        return "away: off"
+    if flag["at"] <= time.time():
+        return f"away: since {flag['stamp']}"
+    return f"away: from {flag['stamp']} (set by {flag['by']} at {flag['set']})"
+
+
+def away(by):
+    """Set the away flag: in effect AWAY_DELAY minutes from now, naming who set it and when. The idle
+    coordinators get a last call now; the sessions parked on a question get the nudge once it takes
+    effect (the tick runs `away-nudge`). A flag already set stays as it is, and nudges again once in
+    effect."""
+    flag = away_flag()
+    if flag:
+        print(f"away: {'since' if flag['at'] <= time.time() else 'from'} {flag['stamp']} (already set by "
+              f"{flag['by']} at {flag['set']}; clears with back or after {AWAY_HOURS} hours)")
+    else:
+        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime((int(time.time()) + AWAY_DELAY * 60 + 59) // 60 * 60))
+        CLAUDE.mkdir(parents=True, exist_ok=True)
+        fresh = CLAUDE / ".away.tmp"
+        fresh.write_text(f"{stamp}\nby: {by}\nset: {time.strftime('%Y-%m-%d %H:%M')}\n")
+        os.replace(fresh, AWAY)  # whole, so a reader never takes half a stamp for a raw flag in effect now
+        print(f"away: from {stamp} (set by {by}; questions go through until then; clears with back or after "
+              f"{AWAY_HOURS} hours)")
+    sys.stdout.flush()
+    usage()
+    if not flag:
+        last_call(by, stamp)
+    elif flag["at"] <= time.time():
+        reach("nudge")
+
+
+def back(by):
+    """Clear the away flag, noting who and when (the context hook tells every session), then list
+    the sessions waiting on the user."""
+    try:
+        text = AWAY.read_text()
+        AWAY.unlink()
+        AWAY_CLEARED.parent.mkdir(parents=True, exist_ok=True)
+        AWAY_CLEARED.write_text(json.dumps({"by": by, "at": time.strftime("%Y-%m-%d %H:%M"), "flag": text}))
+    except OSError:
+        pass
+    print("away: off")
+    sys.stdout.flush()
+    reach("waiting")
+
+
+def last_call(by, stamp):
+    """`away`'s last call: one line typed into every idle coordinator in a tmux pane (a name on a
+    coordination board's `Coordinator:` line, or with `coord` at its start or after a `-`), only into
+    a free prompt box; never into a reporter, the setter, or a session that is busy or waits."""
+    try:
+        rows = [r for r in agents_json() if isinstance(r, dict)]
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        print("last call: cannot read `claude agents --json`: no coordinator told")
+        return
+    boards = set()
+    for path in (CLAUDE / "coordination").glob("*.md"):
+        try:
+            boards.update(m.strip("`") for m in COORDINATOR.findall(path.read_text(errors="replace")))
+        except OSError:
+            pass
+    text = (f"last call: the user goes away at {stamp[-5:]}. Ask now anything you need from them; from then on "
+            'questions are denied and you take the recommended option, marked "(auto)".')
+    for row in rows:
+        name = str(row.get("name") or "")
+        if name == by or name.endswith("-report") or not (name in boards or COORD_NAME.search(name)):
+            continue
+        if mode(row) != "idle":
+            print(f"no last call {name}: {mode(row)}")
+            continue
+        found = pane_of(row["pid"]) if row.get("kind") == "interactive" and row.get("pid") else None
+        why = "not in a tmux pane" if found is None else "copy mode" if found[1] else parked(found[0])
+        if not why and not type_line(found[0], text):
+            why = "tmux did not take the line"
+        print(f"no last call {name}: {why}" if why else f"last call {name} (tmux {found[0]})")
+
+
+def away_nudge():
+    """The tick's, while a flag waits for it: once the flag is in effect, the sessions parked on a
+    question get the nudge, once per flag (an expired flag is marked done without one)."""
+    try:
+        text = AWAY.read_text()
+    except OSError:
+        return
+    flag = away_flag()
+    if flag and flag["at"] > time.time():
+        return
+    try:
+        if AWAY_NUDGED.read_text() == text:
+            return
+    except OSError:
+        pass
+    AWAY_NUDGED.parent.mkdir(parents=True, exist_ok=True)
+    AWAY_NUDGED.write_text(text)
+    if flag:
+        reach("nudge")
+
+
+def mark_file(sid):
+    """A session's hook state: the context steps, whether it had a prompt, when the user last typed
+    to it, the away flag it last heard of."""
+    return Path(tempfile.gettempdir()) / f"flowkit-context-{sid}.json"
+
+
+def typed_by_user(prompt, first):
+    """A prompt the user typed, at the computer or from the phone: not the session's first (a
+    launch's brief), not a wrapper (a task's notice, a /command's lines, another session's message)
+    and not a line flowkit types."""
+    prompt = prompt.lstrip()
+    return not first and not prompt.startswith(WRAPPERS) and not FLOWKIT_LINE.match(prompt)
+
+
+def present(sid):
+    """The user typed to this session, or answered its question, in the last PRESENT minutes."""
+    try:
+        return time.time() - json.loads(mark_file(sid).read_text()).get("typed", 0) < PRESENT * 60
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
 
 
 def reach(*args):
@@ -205,16 +367,19 @@ def reach(*args):
 
 
 def question_gate():
-    """PreToolUse on AskUserQuestion. While the away flag is set the question is denied, with the
-    reason the session acts on; otherwise silent, and the question goes to the user."""
+    """PreToolUse on AskUserQuestion. While the away flag is in effect the question is denied, with the
+    reason the session acts on, unless the user typed to this session in the last PRESENT minutes;
+    otherwise silent, and the question goes to the user."""
     try:
-        json.load(sys.stdin)
+        data = json.load(sys.stdin)
     except ValueError:
         return
     since = away_since()
-    if not since:
+    sid = str(data.get("session_id") or "") if isinstance(data, dict) else ""
+    if not since or (SAFE.match(sid) and present(sid)):
         return
-    reason = (f"The user is away (since {since}, {AWAY}): questions are not asked. Take the recommended "
+    reason = (f"The user is away (since {since}, {AWAY}) and has typed nothing to this session in the last "
+              f"{PRESENT} minutes: questions are not asked. Take the recommended "
               'option, mark it "(auto)" in the decision log and in the close, carry on, and never end the turn '
               'on a question. A brief that forbids "(auto)" decisions stops here and lists its questions instead.')
     print(json.dumps({"hookSpecificOutput": {
@@ -238,25 +403,61 @@ def warm(transcript):
     return len(set(re.findall(r'"requestId":"(req_[^"]*)"', text))) >= CTX_WARM
 
 
+def away_news(seen):
+    """One line when the away flag was set or cleared since this session last heard (`seen["away"]`,
+    the flag's text), else None."""
+    flag = away_flag()
+    was, now = seen.get("away", ""), flag["text"] if flag else ""
+    if now == was:
+        return None
+    seen["away"] = now
+    if flag and flag["at"] > time.time():
+        return (f"Away flag set by {flag['by']} at {flag['set']}: the user is away from {flag['stamp']}. Until "
+                f"then questions go through; from then on a question is denied unless the user typed to this "
+                f'session in the {PRESENT} minutes before it, and you take the recommended option, marked "(auto)".')
+    if flag:
+        return (f"Away flag set by {flag['by']} at {flag['set']}, in effect since {flag['stamp']}: a question is "
+                f"denied unless the user typed to this session in the last {PRESENT} minutes; take the "
+                'recommended option, marked "(auto)".')
+    if AWAY.exists():
+        return f"Away flag expired ({AWAY_HOURS} hours after it took effect): questions go to the user again."
+    try:
+        cleared = json.loads(AWAY_CLEARED.read_text())
+    except (OSError, ValueError):
+        cleared = {}
+    if isinstance(cleared, dict) and cleared.get("flag") == was:
+        return f"Away flag cleared by {cleared.get('by')} at {cleared.get('at')}: the user is back, questions go to them again."
+    return "Away flag removed: the user is back, questions go to them again."
+
+
 def context_hook():
-    """UserPromptSubmit and PostToolBatch. A session cannot see its own context use; the status
-    line writes it to session-stats/<id>.json, one message behind. Every prompt at 40% or more gets
-    one line; mid-run, each of 40, 50 and 60% is told once, and nothing from a /handoff:close until
-    the next prompt. Silent for subagents, reporters (*-report), a session's first CTX_WARM requests,
-    and without a reading."""
+    """UserPromptSubmit, PostToolBatch, and PostToolUse on AskUserQuestion. A session cannot see its
+    own context use; the status line writes it to session-stats/<id>.json, one message behind. Every
+    prompt at 40% or more gets one line; mid-run, each of 40, 50 and 60% is told once, and nothing
+    from a /handoff:close until the next prompt. Silent for subagents, reporters (*-report), a
+    session's first CTX_WARM requests, and without a reading. Also: a prompt the user typed, or an
+    answered question, is stamped (the question gate reads it), and the away flag's set and clear
+    are told once each."""
     data = json.load(sys.stdin)
     sid = str(data.get("session_id") or "")
     if data.get("agent_id") or not SAFE.match(sid):
         return
     prompt = data.get("hook_event_name") == "UserPromptSubmit"
-    mark = Path(tempfile.gettempdir()) / f"flowkit-context-{sid}.json"
+    mark = mark_file(sid)
     try:
         seen = json.loads(mark.read_text())
     except (OSError, ValueError):
         seen = {}
     told = dict(seen)
+    if data.get("hook_event_name") == "PostToolUse":  # an answered question: the user is there
+        mark.write_text(json.dumps({**seen, "typed": time.time()}))
+        return
     if prompt:
         seen.pop("quiet", None)
+        if typed_by_user(str(data.get("prompt") or ""), not seen.get("prompted")):
+            seen["typed"] = time.time()
+        seen["prompted"] = True
+    news = away_news(seen)
     if closing(data):
         seen["quiet"] = True
     try:
@@ -276,9 +477,10 @@ def context_hook():
                     "a paste-ready `/compact Keep: …` line under FOR ME.")
     if seen != told:
         mark.write_text(json.dumps(seen))
-    if line:
+    if news or line:
         print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit" if prompt else "PostToolBatch", "additionalContext": line}}))
+            "hookEventName": "UserPromptSubmit" if prompt else "PostToolBatch",
+            "additionalContext": "\n".join(x for x in (news, line) if x)}}))
 
 
 def usage(*args):
@@ -303,8 +505,7 @@ def state(data, repo):
         print("pickup-doc: unknown")
         print("pickup-candidates: " + (", ".join(found) if found else "none"))
     print(f"ladder: {LADDER if LADDER.is_file() else 'none'}")
-    since = away_since()
-    print(f"away: since {since}" if since else "away: off")
+    print(away_status())
     print(f"spawn-driver: {setting('driver', 'tmux')}")
     print(f"chain-end: {chain_end_conf()}")
     print(f"report-to: {setting('report_to', 'off')}")
@@ -1506,13 +1707,10 @@ def main(argv):
         record(*args)
     elif cmd == "chain-end" and len(args) in (1, 2):
         chain_end(*args)
-    elif cmd == "away" and not args:
-        CLAUDE.mkdir(parents=True, exist_ok=True)
-        AWAY.write_text(time.strftime("%Y-%m-%d %H:%M") + "\n")
-        print(f"away: since {AWAY.read_text().strip()} (clears with back or after {AWAY_HOURS} hours)")
-        sys.stdout.flush()
-        usage()
-        reach("nudge")
+    elif cmd in ("away", "back") and (not args or (len(args) == 2 and args[0] == "--by")):
+        (away if cmd == "away" else back)(safe(args[1], "the session name") if args else "unknown")
+    elif cmd == "away-nudge" and not args:
+        away_nudge()
     elif cmd == "restamp" and not args:
         if AWAY.is_file():
             os.utime(AWAY)
@@ -1520,11 +1718,6 @@ def main(argv):
                   f"clears with back or after {AWAY_HOURS} hours)")
         else:
             print("away: off")
-    elif cmd == "back" and not args:
-        AWAY.unlink(missing_ok=True)
-        print("away: off")
-        sys.stdout.flush()
-        reach("waiting")
     elif cmd == "question-gate" and not args:
         question_gate()
     elif cmd == "context" and not args:
@@ -1563,8 +1756,7 @@ def main(argv):
         sys.stdin.read()
         refresh(*args)
     elif cmd == "away-status" and not args:
-        since = away_since()
-        print(f"away: since {since}" if since else "away: off")
+        print(away_status())
     else:
         fail(__doc__)
 

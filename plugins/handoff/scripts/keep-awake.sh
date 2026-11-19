@@ -52,6 +52,8 @@ youngest_age() {
 }
 
 # The away flag counts while it is younger than AWAY_MIN; find -mmin works on macOS and Linux.
+# From the moment it is written, not from its first line's stamp (handoff.py `away` sets it five
+# minutes ahead): the tick that nudges the sessions at that stamp needs the computer up.
 away() {
   [ -f "$AWAY" ] && [ -n "$(find "$AWAY" -mmin -"$AWAY_MIN" 2>/dev/null)" ]
 }

@@ -10,10 +10,11 @@ needed") is told the user is away: in a tmux pane Escape ends the question's tur
 line is typed as its next prompt; a background session is stopped and resumed with the line as
 its prompt. A permission prompt is never answered: a script cannot approve, and must not.
 Reporters (`<story>-report`) never ask and are skipped. Idle and busy sessions are left alone:
-the handoff plugin's hook denies their next question while the away flag is set. The session
-running this is busy, so it is never nudged.
+the handoff plugin's hook denies their next question while the away flag is in effect. The
+session running this is busy, so it is never nudged.
 
-The plugin runs its own copy (`handoff.py away`); `/handoff:setup-tmux` copies this file to
+The plugin runs its own copy (the tick's `handoff.py away-nudge`, once the flag `handoff.py away`
+sets takes effect); `/handoff:setup-tmux` copies this file to
 ~/.local/bin, kept at the plugin's version at every session start, so a shell function of your
 own can call `flowkit-away nudge` too.
 """
