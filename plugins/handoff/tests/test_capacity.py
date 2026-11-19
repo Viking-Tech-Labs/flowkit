@@ -716,7 +716,7 @@ class Capacity(unittest.TestCase):
         rows = [self.row("app-s1", "f" * 8 + "-2222-2222-2222-" + "2" * 12, app)]
         self.agents(rows)
         (self.claude / "stories" / "epic.tests.md").write_text(
-            "# epic test queue\nLogin · !1 · sim · ready to test · \nOld · !2 · sim · tested · \n")
+            "# epic test queue\nLogin · !1 · sim · ready to test ·  · on the release build\nOld · !2 · sim · tested · \n")
         lines = capacity.waves(rows, [f"a={a}:2:simulator", f"b={b}", f"c={c}:1:emulator+simulator"], "epic",
                                write=True, t=self.T)
         hm = lambda m: time.strftime("%H:%M", time.localtime(self.T + m * self.M))
@@ -735,6 +735,8 @@ class Capacity(unittest.TestCase):
         with mock.patch.object(capacity, "spawn", side_effect=lambda e: self.sleeper()):
             capacity.drain([], t=self.T + 5 * self.M)
         self.assertEqual(capacity.read_tests("epic")[1][-1][3:], ["running", hm(55)])
+        self.assertEqual(capacity.read_tests("epic")[1][0], ["Login", "!1", "sim", "ready to test", "", "on the release build"],
+                         "a sixth field is a note, not the ETA, and a rewrite keeps it")
         self.assertEqual(capacity.ties(), {})
         with self.assertRaises(ValueError):
             capacity.waves(rows, ["no-tree"], t=self.T)
@@ -756,6 +758,19 @@ class Capacity(unittest.TestCase):
                 self.assertEqual(self.cli("testq", "epic", "drop", f"{w}-{n}").returncode, 0)
         self.assertFalse(capacity.tests_path("epic").exists(), "an empty queue deletes the file")
         self.assertEqual(self.cli("testq", "epic", "drop", "a-0").returncode, 1)
+
+    def test_testq_eta_is_the_fifth_field_and_the_notes_stay(self):
+        notes = "sim build 412 · dark mode too · see the story · after the release · ask before merging"
+        path = capacity.tests_path("epic")
+        path.write_text(f"# epic test queue\nLogin · !1 · sim · building · 14:30 · {notes}\nShort · !2\nJust a sentence\n")
+        r = self.cli("testq", "epic", "set", "Login", "--eta", "15:10", "--state", "ready to test")
+        self.assertEqual(r.stdout.strip(), f"Login · !1 · sim · ready to test · 15:10 · {notes}")
+        self.assertEqual(self.cli("testq", "epic", "set", "Login", "--eta", "").stdout.strip(),
+                         f"Login · !1 · sim · ready to test ·  · {notes}", "a cleared ETA leaves its place, the notes stay sixth")
+        self.assertEqual(self.cli("testq", "epic", "set", "Short", "--eta", "16:00").stdout.strip(), "Short · !2 ·  ·  · 16:00")
+        self.assertEqual(path.read_text(), "# epic test queue\n"
+                         f"Login · !1 · sim · ready to test ·  · {notes}\nShort · !2 ·  ·  · 16:00\nJust a sentence\n")
+        self.assertEqual(self.cli("testq", "epic").stdout.splitlines()[0], f"Login · !1 · sim · ready to test ·  · {notes}")
 
     def test_limit_runs_a_repo_slots_fewer_for_a_while(self):
         app, lib = self.devices(), self.repo("lib")

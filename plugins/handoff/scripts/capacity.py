@@ -1005,7 +1005,8 @@ def tests_path(story):
 
 
 def read_tests(story):
-    """A story's test queue: its leading `#` lines, and one [item, MR, device, state, ETA] per line."""
+    """A story's test queue: its leading `#` lines, and one [item, MR, device, state, ETA, notes…]
+    per line: a sixth field and on are notes, kept as written."""
     head, lines = [], []
     try:
         text = tests_path(story).read_text(errors="replace")
@@ -1018,7 +1019,7 @@ def read_tests(story):
                 head.append(line)
         elif line:
             fields = re.split(r"\s*·\s*", re.sub(r"^[-*]\s+", "", line))
-            lines.append((fields + [""] * 4)[:4] + [" · ".join(fields[4:])])
+            lines.append(fields + [""] * (5 - len(fields)))
     return head, lines
 
 
