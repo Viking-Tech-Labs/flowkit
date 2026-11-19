@@ -186,6 +186,9 @@ Coordinator: <name> · Mission: <path or "pasted"> · Updated: <date time>
   with its state, when it was armed and its last answer. Never poll the queue: it drains itself.
 - **BLOCKED**: record it. Blocked on the user: say so plainly, with the worker's name and its
   Remote Control link.
+- **Reminders**: with `remind=on` in `~/.config/flowkit/handoff.conf` (handoff 0.10.0), flowkit's
+  tick pushes what waits on the user while they are away from the computer (the handoff README,
+  "Reminders"): keep no reminder cron or timer of your own.
 - **To reach a worker**, `coordinate.py workers <worker>` first. `live`: SendMessage to its name;
   a busy worker gets it between tool calls. `retired`: a background session Claude stopped after
   it sat idle for hours, its conversation kept; `coordinate.py wake <worker> "<message>"` wakes it

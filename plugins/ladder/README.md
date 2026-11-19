@@ -48,8 +48,8 @@ python3 <plugin dir>/scripts/ladder.py write implementation=opus/high
 
 Silent until you turn `max` on. From then, a Bash command that launches a Claude session at
 effort max (`claude --effort xhigh`, `flowkit-spawn --effort xhigh`, `CLAUDE_CODE_EFFORT_LEVEL=xhigh`)
-asks for your yes first, even in auto mode; while `/handoff:away` is set it runs at `xhigh`
-instead. It reads only a table this plugin wrote, so with a ladder of your own it never fires.
+asks for your yes first, even in auto mode; while the `/handoff:away` flag is in effect (from
+handoff 0.10.0, five minutes after it is set) it runs at `xhigh` instead. It reads only a table this plugin wrote, so with a ladder of your own it never fires.
 
 ## Tests
 

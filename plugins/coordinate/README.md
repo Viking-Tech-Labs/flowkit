@@ -94,3 +94,7 @@ Plan: 3 of 7 now (A, B, C) · 2 queued (D ~16:40, E ~18:10) · 2 shed (F, G) · 
 
 While you are away (`/handoff:away`) the coordinator asks nothing: it takes the recommended
 option at each fork and marks it "(auto)" on the board.
+
+Reminders of what waits on you are not the coordinator's: with `remind=on` in `handoff.conf`
+(handoff 0.10.0) the tmux kit's tick sends them (the handoff README, "Reminders"), and the
+coordinator keeps no reminder timer of its own.

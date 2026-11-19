@@ -96,6 +96,8 @@ so an update or an uninstall keeps them, and readable by the scripts that run ou
 | `autoretry` | `off` | `on` lets a session an API error stopped carry on by itself while you are away (see "API errors"). `/handoff:setup` offers it. |
 | `limitresume` | `on` | `off` leaves a session that a usage limit stopped where it is; by default it is continued after the limit resets (see "Usage limits"). |
 | `chrome` | empty | `on` never passes `--no-chrome` to a spawned session. Empty passes it only while Claude Code's Chrome question has never been answered on this machine (see "Start-up prompts"). |
+| `remind` | `off` | `on` lets the tmux kit's tick push what waits on you while you are neither away nor at the computer (see "Reminders"). `/handoff:setup` offers it. |
+| `notify` | empty | A shell command that gets a reminder's line on its stdin when no reporter could push it (see "Reminders"); empty falls back to a macOS notification. |
 | `chain_end` | `mr-ready` | What a story's chain ends with, proposed when its first prompt is drafted (see "Where a chain ends"): `branch`, `draft-mr`, `mr-ready` or `merge`. `/handoff:setup` offers it. |
 | `report_to` | `off` | `on` writes `Report-to: <the launching session>` into the brief of a helper (`/handoff:spawn` with a prompt, or a close's review or investigation beside the chain), so its close sends the verdict back (see "A helper reports back"); a name sends every helper's verdict to that session. `/handoff:setup` offers it. |
 
@@ -154,6 +156,10 @@ moved in the last 5 minutes. `flowkit-tmux closable` is a dry run: it prints the
 would close and closes nothing.
 
 ## Being away
+
+New in 0.10.0: the flag takes effect five minutes after it is set, with a last call to the
+coordinators first; a session you typed to in the last five minutes may still ask; every session
+hears who set and who cleared it.
 
 `/handoff:away` runs `handoff.py away --by <this session>`, the one command that sets the flag.
 It writes `~/.claude/away`:
@@ -343,6 +349,49 @@ once for each Claude Code version, kept in `~/.claude/flowkit/no-chrome`) and ne
 have answered, whatever the answer. `chrome=on` in `handoff.conf` (`handoff.py conf chrome on`)
 leaves it out always, for chains that use Chrome on a machine where the question is still open:
 answer it once in a session of your own first.
+
+## Reminders
+
+New in 0.10.0, off until you turn it on (`handoff.py conf remind on`, or `/handoff:setup`).
+Claude Code pushes to your phone when a session waits on you, but some things that wait on you
+it cannot see: a pane parked at a start-up prompt has no session yet, a session a usage limit
+stopped that flowkit cannot continue (outside tmux, or three continues that ended on the limit
+again) looks idle, and a test-queue item turning ready is a line in a file. With `remind=on` the
+tmux kit's tick runs `handoff.py remind` at most once a minute, which
+
+- stays silent while you are away (the flag in effect, "Being away": you asked for silence) and
+  while you are at the computer: keyboard or mouse input in the last 10 minutes (macOS's HID idle
+  time; elsewhere the newest activity of a tmux client).
+- says at once, and once, what Claude Code's own pushes cannot see: a pane parked at a start-up
+  prompt, a usage-limit stop flowkit cannot continue, a test-queue item ready to test whose gate
+  names a device test. Every 2 hours, and only when the set changed since the last time, a
+  digest: those plus the sessions waiting on you and every item ready to test, with its `Gate:`.
+  An item whose gate starts `merges on green` waits on nobody and is left out; FOR ME steps are
+  not reminded (a reporter's final report pushes `<n> for you`).
+- writes the text to `~/.claude/flowkit/remind/<stamp>.md` and `~/.claude/flowkit/remind-latest.md`,
+  then sends one line under 200 characters (the first thing and `+<n> more in remind-latest.md`)
+  through the first of these that carries it:
+  1. a story's reporter (`reporter=on`): the oldest idle `<story>-report` in a tmux pane whose
+     story has no final report after its last close; never a coordinator. One line is typed into
+     its pane as the doorbells type it, only into a free prompt box: `reminder: from flowkit's
+     tick, not the user. Send the user one push notification now … Message: <the line>`. It counts
+     as sent once the reporter's transcript shows its PushNotification call and the tool's answer
+     within 90 seconds, and not when the tool answered `Not sent` (it skips a push while its
+     terminal is active); then the next reporter is rung. The line says what to do itself, so a
+     reporter started before this version does it too.
+  2. `notify=<command>` in `handoff.conf`: run through the shell with the line on its stdin, sent
+     when it exits 0 (`notify=curl -s -d @- ntfy.sh/<your topic>`).
+  3. a macOS notification (`osascript`).
+- keeps what it said in `~/.claude/flowkit/remind.json` only once something carried it, so a
+  reminder that reached nobody is said again at the next pass (the same text, no second file).
+  One pass runs at a time; one prints a line per reporter it rang and what carried the push.
+
+`handoff.py remind --dry-run` prints what a pass would say now and why it would stay silent; it
+sends nothing and keeps nothing. The ring line is a line flowkit types: it never counts as you
+typing to the reporter ("Being away").
+
+A coordinator of yours that keeps its own reminder timer should drop it when you turn this on, or
+both push.
 
 ## Keeping the computer awake
 

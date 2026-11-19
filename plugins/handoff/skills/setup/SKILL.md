@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, whether a session an API error stopped carries on while the user is away, whether one a usage limit stopped is continued after the reset, what a chain's last slice leaves behind (the branch, a Draft MR, the MR ready, merged), and whether a helper session reports its verdict back to the session that launched it. Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
+description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, whether a session an API error stopped carries on while the user is away, whether one a usage limit stopped is continued after the reset, whether the user gets reminders of what waits on them while away from the computer, what a chain's last slice leaves behind (the branch, a Draft MR, the MR ready, merged), and whether a helper session reports its verdict back to the session that launched it. Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
 disable-model-invocation: true
 ---
 
@@ -119,6 +119,30 @@ cover sessions with Remote Control on). Nothing to install.
    command below, and stop.
 3. Write the answer: `handoff.py conf limitresume <on|off>`. The next stop reads it, and a waiter
    already waiting reads it before it types; nothing needs a restart.
+
+## Reminders
+
+The `remind` key of `handoff.conf` lets the tmux kit's tick push what waits on the user while
+they are neither away nor at the computer (the plugin README's "Reminders" says what and how).
+It types into a reporter's pane, so it is off until the user turns it on.
+
+1. Skip this part when the driver is `background`: the tick that sends reminders is the tmux kit's.
+2. Say in plain words what it does: at most once a minute, silent while `/handoff:away` is in
+   effect or while the user touched the keyboard or mouse in the last 10 minutes; at once, what
+   Claude Code's own pushes cannot see (a pane parked at a start-up prompt, a usage-limit stop
+   flowkit cannot continue, a test item ready for a device test), and every 2 hours, when the set
+   changed, a digest with the sessions and test items waiting on them. The push goes through the
+   oldest idle story reporter in a tmux pane (`reporter=on`), else a `notify` command of theirs,
+   else a macOS notification; the text is kept in `~/.claude/flowkit/remind-latest.md`. A
+   coordinator of theirs that keeps its own reminder timer should drop it, or both push.
+3. Ask with AskUserQuestion: turn it on (recommended when they use the tmux kit and leave chains
+   running), or leave it off. Without the AskUserQuestion tool, change nothing: print the command
+   below, and stop.
+4. Write the answer: `handoff.py conf remind <on|off>`. With `on`, offer the `notify` key only
+   when the user names a push service of their own: `handoff.py conf notify '<command>'`, a shell
+   command that gets the line on its stdin (`curl -s -d @- ntfy.sh/<their topic>`). The next tick
+   reads both; nothing needs a restart. `handoff.py remind --dry-run` shows what a pass would say
+   now.
 
 ## Where a chain ends
 
