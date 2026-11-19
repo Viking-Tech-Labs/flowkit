@@ -1499,7 +1499,10 @@ def remind_deliver(push, path):
         if not name.endswith("-report") or row.get("kind") != "interactive" or mode(row) != "idle" \
                 or not row.get("pid") or not row.get("sessionId") or story_reported(name[:-len("-report")]):
             continue
-        sent, what = remind_ring(row, line)
+        try:
+            sent, what = remind_ring(row, line)
+        except (OSError, subprocess.TimeoutExpired) as e:  # no tmux here, or it hung: the next in line
+            sent, what = False, f"tmux or ps did not answer ({type(e).__name__})"
         print(f"ring {name}: {what}")
         if sent:
             return name

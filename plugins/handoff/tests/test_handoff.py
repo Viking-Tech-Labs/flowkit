@@ -1672,6 +1672,18 @@ class Handoff(unittest.TestCase):
                 handoff.remind()
             self.assertEqual(out.getvalue(), "remind: nothing to say\n", "said: nobody is rung again")
             self.assertEqual(len(self.calls.read_text().splitlines()), 3)
+            # no tmux on this machine: every reporter is a miss, and the push falls through to notify
+            (self.tmp / "claude" / "flowkit" / "remind.json").unlink()
+            conf = {"remind": "on", "notify": "true"}
+            with mock.patch.object(handoff, "pane_of", side_effect=FileNotFoundError("tmux")), \
+                    mock.patch.object(handoff, "setting", side_effect=lambda key, default: conf.get(key, default)), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                handoff.remind()
+            lines = out.getvalue().splitlines()
+            self.assertEqual(lines[:-2], [f"ring {n}-report: tmux or ps did not answer (FileNotFoundError)"
+                                          for n in ("demo", "draft", "quiet", "side", "late")])
+            self.assertEqual(lines[-2], "notify: sent")
+            self.assertTrue(lines[-1].startswith("remind: sent through notify ("))
 
     def test_remind_falls_back_to_notify_then_the_mac_and_keeps_only_what_arrived(self):
         self.remind_world(time.time())
