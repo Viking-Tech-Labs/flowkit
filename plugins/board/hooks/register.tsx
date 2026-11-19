@@ -11,6 +11,7 @@ import {
   formeLines,
   isShown,
   openSteps,
+  parkedOf,
   pruneTicks,
   sessionLines,
   stateLabel,
@@ -83,11 +84,12 @@ type World = { snap: Snapshot; files: string[] | undefined; marks: Ticks }
 // status line writes, the ticks. A part that cannot be read leaves the rest.
 const gather = async ($: EngineInterface): Promise<World> => {
   const root = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${(await $.env.get('HOME')) ?? ''}/.claude`
-  const [now, ran, loaded, held] = await Promise.all([
+  const [now, ran, loaded, held, stuck] = await Promise.all([
     $.clock.now(),
     soft($.process.run(AGENTS, { timeoutMs: 5000 })),
     soft(loadStories($, root)),
     soft($.fs.read(`${root}/capacity/status.json`)),
+    soft($.fs.read(`${root}/flowkit/parked.json`)),
   ])
   let agents: Agent[] | undefined
   try {
@@ -125,7 +127,7 @@ const gather = async ($: EngineInterface): Promise<World> => {
     capacity = ['capacity/status.json could not be read']
   }
   const watches = status === undefined ? [] : watchesOf(status)
-  const snap = buildSnapshot(loaded?.stories, agents, stats, now, watches)
+  const snap = buildSnapshot(loaded?.stories, agents, stats, now, watches, stuck === undefined ? [] : parkedOf(stuck, now))
   if (capacity !== undefined) snap.capacity = capacity
   if (watches.length > 0) snap.watches = watches
   return { snap, files: loaded?.files, marks }

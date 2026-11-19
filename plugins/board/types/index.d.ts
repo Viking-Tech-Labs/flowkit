@@ -54,6 +54,10 @@ export type Watch = {
   waits: string | null
 }
 
+// A pane parked at a start-up prompt, from handoff's flowkit/parked.json: claude asked before any
+// session existed, so no session row says it waits. `line` is the prompt's first line.
+export type Parked = { story: string; line: string }
+
 export type Snapshot = {
   at: number
   cards: Card[]

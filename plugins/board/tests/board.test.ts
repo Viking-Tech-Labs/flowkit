@@ -9,6 +9,7 @@ import {
   formeLines,
   isShown,
   openSteps,
+  parkedOf,
   parseStory,
   parseTests,
   pruneTicks,
@@ -391,7 +392,26 @@ test('the open watches of status.json keep a story running whose last close is a
   expect(watchLines([], 100)).toEqual([])
 })
 
-const stubWorld = (on: On, agentsOut: string = JSON.stringify(AGENTS), capacity: CapacityStatus = STATUS) => {
+test('a pane parked at a start-up prompt makes its story need you, until the file drops it or the tick stops', () => {
+  const pane = { pane: '%7', tab: 'chain', index: '2', story: 'chain', line: 'Accessing workspace:', since: NOW / 1000 - 90 }
+  const file = (msAgo: number, panes: unknown[]): string => JSON.stringify({ at: (NOW - msAgo) / 1000, panes })
+  const chain = (text: string) =>
+    buildSnapshot(stories(), AGENTS, new Map(), NOW, [], parkedOf(text, NOW)).cards.find(c => c.story === 'chain')
+  expect([chain(file(5000, [pane]))?.state, chain(file(5000, [pane]))?.why]).toEqual([
+    'needs-you',
+    'parked at a start-up prompt: Accessing workspace:',
+  ])
+  expect(chain(file(5000, [{ ...pane, line: 'x'.repeat(80) }]))?.why).toBe(`parked at a start-up prompt: ${'x'.repeat(60)}`)
+  expect(chain(file(5000, []))?.why).toBe('c-s3 working')
+  expect(chain(file(5000, [{ ...pane, story: '' }, { ...pane, story: 'another' }]))?.state).toBe('running')
+  expect(chain(file(6 * MIN, [pane]))?.state).toBe('running')
+  expect(parkedOf('{', NOW)).toEqual([])
+  expect(parkedOf(JSON.stringify({ at: NOW / 1000, panes: [null, { story: 3 }, { story: 'chain' }] }), NOW)).toEqual([])
+  const needy = buildSnapshot(stories(), AGENTS, new Map(), NOW, [], [{ story: 'needy', line: 'x' }]).cards.find(c => c.story === 'needy')
+  expect(needy?.why).toBe('n-s2 waits (permission prompt)')
+})
+
+const stubWorld = (on: On, agentsOut: string = JSON.stringify(AGENTS), capacity: CapacityStatus = STATUS, parked?: string) => {
   const commands: CommandSpec[] = []
   const store: Record<string, unknown> = {}
   const files: Record<string, string> = {
@@ -403,6 +423,7 @@ const stubWorld = (on: On, agentsOut: string = JSON.stringify(AGENTS), capacity:
     '/home/n/.claude/session-stats/s5.json': JSON.stringify({ ctx_pct: 61, cost_usd: 141.2 }),
     '/home/n/.claude/session-stats/s1.json': '{"ctx_pct": 4',
     '/home/n/.claude/capacity/status.json': JSON.stringify({ ...capacity, at: NOW / 1000 }),
+    ...(parked === undefined ? {} : { '/home/n/.claude/flowkit/parked.json': parked }),
   }
   const mtimes: Record<string, number> = {
     'chain.md': NOW - 20 * MIN,
@@ -496,6 +517,14 @@ test('/where counts a story with an open watch as running, though its last close
   const board = (await $.command.run({ ...run, command: 'where' })).text ?? ''
   expect(board).toContain('STORIES  1 need you, 0 stalled, 2 running, 0 done')
   expect(board).toMatch(/\nWATCHES {3}app!3 · fin · pending · armed \d\d:\d\d\n\nSTORIES /)
+})
+
+test('/where names the start-up prompt a story is parked at', async ($, on) => {
+  const pane = { pane: '%7', tab: 'fin', index: '1', story: 'fin', line: 'Accessing workspace:', since: NOW / 1000 - 90 }
+  stubWorld(on, JSON.stringify(AGENTS), STATUS, JSON.stringify({ at: NOW / 1000, panes: [pane] }))
+  const board = (await $.command.run({ ...run, command: 'where' })).text ?? ''
+  expect(board).toContain('STORIES  2 need you, 0 stalled, 1 running, 0 done')
+  expect(board).toMatch(/\n {2}fin +NEEDS YOU .*\n +parked at a start-up prompt: Accessing workspace:\n/)
 })
 
 test('a section that cannot be read says so and the rest of the board still prints', async ($, on) => {

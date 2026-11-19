@@ -13,7 +13,7 @@ useful with that plugin; a file in the same format from anywhere else works too.
 
 | Card | Meant when |
 |---|---|
-| **NEEDS YOU** | a session of the story waits on you (a question, a permission), or the last close left a launch pending (`Next: pending <name>`) or a free-text `Next:` |
+| **NEEDS YOU** | a session of the story waits on you (a question, a permission), or a pane of its tab sits at a start-up prompt (`parked at a start-up prompt: <its first line>`: no session exists yet, so none is listed), or the last close left a launch pending (`Next: pending <name>`) or a free-text `Next:` |
 | **STALLED** | no session of the story is working or waiting, and a session any close promised (`Next: started …`) never wrote its own close: it never came up, ended, or sits idle at its prompt. A new session gets 10 minutes to come up first; a stalled story nobody touches for seven days folds into the "more" line |
 | **running** | a session of the story is working, or the promised one is still starting, or the last close queued its successor (`Next: queued <name>`: it waits for a slot, not for you, until a session of that name comes up; one that then ends without a close stalls the story), or a watch of the story is open (`watching <name>`: a script polls a pipeline and no session waits, see "Watches") |
 | **done** | a `## Final report` newer than the last close, or the last close says `Next: none` with nothing working |
@@ -43,6 +43,10 @@ a step of theirs is still open), fold into one line that unfolds.
 - `~/.claude/stories/<story>.tests.md`, when it exists: the story's test queue (below).
 - `~/.claude/capacity/status.json`, when it exists: the [`handoff`](../handoff/README.md) capacity
   gate's snapshot, for the CAPACITY block and the open watches (below).
+- `~/.claude/flowkit/parked.json`, when it exists: the panes the `handoff` tmux kit found parked
+  at a start-up prompt (its README's "Start-up prompts"), by story. The kit rewrites the file
+  every few seconds while a pane waits and removes it after, so the card goes back once the
+  prompt is answered; a file older than five minutes is ignored.
 
 Nothing is written outside the plugin's own store (the ticks).
 

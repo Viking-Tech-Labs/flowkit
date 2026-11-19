@@ -1,4 +1,4 @@
-import type { CapacityStatus, Card, CardState, Chip, Snapshot, Step, TestLine, Watch } from '../types'
+import type { CapacityStatus, Card, CardState, Chip, Parked, Snapshot, Step, TestLine, Watch } from '../types'
 
 export const DAY = 86_400_000
 // A session promised by a close has this long to come up (trust prompt, start-up) before the
@@ -190,7 +190,7 @@ const chipOf = (a: Agent, stats: ReadonlyMap<string, Stats>, reporter: string): 
 const list = (names: readonly string[], max = 2): string =>
   names.length <= max ? names.join(', ') : `${names.slice(0, max).join(', ')} +${names.length - max}`
 
-const cardOf = (story: Story, chips: readonly Chip[], now: number, arms: readonly string[]): Card => {
+const cardOf = (story: Story, chips: readonly Chip[], now: number, arms: readonly string[], parked?: string): Card => {
   const closes = story.sections.filter(s => !s.isFinal)
   const last = story.sections[story.sections.length - 1]
   const lastClose = closes[closes.length - 1]
@@ -230,6 +230,9 @@ const cardOf = (story: Story, chips: readonly Chip[], now: number, arms: readonl
     state = 'needs-you'
     const first = waiting[0]
     why = `${first?.name ?? '?'} waits${first?.detail ? ` (${first.detail})` : ' for you'}${waiting.length > 1 ? ` +${waiting.length - 1}` : ''}`
+  } else if (parked !== undefined) {
+    state = 'needs-you'
+    why = `parked at a start-up prompt: ${parked.slice(0, 60)}`
   } else if (working.length > 0) {
     state = 'running'
     why = `${list(working.map(c => c.name))} working`
@@ -280,6 +283,7 @@ export const buildSnapshot = (
   stats: ReadonlyMap<string, Stats>,
   now: number,
   watches: readonly Watch[] = [],
+  parked: readonly Parked[] = [],
 ): Snapshot => {
   // A session named in several stories belongs to the one whose newest section names it.
   const owner = new Map<string, { story: string; at: number }>()
@@ -301,7 +305,15 @@ export const buildSnapshot = (
     } else byStory.set(story, [...(byStory.get(story) ?? []), chip])
   }
   const cards = (stories ?? [])
-    .map(s => cardOf(s, byStory.get(s.name) ?? [], now, watches.filter(w => w.story === s.name).map(w => w.name)))
+    .map(s =>
+      cardOf(
+        s,
+        byStory.get(s.name) ?? [],
+        now,
+        watches.filter(w => w.story === s.name).map(w => w.name),
+        parked.find(p => p.story === s.name)?.line,
+      ),
+    )
     .sort((a, b) => RANK[a.state] - RANK[b.state] || b.touchedMs - a.touchedMs)
   return { at: now, cards, loose, isAgentsKnown: agents !== undefined, isStoriesKnown: stories !== undefined }
 }
@@ -471,6 +483,21 @@ export const capacityLines = (parts: readonly string[], width: number): string[]
 
 // The open watches of a status.json this board reads; of another version, none.
 export const watchesOf = (status: CapacityStatus): Watch[] => (status.version === STATUS_VERSION ? status.watches : [])
+
+// flowkit/parked.json, kept by handoff's tmux tick: the panes parked at a start-up prompt. The tick
+// writes it again every few seconds while there is one and removes it with the last, so a file
+// older than STALE_MS is a tick that stopped, and nothing is read from it.
+export const parkedOf = (text: string, now: number): Parked[] => {
+  try {
+    const file = JSON.parse(text) as { at?: unknown; panes?: unknown }
+    if (typeof file.at !== 'number' || now - file.at * 1000 > STALE_MS || !Array.isArray(file.panes)) return []
+    return (file.panes as { story?: unknown; line?: unknown }[]).flatMap(p =>
+      typeof p?.story === 'string' && typeof p.line === 'string' ? [{ story: p.story, line: p.line }] : [],
+    )
+  } catch {
+    return []
+  }
+}
 
 // The WATCHES block of /where, under CAPACITY: one line per open watch, with what it waits for.
 export const watchLines = (watches: readonly Watch[], width: number): string[] => {
