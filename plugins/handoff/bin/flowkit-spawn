@@ -423,6 +423,37 @@ if [ -n "$prompt_copy" ] && [ "$(head -c 1 "$prompt_copy")" = / ]; then
 fi
 [ -z "$shared_file" ] || shared_arg=" --append-system-prompt \"\$(cat $shared_file)\""
 
+# A start-up prompt nobody sees (the README's "Start-up prompts"): until it has been answered once,
+# Claude Code asks at a session's start whether to use Chrome by default, and a spawned pane sits
+# on that question. While .claude.json holds no answer (claudeInChromeDefaultEnabled) and this
+# claude knows --no-chrome (its --help, asked once per version), the launch passes the flag: the
+# session starts without the question and without Chrome. chrome=on in handoff.conf leaves it out,
+# and so does a .claude.json that cannot be read.
+no_chrome() {
+  local dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" version seen="" known="" help
+  [ "$(setting chrome || true)" != on ] || return 0
+  python3 - "$dir/.config.json" "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json" <<'EOF' 2>/dev/null || return 0
+import json, sys
+for path in sys.argv[1:]:
+    try:
+        with open(path) as f:
+            if "claudeInChromeDefaultEnabled" in json.load(f):
+                sys.exit(1)
+    except FileNotFoundError:
+        pass
+EOF
+  version="$(claude --version 2>/dev/null || true)"; version="${version%%[[:space:]]*}"
+  case "$version" in [0-9]*) ;; *) return 0 ;; esac
+  [ ! -f "$dir/flowkit/no-chrome" ] || read -r seen known < "$dir/flowkit/no-chrome" || true
+  if [ "$seen" != "$version" ]; then
+    help="$(claude --help 2>/dev/null || true)"
+    case "$help" in *--no-chrome*) known=yes ;; *) known=no ;; esac
+    mkdir -p "$dir/flowkit" && printf '%s %s\n' "$version" "$known" > "$dir/flowkit/no-chrome" || true
+  fi
+  [ "$known" != yes ] || printf -- '--no-chrome '
+}
+chrome="$(no_chrome || true)"; base="$chrome$base"; flags="$chrome$flags"
+
 launch="clear; claude ${flags}--name '$name'${shared_arg}${prompt_arg}"
 
 # Background driver: `claude --bg` hands the session to Claude's background service and returns

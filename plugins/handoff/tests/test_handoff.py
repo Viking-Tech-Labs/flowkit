@@ -33,6 +33,8 @@ class Handoff(unittest.TestCase):
         self.flag = self.tmp / "claude" / "away"
         self.env = {**os.environ, "CLAUDE_CONFIG_DIR": str(self.tmp / "claude"), "TMPDIR": str(self.tmp),
                     "PATH": f"{self.tmp / 'bin'}:{os.environ['PATH']}"}
+        # the Chrome question was answered once, as on a machine in use: a launch asks claude nothing about it
+        (self.tmp / "claude" / ".claude.json").write_text('{"claudeInChromeDefaultEnabled": false}')
         self.agents([])
         self.panes("")
 
@@ -252,6 +254,48 @@ class Handoff(unittest.TestCase):
         (store / "s3.md").write_text("Repo: /r   Session: s3\n\nToday: /implement-story is next\n")
         out = self.spawn("--repo", str(repo), "--name", "s3", str(store / "s3.md"))
         self.assertNotIn("--append-system-prompt", out.stdout, "a brief prompt is launched as before")
+
+    def test_spawn_passes_no_chrome_only_while_the_chrome_question_is_unanswered(self):
+        repo = self.spawn_repo()
+        prompt = self.tmp / "p.md"
+        prompt.write_text("hi\n")
+        conf, answer, asked = self.tmp / "flowkit" / "handoff.conf", self.tmp / "claude" / ".claude.json", self.tmp / "asked"
+
+        def claude(version="2.1.328", flag="--no-chrome"):
+            (self.tmp / "bin" / "claude").write_text(
+                "#!/bin/sh\n"
+                'case "$1" in\n'
+                "  agents) echo '[]' ;;\n"
+                f"  --version) echo version >> {asked}; echo '{version} (Claude Code)' ;;\n"
+                f"  --help) echo help >> {asked}; echo '  {flag}   Turn off Claude in Chrome' ;;\n"
+                "esac\n")
+
+        def passed():
+            out = self.spawn("--repo", str(repo), "--name", "s2", str(prompt))
+            self.assertEqual((out.returncode, out.stderr), (0, ""))
+            return "claude --bg --no-chrome --remote-control " in out.stdout
+
+        claude()
+        self.assertFalse(passed(), "answered no")
+        answer.write_text('{"claudeInChromeDefaultEnabled": true}')
+        self.assertFalse(passed(), "answered yes")
+        answer.write_text("{")
+        self.assertFalse(passed(), "an answer that cannot be read")
+        self.assertFalse(asked.exists(), "claude is asked nothing")
+        answer.write_text('{"numStartups": 3}')
+        self.assertTrue(passed(), "never answered, and --help lists the flag")
+        self.assertTrue(passed())
+        self.assertEqual(asked.read_text().count("help"), 1, "--help is asked once for a version")
+        claude(version="2.1.100", flag="--chrome")
+        self.assertFalse(passed(), "a claude that does not know the flag")
+        self.assertEqual(asked.read_text().count("help"), 2, "another version is asked again")
+        claude()
+        answer.unlink()
+        self.assertTrue(passed(), "no .claude.json yet: never answered")
+        asked.unlink()
+        conf.write_text(conf.read_text() + "chrome=on\n")
+        self.assertFalse(passed(), "chrome=on leaves the flag out")
+        self.assertFalse(asked.exists())
 
     def held_spawn(self, flag_lines, **env):
         """A background-driver launch (no --dry-run) with ~/.claude/load-hold holding flag_lines,
