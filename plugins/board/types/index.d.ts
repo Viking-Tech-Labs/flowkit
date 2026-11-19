@@ -14,8 +14,9 @@ export type Chip = {
 
 export type Step = { key: string; text: string; from: string }
 
-// A line of the story's test queue, <story>.tests.md: item · MR · device · state · ETA.
-export type TestLine = { item: string; mr: string; device: string; state: string; eta: string }
+// A line of the story's test queue, <story>.tests.md: item · MR · device · state · ETA, then its
+// notes as written; gate is the text of the notes' first "Gate:" field, empty without one.
+export type TestLine = { item: string; mr: string; device: string; state: string; eta: string; notes: string; gate: string }
 
 export type Card = {
   story: string

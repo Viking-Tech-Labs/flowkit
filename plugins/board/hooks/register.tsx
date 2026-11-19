@@ -296,7 +296,7 @@ export const register: Register = on => {
               <Text weight="bold">TEST QUEUE</Text>
               {c.tests.map((t, i) => (
                 <Text key={`test:${c.story}:${i}`} wrap="truncate-end">
-                  {[t.item, t.mr, t.device, t.state, t.eta].filter(f => f !== '').join(' · ')}
+                  {[t.item, t.mr, t.device, t.state, t.eta, t.notes].filter(f => f !== '').join(' · ')}
                 </Text>
               ))}
             </Box>

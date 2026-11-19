@@ -125,15 +125,23 @@ export const parseStory = (name: string, text: string, mtimeMs: number): Story |
 
 // The test queue a coordinator keeps beside the story file, <story>.tests.md: one line per item,
 // "item · MR · device · state · ETA". Blank lines, # headings and a leading list marker are skipped;
-// a missing field is empty, a sixth and on stay with the ETA.
+// a missing field is empty, a sixth and on are notes. The gate is the first whole field after the
+// item that starts "Gate:"; one written in the place of a field up to the ETA becomes the first note.
+// handoff's capacity.py (read_tests) reads the same line the same way.
+const GATE = /^gate:\s*/i
 export const parseTests = (text: string): TestLine[] =>
   text
     .split('\n')
     .map(line => line.trim().replace(/^[-*]\s+/, ''))
     .filter(line => line !== '' && !line.startsWith('#'))
     .map(line => {
-      const [item = '', mr = '', device = '', state = '', ...eta] = line.split(/\s*·\s*/)
-      return { item, mr, device, state, eta: eta.join(' · ') }
+      const fields = line.split(/\s*·\s*/)
+      const at = fields.findIndex((f, i) => i > 0 && GATE.test(f))
+      const lifted = at > 0 && at < 5 ? fields.splice(at, 1) : []
+      const [item = '', mr = '', device = '', state = '', eta = '', ...rest] = fields
+      const notes = [...lifted, ...rest]
+      const gate = (notes.find(f => GATE.test(f)) ?? '').replace(GATE, '')
+      return { item, mr, device, state, eta, notes: notes.join(' · '), gate }
     })
 
 const normal = (text: string): string => text.toLowerCase().replace(/\s+/g, ' ')
@@ -428,12 +436,22 @@ export const countsOf = (cards: readonly Card[]): Record<CardState, number> => {
 const STATE_WORD: Record<CardState, string> = { 'needs-you': 'NEEDS YOU', stalled: 'STALLED', running: 'running', done: 'done' }
 export const stateWord = (state: CardState): string => STATE_WORD[state]
 
-// The test queue under its story in /where: the fields in columns, each cut to a width.
-const TEST_WIDTHS = [36, 18, 14, 14, 12] as const
+// The test queue under its story in /where: the fields in columns, each cut to a width, the gate
+// last and only when a line has one. The item gives way so that no line passes TEST_COLUMNS.
+const TEST_WIDTHS = [36, 18, 14, 14, 12, 14] as const
+const TEST_COLUMNS = 100
 export const testLines = (tests: readonly TestLine[], indent: string): string[] => {
-  const rows = tests.map(t => [t.item, t.mr, t.device, t.state, t.eta].map((f, i) => cut(f, TEST_WIDTHS[i] ?? 12)))
+  const hasGate = tests.some(t => t.gate !== '')
+  const rows = tests.map(t =>
+    [t.item, t.mr, t.device, t.state, t.eta, ...(hasGate ? [t.gate] : [])].map((f, i) => cut(f, TEST_WIDTHS[i] ?? 12)),
+  )
   const widths = TEST_WIDTHS.map((_, i) => Math.max(0, ...rows.map(r => (r[i] ?? '').length)))
-  return rows.map(r => `${indent}${r.map((f, i) => f.padEnd(widths[i] ?? 0)).join('  ')}`.trimEnd())
+  const count = hasGate ? 6 : 5
+  const room = TEST_COLUMNS - indent.length - 2 * (count - 1) - widths.slice(1).reduce((sum, w) => sum + w, 0)
+  widths[0] = Math.min(widths[0] ?? 0, room)
+  return rows.map(r =>
+    `${indent}${r.map((f, i) => cut(f, widths[i] ?? 0).padEnd(widths[i] ?? 0)).join('  ')}`.trimEnd(),
+  )
 }
 
 // capacity/status.json in a few words: slots, the queue, each resource, stalled sessions. The file

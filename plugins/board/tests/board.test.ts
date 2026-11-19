@@ -16,6 +16,7 @@ import {
   sessionLines,
   stepsOf,
   storyLines,
+  testLines,
   usageLines,
   watchLines,
   watchesOf,
@@ -291,12 +292,54 @@ Vehicles list
 
 test('a test queue reads one item per line, skips headings and blanks, and leaves a missing field empty', () => {
   expect(parseTests(QUEUE)).toEqual([
-    { item: 'Login screen', mr: '!93', device: 'iPhone 15', state: 'ready to test', eta: '14:30' },
-    { item: 'Settings toggle', mr: '!94', device: 'Pixel 8', state: 'building', eta: '15:10' },
-    { item: 'Vehicles list', mr: '', device: '', state: '', eta: '' },
+    { item: 'Login screen', mr: '!93', device: 'iPhone 15', state: 'ready to test', eta: '14:30', notes: '', gate: '' },
+    { item: 'Settings toggle', mr: '!94', device: 'Pixel 8', state: 'building', eta: '15:10', notes: '', gate: '' },
+    { item: 'Vehicles list', mr: '', device: '', state: '', eta: '', notes: '', gate: '' },
   ])
-  expect(parseTests('a · b · c · d · e · f')[0]?.eta).toBe('e · f')
+  expect(parseTests('a · b · c · d · e · f · g')[0]).toMatchObject({ eta: 'e', notes: 'f · g', gate: '' })
   expect(parseTests('\n# only a heading\n')).toEqual([])
+})
+
+test('the gate of a test-queue line is its first whole field that starts "Gate:"', () => {
+  const gate = (line: string) => parseTests(line)[0]
+  expect(gate('a · !1 · sim · ready to test · 14:30 · on build 412 · Gate: device test (iOS) · Gate: later')).toMatchObject({
+    eta: '14:30',
+    notes: 'on build 412 · Gate: device test (iOS) · Gate: later',
+    gate: 'device test (iOS)',
+  })
+  expect(gate('a · !1 · Gate: your look')).toMatchObject({ mr: '!1', device: '', state: '', eta: '', notes: 'Gate: your look', gate: 'your look' })
+  expect(gate('a · !1 · gate: merges on green · building · 15:00 · a note')).toMatchObject({
+    device: 'building',
+    state: '15:00',
+    eta: 'a note',
+    notes: 'gate: merges on green',
+    gate: 'merges on green',
+  })
+  expect(gate('a · held at the gate: his word · the Gate: is review')).toMatchObject({ mr: 'held at the gate: his word', gate: '' })
+  expect(gate('Gate: not an item name')).toMatchObject({ item: 'Gate: not an item name', gate: '' })
+})
+
+test('/where shows a gate column only when a line has one, and never passes 100 columns', () => {
+  const old = parseTests(QUEUE)
+  expect(testLines(old, '      ')).toEqual([
+    '      Login screen     !93  iPhone 15  ready to test  14:30',
+    '      Settings toggle  !94  Pixel 8    building       15:10',
+    '      Vehicles list',
+  ])
+  const gated = parseTests(`${QUEUE}Charging history · !95 · Pixel 8 · ready to test ·  · Gate: device test on the release build\n`)
+  expect(testLines(gated, '      ')).toEqual([
+    '      Login screen      !93  iPhone 15  ready to test  14:30',
+    '      Settings toggle   !94  Pixel 8    building       15:10',
+    '      Vehicles list',
+    '      Charging history  !95  Pixel 8    ready to test         device test o…',
+  ])
+  const wide = 'w'.repeat(60)
+  const full = testLines(parseTests(`${wide} · ${wide} · ${wide} · ${wide} · ${wide} · Gate: ${wide}\nshort · !1`), '      ')
+  expect(full.map(line => line.length)).toEqual([100, 22])
+  expect(full[0]).toMatch(/^ {6}w{11}… {2}w{17}… {2}w{13}… {2}w{13}… {2}w{11}… {2}w{13}…$/)
+  const plain = testLines(parseTests(`${wide} · ${wide} · ${wide} · ${wide} · ${wide} · ${wide}`), '      ')
+  expect(plain[0]).toMatch(/^ {6}w{27}… {2}w{17}… {2}w{13}… {2}w{13}… {2}w{11}…$/)
+  expect(plain[0]?.length).toBe(100)
 })
 
 test('a queued launch waits for a slot, not for you: running until its session comes up, then stalls like a started one', () => {
