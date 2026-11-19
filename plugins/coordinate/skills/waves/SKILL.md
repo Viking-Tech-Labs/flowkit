@@ -15,8 +15,9 @@ The helpers:
 - `<cap>`: `python3 "$(dirname <spawn>)/../scripts/capacity.py"`, handoff's capacity script next
   to the spawner. Never a second copy, never the bare `flowkit-capacity` from an old PATH.
 
-The user is away when `${CLAUDE_CONFIG_DIR:-~/.claude}/away` exists and is younger than 12 hours:
-then ask nothing, take the recommended option at every fork and mark it "(auto)".
+The user is away when `python3 "$(dirname <spawn>)/../scripts/handoff.py" away-status` prints
+`away: since …` and they have typed nothing to you in the last five minutes: then ask nothing, take
+the recommended option at every fork and mark it "(auto)".
 
 ## 1. Plan the batch
 

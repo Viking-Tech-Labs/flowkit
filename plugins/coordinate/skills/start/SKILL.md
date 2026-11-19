@@ -16,9 +16,11 @@ put an older handoff's copy first. Handoff's capacity script sits next to it:
 gone: run `<spawn>` with `run_in_background: true` then. If it fails, say that coordinate needs `handoff` installed
 (`claude plugin install handoff@flowkit`) and stop.
 
-The user is **away** when the file `${CLAUDE_CONFIG_DIR:-~/.claude}/away` exists and is younger
-than 12 hours (`/handoff:away`). Then ask nothing: take the recommended option at every fork,
-mark it "(auto)" on the board, and never end a turn on a question.
+The user is **away** when `python3 "$(dirname <spawn>)/../scripts/handoff.py" away-status` prints
+`away: since …` (`/handoff:away`: the flag is in effect five minutes after it is set) and they have
+typed nothing to you in the last five minutes. Then ask nothing: take the recommended option at
+every fork, mark it "(auto)" on the board, and never end a turn on a question. A `last call:` line
+means the flag is about to take effect: ask now what you need from them.
 
 ## Rules that hold throughout
 

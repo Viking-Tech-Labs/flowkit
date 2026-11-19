@@ -22,8 +22,10 @@ session should do and goes into its Today section verbatim.
 - `quick`: skip the docs sweep (step 3).
 - `prompt-only`: print only the next session's prompt, or, when step 5 drafts none, only the one
   line saying what remains. Every other step still runs.
-- `overnight`: unattended. Run `handoff.py away` first, so every session down the chain knows the
-  user is off, and put its usage line in the close; then follow "Unattended" below.
+- `overnight`: unattended. Run `handoff.py away --by <this session's name>` first (`handoff.py
+  self` prints the name), so the idle coordinators get their last call and every session down the
+  chain knows the user is off five minutes later, and put its usage line in the close; then follow
+  "Unattended" below.
 - `spawn`: after the close, start the next session without the user (step 9): save its prompt
   and launch it through `flowkit-spawn` with Remote Control on: in the story's tmux tab, or in
   the background with `driver=background`. Where it cannot launch, the saved prompt and its launch
@@ -35,7 +37,7 @@ never by guessing whether the user is watching. Unattended, never end on a quest
 recommended option at every fork, mark it "(auto)" in the decision log and in the close, and
 never reopen an "(auto)" item the user already reviewed. The close must exist even if the run
 failed: a failed run with a clear OPEN is a good handoff, a silent one is not. Unattended, run
-`handoff.py restamp` before step 9: the away flag counts for 12 hours from its stamp, and the
+`handoff.py restamp` before step 9: the away flag counts for 12 hours from when it took effect, and the
 re-stamp (no nudge, no usage line) keeps a chain longer than that unattended until the user
 says back; it does nothing once the flag is gone. Unattended, the
 story's last close also stops what its sessions started (simulators, local servers) when no

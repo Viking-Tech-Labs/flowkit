@@ -13,7 +13,7 @@ called `handoff` keeps working beside this one.
 | Skill | What it does |
 |---|---|
 | `/handoff:close [modes] [what next]` | Closes the session: commits green work (never pushes), fixes docs it made stale, writes the pick-up block, drafts the next session's prompt when repo work is left, closes with `DONE` / `FOR ME` / `OPEN` / `LEFT` and records the close in the story file. |
-| `/handoff:away` | Marks you away (`~/.claude/away`, cleared by `/handoff:back` or after 12 hours): every session, running already or started later, stops asking and takes the recommended option, marked "(auto)"; a session already sitting on a question is told so at once (below). |
+| `/handoff:away` | Marks you away (`~/.claude/away`, in effect five minutes later, cleared by `/handoff:back` or 12 hours after): the idle coordinators get a last call at once; then every session, running already or started later, stops asking and takes the recommended option, marked "(auto)", unless you typed to it in the last five minutes; a session already sitting on a question is told so (below). |
 | `/handoff:back` | Clears the flag, so sessions ask you again, and lists the sessions waiting on you right now. |
 | `/handoff:spawn [single] <prompt>` | Starts any session with a prompt the way a close's `spawn` does: in its story's tab, or with `single` as a one-off in a shared `adhoc` tab ("open a fresh session in that repo"); with `report_to=on` the new session reports its verdict back here (below). |
 | `/handoff:setup` | Offers the status line below, as a diff of your settings, and writes it only on your yes; asks which launch driver spawned sessions use, and for background sessions offers two settings of yours; offers the `handoff.conf` keys below (tabs closing on their own, continuing after an API error, where a chain ends, a helper reporting back). |
@@ -155,33 +155,71 @@ would close and closes nothing.
 
 ## Being away
 
-`/handoff:away` writes `~/.claude/away` (the stamp of when; it counts for 12 hours, and every
-unattended close re-stamps it with `handoff.py restamp` while it exists, so a chain that runs
-longer than that stays unattended until `/handoff:back`) and makes it reach every session, in two
-ways:
+`/handoff:away` runs `handoff.py away --by <this session>`, the one command that sets the flag.
+It writes `~/.claude/away`:
 
-- **No session asks you anything.** A PreToolUse hook on AskUserQuestion (`hooks/hooks.json`)
-  denies the question while the flag is set, with a reason the session acts on: take the
+```text
+2026-11-19 23:15
+by: demo-coord
+set: 2026-11-19 23:10
+```
+
+The first line is the stamp the flag takes effect, five minutes after it was set; the flag counts
+for 12 hours from then, and every unattended close re-stamps it with `handoff.py restamp` while it
+exists (the file's time moves, the text stays), so a chain that runs longer than that stays
+unattended until `/handoff:back`. A flag written raw, its stamp alone on one line, still works: it
+is in effect from its stamp, set by `unknown`. Running `away` while a flag is set leaves it as it
+is. `handoff.py away-status` prints `away: since <stamp>` (in effect), `away: from <stamp> (set by
+<name> at <time>)` (not yet) or `away: off`. Whatever asks whether you are away means in effect:
+the closes' "unattended", the coordinators' "ask nothing", the reminders' silence and the ladder
+plugin's `max` gate. Only the keep-awake hook counts the flag from the moment it is written, so the
+computer stays up for the nudge at the effective time.
+
+- **A last call first.** `away` types one line into every idle coordinator at once (`last call:
+  the user goes away at 23:15. Ask now anything you need from them; …`), so a coordinator that
+  still needs a decision asks it while you are there. A coordinator is a name on a
+  `~/.claude/coordination/*.md` board's `Coordinator:` line, or one with `coord` at the start or
+  after a `-`. The line is typed as the doorbells type, only into an idle session in a tmux pane
+  whose prompt box is free (no draft, no dialog, not in copy mode); never into a reporter, the
+  session that set the flag, or a session that is busy or waits. One line per coordinator comes
+  back: `last call <name>`, or `no last call <name>: <why>`.
+- **Then no session asks you anything.** A PreToolUse hook on AskUserQuestion (`hooks/hooks.json`)
+  denies the question while the flag is in effect, with a reason the session acts on: take the
   recommended option, mark it "(auto)" in its decision log and its close, carry on, never end a
   turn on a question. The harness enforces it in every session that loads the plugin, hand-started
   or spawned, in a pane or in the background, so nothing depends on a session remembering to read
-  the flag, and `/handoff:back` has nothing to announce: once the flag is gone, questions go
-  through again.
-- **A session already sitting on a question is nudged.** `bin/flowkit-away nudge` reads `claude
-  agents --json`; each session with `status: waiting` on `input needed` gets the away line: in a
-  tmux pane, Escape ends the question's turn and the line is typed as its next prompt (as the
-  reporter doorbell types); a background session is stopped and resumed with the line as its
-  prompt. One line per session comes back: `nudged`, `permission` (a permission prompt is never
-  answered, since nothing here approves on your behalf: answer it from the phone), `unreachable`
-  (a question in a plain terminal outside tmux), `skipped` (a `<story>-report`, which never asks).
-  Idle and busy sessions are left alone, since the hook catches their next question; a session
-  that ended its turn on a question in prose stays as it is.
+  the flag. One exception keeps a conversation going: a session you typed a prompt to, or whose
+  question you answered, in the last five minutes may still ask, at the computer or from the
+  phone. Typed by you means not a task's notification, another session's message, a `/command`'s
+  or a `!` line's wrapper, a line flowkit types (the doorbells, the limit and error continues, the
+  away nudge, the last call), nor the session's first prompt, which is its launch brief. The
+  context hook keeps that stamp per session (UserPromptSubmit, and PostToolUse on
+  AskUserQuestion).
+- **Every session hears of it.** At its next prompt or batch of tool calls, each session gets one
+  line when the flag is set (who set it, when, and when it takes effect) and one when it is
+  cleared (by whom and when, or that it expired or was removed by hand).
+- **A session already sitting on a question is nudged** once the flag takes effect: the tmux
+  status bar's tick runs `handoff.py away-nudge` (at most once a minute, until it has run for the
+  flag), which runs `bin/flowkit-away nudge` once per flag. It reads `claude agents --json`; each
+  session with `status: waiting` on `input needed` gets the away line: in a tmux pane, Escape ends
+  the question's turn and the line is typed as its next prompt (as the reporter doorbell types); a
+  background session is stopped and resumed with the line as its prompt. Without tmux nothing
+  runs the nudge, and a waiting session reads the flag at its next question. `flowkit-away nudge`
+  sorts the sessions as `nudged`, `permission` (a permission prompt is never answered, since
+  nothing here approves on your behalf: answer it from the phone), `unreachable` (a question in a
+  plain terminal outside tmux), `skipped` (a `<story>-report`, which never asks). Idle and busy
+  sessions are left alone, since the hook catches their next question; a session that ended its
+  turn on a question in prose stays as it is.
+
+`/handoff:back` runs `handoff.py back --by <this session>`: the flag goes, every session hears who
+cleared it, and the sessions waiting on you are listed.
 
 `/handoff:setup-tmux` copies `flowkit-away` to `~/.local/bin` beside `flowkit-tmux`, kept at the
-plugin's version at every session start, so a shell function of your own that writes the flag can
-call `flowkit-away nudge` and `flowkit-away waiting` too (`--dry-run` shows what `nudge` would do,
-`--only <name>` limits it to one session). The flag is the record and the nudge a courtesy: a
-session the nudge could not reach still reads the flag at its next question.
+plugin's version at every session start, so a shell function of your own can call `flowkit-away
+nudge` and `flowkit-away waiting` too (`--dry-run` shows what `nudge` would do, `--only <name>`
+limits it to one session); to set the flag it calls `handoff.py away --by <name>`, never a raw
+write. The flag is the record and the nudge a courtesy: a session the nudge could not reach still
+reads the flag at its next question.
 
 `/handoff:away` (and so `/handoff:close overnight`) also prints how much of your plan is left, so
 you see before you leave whether the night fits:
