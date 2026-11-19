@@ -34,6 +34,9 @@ MIN_SPANS = 3  # a repo with fewer slice spans in the log than this is planned a
 OVERDUE = 10 * 60  # a running slice already past its median is given this long yet
 ITEM = re.compile(r"^(?P<name>[^=\s]+)=(?P<tree>.+?)(?::(?P<slices>\d+)(?::(?P<needs>[A-Za-z0-9._+,-]*))?)?$")
 TO_TEST = re.compile(r"\bto test\b", re.I)  # a test-queue state that waits on the user's testing
+GATE = re.compile(r"^gate:\s*", re.I)  # how a test-queue line's gate field starts: what the item waits for before it merges
+ON_GREEN = re.compile(r"merges on green", re.I)  # how a gate starts that waits on nobody; any other, or none, waits on the user
+DEVICE = re.compile(r"device", re.I)  # anywhere in a gate: a device test
 NEEDS = re.compile(r"(?:^|\s{2,})Needs:\s*(.*?)\s*(?=\s{2,}\S+:|$)", re.M)  # a prompt header's resources
 LEFT = re.compile(r"(?:^|\s{2,})Left:\s*(\d+)", re.M)  # a prompt header's slices left after this one
 SESSION_LINE = re.compile(r"^Session: ([0-9a-f-]{36})\b", re.M)  # a recorded close names its session
@@ -1006,7 +1009,9 @@ def tests_path(story):
 
 def read_tests(story):
     """A story's test queue: its leading `#` lines, and one [item, MR, device, state, ETA, notes…]
-    per line: a sixth field and on are notes, kept as written."""
+    per line: a sixth field and on are notes, kept as written. The gate is the first whole field
+    after the item that starts `Gate:`; one written in the place of a field up to the ETA becomes
+    the first note. The board's parseTests reads the same line the same way."""
     head, lines = [], []
     try:
         text = tests_path(story).read_text(errors="replace")
@@ -1019,14 +1024,27 @@ def read_tests(story):
                 head.append(line)
         elif line:
             fields = re.split(r"\s*·\s*", re.sub(r"^[-*]\s+", "", line))
-            lines.append(fields + [""] * (5 - len(fields)))
+            at = next((n for n in range(1, min(5, len(fields))) if GATE.match(fields[n])), None)
+            gate = [] if at is None else [fields.pop(at)]
+            lines.append(fields[:5] + [""] * (5 - len(fields)) + gate + fields[5:])
     return head, lines
+
+
+def gate_at(line):
+    """Where the gate of a line read_tests gave sits among its notes, or None."""
+    return next((n for n in range(5, len(line)) if GATE.match(line[n])), None)
+
+
+def gate_of(line):
+    at = gate_at(line)
+    return "" if at is None else GATE.sub("", line[at])
 
 
 def testq_set(story, item, t, **fields):
     """Under the lock: the item's line in <story>.tests.md set (added at the end when new) with the
-    fields given (mr, device, state, eta as epoch seconds or "" to clear), logged as `test` with the
-    state it had, so planned and actual ready times can be read back from the log."""
+    fields given (mr, device, state, eta as epoch seconds or "" to clear, gate as free text or ""
+    to remove), logged as `test` with the state it had, so planned and actual ready times can be
+    read back from the log."""
     head, lines = read_tests(story)
     line = next((x for x in lines if x[0] == item), None)
     before = line[3] if line else None
@@ -1037,6 +1055,12 @@ def testq_set(story, item, t, **fields):
         value = fields.get(key)
         if value is not None:
             line[n] = clock(value) if isinstance(value, (int, float)) else value
+    if fields.get("gate") is not None:
+        at = gate_at(line)
+        if at is not None:
+            del line[at]
+        if fields["gate"]:
+            line.insert(len(line) if at is None else at, f"Gate: {GATE.sub('', fields['gate'])}")
     write_tests(story, head, lines)
     log("test", t, story=story, item=item, op="set", before=before,
         **{k: v for k, v in fields.items() if v is not None})
@@ -1179,7 +1203,8 @@ def waves(rows, specs, story="", write=False, t=None):
         parts.append(f"{len(lost)} not placed ({', '.join(lost)})")
     parts.append(f"slots {'?' if found is None else len(trees)}/{cfg['slots']}")
     if story:
-        parts.append(f"{sum(bool(TO_TEST.search(x[3])) for x in read_tests(story)[1])} wait on your testing")
+        parts.append(f"{sum(bool(TO_TEST.search(x[3])) and not ON_GREEN.match(gate_of(x)) for x in read_tests(story)[1])}"
+                     " wait on your testing")
     if found is None:
         parts.append("claude agents did not answer: no new chain starts until it does")
     return lines + [" · ".join(parts)]
@@ -1593,6 +1618,8 @@ def main(argv=None):
     p.add_argument("--device")
     p.add_argument("--state")
     p.add_argument("--eta", help="HH:MM, or empty to clear")
+    p.add_argument("--gate", help="what the item waits for before it merges, free text (`merges on green` "
+                   "waits on nobody, `device` in it is a device test), or empty to remove")
     p.add_argument("--launch", help="the launch name whose drain moves this line to running")
     p = sub.add_parser("limit", help="a repo runs DELTA slots more or fewer for a while (0 ends it)")
     p.add_argument("repo")
@@ -1639,7 +1666,7 @@ def main(argv=None):
         with lock():
             if args.op == "set":
                 print(testq_set(args.story, args.item, t, mr=args.mr, device=args.device, state=args.state,
-                                eta=None if args.eta is None else clock_arg(args.eta, t)))
+                                eta=None if args.eta is None else clock_arg(args.eta, t), gate=args.gate))
                 if args.launch:
                     tie_launch(args.launch, {"story": args.story, "item": args.item})
             elif args.op == "drop":

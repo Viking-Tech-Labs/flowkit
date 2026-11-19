@@ -772,6 +772,54 @@ class Capacity(unittest.TestCase):
                          f"Login · !1 · sim · ready to test ·  · {notes}\nShort · !2 ·  ·  · 16:00\nJust a sentence\n")
         self.assertEqual(self.cli("testq", "epic").stdout.splitlines()[0], f"Login · !1 · sim · ready to test ·  · {notes}")
 
+    def test_the_gate_is_a_whole_field_that_starts_with_its_label(self):
+        path = capacity.tests_path("epic")
+        old = ("# epic test queue\n# kept by the coordinator\n"
+               "Receipts list · !7 · sim · ready to test · 14:30 · held at the gate: his word · the Gate: is review\n"
+               "Vehicles · !8 · emulator · building · 15:00 · on build 412 · Gate: device test (Android) · Gate: later\n"
+               "Colours · !9 · Gate: your look (after the release)\n"
+               "Fonts · !10 · gate: merges on green · tested\n"
+               "Gate: not an item's gate\n"
+               "A sentence that names no field at all\n")
+        path.write_text(old)
+        lines = capacity.read_tests("epic")[1]
+        self.assertEqual([capacity.gate_of(x) for x in lines],
+                         ["", "device test (Android)", "your look (after the release)", "merges on green", "", ""],
+                         "prose with the word in it is no gate; the first field with the label wins")
+        self.assertEqual(lines[1][5:], ["on build 412", "Gate: device test (Android)", "Gate: later"], "a second one stays a note")
+        self.assertEqual(lines[2], ["Colours", "!9", "", "", "", "Gate: your look (after the release)"],
+                         "one written in a field's place is lifted out of it")
+        self.assertEqual(lines[3][:6], ["Fonts", "!10", "tested", "", "", "gate: merges on green"])
+        # a write of another line leaves every line without a gate, and one whose gate is a note, as written
+        self.cli("testq", "epic", "set", "New", "--state", "building")
+        self.assertEqual(path.read_text(), old.replace("Colours · !9 · Gate:", "Colours · !9 ·  ·  ·  · Gate:").replace(
+            "Fonts · !10 · gate: merges on green · tested", "Fonts · !10 · tested ·  ·  · gate: merges on green")
+            + "New ·  ·  · building\n")
+        # --gate: free text, replaced where it stands, added last, removed by an empty one
+        self.assertEqual(self.cli("testq", "epic", "set", "Vehicles", "--gate", "your look, then merges on green").stdout.strip(),
+                         "Vehicles · !8 · emulator · building · 15:00 · on build 412 · Gate: your look, then merges on green · Gate: later")
+        self.assertEqual(self.cli("testq", "epic", "set", "New", "--gate", "Gate: device test").stdout.strip(),
+                         "New ·  ·  · building ·  · Gate: device test")
+        self.assertEqual(self.cli("testq", "epic", "set", "Receipts list", "--gate", "merges on green", "--eta", "").stdout.strip(),
+                         "Receipts list · !7 · sim · ready to test ·  · held at the gate: his word · the Gate: is review"
+                         " · Gate: merges on green")
+        self.assertEqual(self.cli("testq", "epic", "set", "New", "--gate", "").stdout.strip(), "New ·  ·  · building ·")
+        self.assertEqual([e.get("gate") for e in self.log_events() if e["event"] == "test"],
+                         [None, "your look, then merges on green", "Gate: device test", "merges on green", ""])
+
+    def test_the_plan_line_leaves_out_what_merges_on_green(self):
+        app = self.devices()
+        self.agents([])
+        capacity.tests_path("epic").write_text(
+            "Login · !1 · sim · ready to test\n"
+            "Fonts · !2 · sim · ready to test ·  · Gate: merges on green once the pipeline is\n"
+            "Colours · !3 · sim · ready to test · Gate: your look\n"
+            "Icons · !4 · sim · ready to test ·  · Gate: device test, then merges on green\n"
+            "Maps · !5 · sim · building · 15:00 · Gate: device test\n")
+        self.assertEqual(capacity.waves([], [f"a={app}"], "epic", t=self.T)[-1].rsplit(" · ", 1)[1], "3 wait on your testing")
+        self.assertEqual([bool(capacity.DEVICE.search(capacity.gate_of(x))) for x in capacity.read_tests("epic")[1]],
+                         [False, False, False, True, True])
+
     def test_limit_runs_a_repo_slots_fewer_for_a_while(self):
         app, lib = self.devices(), self.repo("lib")
         self.conf.write_text(self.conf.read_text() + f"[{lib}]\nslots = 1\n")
