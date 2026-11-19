@@ -93,6 +93,7 @@ so an update or an uninstall keeps them, and readable by the scripts that run ou
 | `permission_mode` | empty | The `--permission-mode` of spawned sessions; empty keeps your default. A chain that runs while you are away needs a mode that does not stop to ask. |
 | `autoclose` | `off` | `on` lets the tmux kit's status-bar tick close a finished story's tab on its own (see "The tmux kit"). `/handoff:setup` offers it. |
 | `autoretry` | `off` | `on` lets a session an API error stopped carry on by itself while you are away (see "API errors"). `/handoff:setup` offers it. |
+| `limitresume` | `on` | `off` leaves a session that a usage limit stopped where it is; by default it is continued after the limit resets (see "Usage limits"). |
 | `chain_end` | `mr-ready` | What a story's chain ends with, proposed when its first prompt is drafted (see "Where a chain ends"): `branch`, `draft-mr`, `mr-ready` or `merge`. `/handoff:setup` offers it. |
 | `report_to` | `off` | `on` writes `Report-to: <the launching session>` into the brief of a helper (`/handoff:spawn` with a prompt, or a close's review or investigation beside the chain), so its close sends the verdict back (see "A helper reports back"); a name sends every helper's verdict to that session. `/handoff:setup` offers it. |
 
@@ -114,7 +115,8 @@ every redraw that falls in a new second, not every 15 seconds. Put your own chan
 Sessions started in the background have no pane and are not counted; `prefix a` lists them.
 
 The tab's word is its most urgent session's state, in this order: **needs you** (a question or a
-permission), **error** (the last turn failed on an API error), **stalled** (idle 15 minutes or
+permission), **error** (the last turn failed on an API error), **limit** (it stopped on a usage
+limit and waits for the reset, see "Usage limits"), **stalled** (idle 15 minutes or
 more, transcript and forks untouched, no close recorded), **running**, **watching** (closed, but a
 watch or background task still runs; also a story with an open `flowkit-watch` and nothing more
 urgent in its tab, see "Watches"), **done** (closed and idle). A close counts once the story
@@ -197,8 +199,8 @@ New in 0.7.0. When an API error ends a turn, Claude Code fires `StopFailure` ins
 the session sits there until something prompts it. A hook on it (`handoff.py api-error`) always:
 
 - keeps the computer awake between turns, as `Stop` would have (see "Keeping the computer awake")
-- writes `~/.claude/flowkit/retry/<session id>.json`, which labels the tab `error` until the
-  session's next clean turn end deletes it
+- writes `~/.claude/flowkit/retry/<session id>.json`, which labels the tab `error` (`limit` for a
+  usage limit) until the session's next clean turn end deletes it
 - logs `> retry <session> · <time> · <error> · <details>` in the story file, or in
   `~/.claude/flowkit/retries.log` outside a story
 
@@ -211,9 +213,54 @@ on from where you were.` into the session's pane, in one tmux call, but only whe
 idle, its transcript has not moved, the pane is the one its live process runs in, and the pane is
 neither in copy mode nor holding a draft. The continue is its own probe: another error starts the
 next wait, the count kept. A background session is resumed with the line (`handoff.py wake --id`).
-A stop on the output-token limit gets one continue asking for smaller pieces. `rate_limit` is left
-to Claude Code's own `autoContinueAtUsageLimit`; anything else (an authentication failure, an
-invalid request) is only recorded.
+A stop on the output-token limit gets one continue asking for smaller pieces. A `rate_limit` stop
+has a waiter of its own (see "Usage limits"); anything else (an authentication failure, an invalid
+request) is only recorded.
+
+## Usage limits
+
+New in 0.10.0. A turn that ends on a usage limit (`You've hit your weekly limit · resets 2am`) fires
+`StopFailure` with `rate_limit`, and the session sits at its prompt until someone types. Claude
+Code's own wait (`autoContinueAtUsageLimit`) does not start in a session with Remote Control on,
+and `flowkit-spawn` starts every session with `--remote-control` unless told `--no-rc`; it also
+waits only for a reset less than 24 hours away, stops after three continues and skips background
+sessions. So a chain that hits the limit at night would still be sitting there in the morning.
+
+On by default, whether you are away or not: the hook starts one waiter per session, which
+
+- learns when the limit resets from the first source that knows: the limit line in the session's
+  transcript (it carries the reset the API named), else a fresh `flowkit-usage --live` reading (the
+  latest reset among the capped buckets that bind the session: the week, the 5 hours and its
+  model's own; never the 10-minute cache or old figures), else the message's words (`resets 2am
+  (Europe/Berlin)`). When none of them names one, the stop is tried like an API error: after 2, 5
+  and 10 minutes.
+- writes one line where the retry line went: `> limit <session> · <time> · continues at <time>, once
+  the limit has reset: the computer must be awake then`. It holds a `caffeinate` only from 30
+  minutes before that time, not for the days a weekly limit can take; a reset the computer slept
+  through is continued once it wakes.
+- three minutes after the reset types `Your last turn stopped on the usage limit at <time>; it has
+  reset. Carry on from where you were.` into the session's pane, in one tmux call, when the session
+  is idle, the pane is the one its live process runs in and is not in copy mode, its prompt box is
+  on screen and empty with no dialog below it (a menu's options, an `Enter to confirm` hint), and
+  the session has not gone on since the limit line: a reply or a prompt after it means someone
+  already took over, while the harness's own lines and a `/usage` do not count. When one of these
+  is in the way it looks again every 30 minutes. A background session is resumed with the line.
+- stays until the session's next clean turn end, so a continue that hits the limit again (another
+  bucket, a reset that came late) is waited out the same way. After three continues with no clean
+  turn end in between it stops and says so in the story file, as it does for a session that runs
+  outside tmux, where nothing can be typed: `> limit <session> · <time> · not continued: …`. The
+  tab keeps its `limit` word until you prompt the session.
+
+The tmux kit's tick starts a waiter again when its process died, at most once a minute. A session
+without Remote Control is left to Claude Code's own wait when your settings turn that on
+(`autoContinueAtUsageLimit: true`) and the reset is less than 24 hours away.
+
+Off with `autoContinueAtUsageLimit: false` in your `settings.json`, or with `limitresume=off` in
+`handoff.conf` (`handoff.py conf limitresume off`); the stop is still recorded and the tab labelled.
+The record (`~/.claude/flowkit/retry/<session id>.json`) keeps what the waiter knows: `reset`,
+`due`, `continues`, a `state` (`waiting`, `continued`, `moved`, `native`, `unreachable`, or what is
+in the way: `not idle`, `copy mode`, `draft`, `dialog`, `no prompt box`), and the session's status
+and bottom pane rows as it stopped and at rest.
 
 ## Keeping the computer awake
 

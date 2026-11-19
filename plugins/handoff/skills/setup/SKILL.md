@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, whether a session an API error stopped carries on while the user is away, what a chain's last slice leaves behind (the branch, a Draft MR, the MR ready, merged), and whether a helper session reports its verdict back to the session that launched it. Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
+description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, whether a session an API error stopped carries on while the user is away, whether one a usage limit stopped is continued after the reset, what a chain's last slice leaves behind (the branch, a Draft MR, the MR ready, merged), and whether a helper session reports its verdict back to the session that launched it. Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
 disable-model-invocation: true
 ---
 
@@ -100,6 +100,25 @@ user's sessions, so it is off until the user turns it on.
    AskUserQuestion tool, change nothing: print the command below, and stop.
 3. Write the answer: `handoff.py conf autoretry <on|off>`. The next error reads it; nothing needs
    a restart.
+
+## Continuing after a usage limit
+
+The `limitresume` key of `handoff.conf` is on unless the user turns it off: a session that a
+usage limit stopped is continued three minutes after the limit resets, whether the user is away
+or not (the plugin README's "Usage limits" says how, and why Claude Code's own wait does not
+cover sessions with Remote Control on). Nothing to install.
+
+1. Say in plain words what it does: one waiter per session waits for the reset, keeps the
+   computer awake only for the last 30 minutes, and types one line asking the session to carry
+   on, never while the session is busy, went on by itself, shows a dialog, holds a draft or is
+   in copy mode; after three continues that end on the limit again it stops and says so in the
+   story file. The user's own `autoContinueAtUsageLimit: false` in `settings.json` turns it off
+   too.
+2. Ask only when the user brings it up or `handoff.conf` already says `limitresume=off`: keep it
+   on (recommended), or turn it off. Without the AskUserQuestion tool, change nothing: print the
+   command below, and stop.
+3. Write the answer: `handoff.py conf limitresume <on|off>`. The next stop reads it, and a waiter
+   already waiting reads it before it types; nothing needs a restart.
 
 ## Where a chain ends
 
