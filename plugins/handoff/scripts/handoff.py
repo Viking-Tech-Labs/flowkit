@@ -41,10 +41,13 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py api-error | api-ok                  StopFailure and Stop hooks: the retry record and line, and
                                                  the waiter (retry-wait <session id>): after a usage limit
                                                  unless limitresume=off, after an API error with autoretry=on
-  handoff.py remind --dry-run                    what a reminder would say now (a pane parked at a start-up
-                                                 prompt, a usage-limit stop flowkit cannot continue, the
-                                                 sessions and test items waiting on the user) and why it
-                                                 would stay silent; sends nothing and keeps no state
+  handoff.py remind [--dry-run]                  the tick's, with remind=on: what waits on the user (a pane
+                                                 parked at a start-up prompt, a usage-limit stop flowkit
+                                                 cannot continue, the sessions and test items waiting on
+                                                 them) into flowkit/remind/<stamp>.md, pushed through the
+                                                 oldest idle reporter, else notify=, else a macOS
+                                                 notification; --dry-run says what it would say now and
+                                                 why it would stay silent, sends nothing, keeps no state
   handoff.py usage [--json]                      the plan's usage left (bin/flowkit-usage)
   handoff.py statusline diff|install <root>      the status line that records context and cost
   handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
@@ -117,13 +120,19 @@ LOCAL = ("<command-", "<local-command-", "<bash-")  # how the lines of a /comman
 WRAPPERS = ("<task-notification", "Another Claude session sent a message", "<cross-session-message",
             "[Cross-session") + LOCAL  # prompts nobody typed: a task's notice, another session's message
 FLOWKIT_LINE = re.compile(r"Your last turn (?:stopped on the usage limit|ended on an API error|hit the output token limit)"
-                          r"|away(?: since .+?)?: I am off\.|report now$|closed [\w.-]+$|last call: ")  # lines flowkit types
+                          r"|away(?: since .+?)?: I am off\.|report now$|closed [\w.-]+$|last call: |reminder: ")  # lines flowkit types
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 RESETS = re.compile(r"resets (?:at )?(?:(?P<mon>[A-Za-z]{3}) (?P<day>\d{1,2}),? (?:at )?)?(?P<h>\d{1,2})(?::(?P<m>\d\d))?"
                     r"(?: ?(?P<ap>[ap]m))?(?: \((?P<tz>[^)\s]+)\))?", re.I)
 REMIND = CLAUDE / "flowkit" / "remind.json"  # what the reminders have said: {once: {key: when}, digest: {at, keys}}
 REMIND_IDLE = 10  # minutes without keyboard or mouse input after which the user is not at the computer
 REMIND_EVERY = 120  # minutes between two digests
+REMIND_DIR = CLAUDE / "flowkit" / "remind"  # each reminder's text as <stamp>.md; remind-latest.md beside the folder
+REMIND_WAIT = 90  # seconds a rung reporter has to show its push in its transcript before the next one is rung
+REMIND_RING = ("reminder: from flowkit's tick, not the user. Send the user one push notification now with the "
+               "PushNotification tool (load it through ToolSearch if it is not loaded), its message word for word "
+               'everything after "Message: "; then end the turn with "reminder sent" and nothing else. The full '
+               "list: {path}. Message: {push}")
 PARKED = CLAUDE / "flowkit" / "parked.json"  # flowkit-tmux's: the panes parked at a start-up prompt
 PARKED_FRESH = 300  # seconds after which that file says nothing: the tick that writes it has stopped
 PROMPT_LINE = re.compile(r"^[│|\s]*[>❯]\s?(.*?)[\s│|]*$")
@@ -1399,6 +1408,148 @@ def remind_pass(found, stale, said, now):
     return heading, lines, {"once": once, "digest": digest}
 
 
+def remind_file(heading, lines, now):
+    """The reminder's text in flowkit/remind/<stamp>.md and flowkit/remind-latest.md; the newest
+    file again when it says the same (a pass whose push did not arrive comes back a minute later)."""
+    body = "".join(f"- {x}\n" for x in lines)
+    REMIND_DIR.mkdir(parents=True, exist_ok=True)
+    last = max(REMIND_DIR.glob("*.md"), default=None)
+    try:
+        old = last.read_text() if last else ""
+    except OSError:
+        old = ""
+    if old.startswith(f"# {heading} · ") and old.partition("\n\n")[2] == body:
+        return last
+    path = REMIND_DIR / time.strftime("%Y%m%d-%H%M%S.md", time.localtime(now))
+    text = f"# {heading} · {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))}\n\n{body}"
+    path.write_text(text)
+    (REMIND_DIR.parent / "remind-latest.md").write_text(text)
+    return path
+
+
+def remind_push(heading, lines):
+    """The push: one line under 200 characters, the first thing that waits and how many more."""
+    more = f" (+{len(lines) - 1} more in remind-latest.md)" if len(lines) > 1 else ""
+    first = " ".join(lines[0].split())
+    room = 195 - len(heading) - len(more)
+    return f"{heading}: {first if len(first) <= room else first[:room - 1].rstrip() + '…'}{more}"
+
+
+def story_reported(slug):
+    """The story's last section is its reporter's final report: its reporter has nothing left to collect."""
+    try:
+        heads = re.findall(r"^## (.+?) · \d{4}-\d\d-\d\d", (STORIES / f"{slug}.md").read_text(errors="replace"), re.M)
+    except OSError:
+        return False
+    return bool(heads) and heads[-1] == "Final report"
+
+
+def pushed(sid, after):
+    """The answer to the session's first PushNotification call made after `after` ("error: …" for a
+    failed one), or None while there is none or it has no answer yet."""
+    path = next(CLAUDE.glob(f"projects/*/{sid}.jsonl"), None)
+    calls = set()
+    for row in transcript_tail(path) if path else []:
+        message = row.get("message") if isinstance(row.get("message"), dict) else {}
+        content = message.get("content")
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("name") == "PushNotification" and (stamp(row) or 0) >= after:
+                calls.add(block.get("id"))
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") in calls:
+                text = block.get("content")
+                if isinstance(text, list):
+                    text = " ".join(str(b.get("text") or "") for b in text if isinstance(b, dict))
+                return f"error: {text}" if block.get("is_error") else str(text or "")
+    return None
+
+
+def remind_ring(row, line):
+    """Ring one reporter: the line typed into its pane as the last call types it, then up to
+    REMIND_WAIT seconds for the answer to the push it sends. (sent, what happened); a push the tool
+    did not send ("Not sent — this terminal is active", an error) is not sent."""
+    found = pane_of(row["pid"])
+    why = "not in a tmux pane" if found is None else "copy mode" if found[1] else parked(found[0])
+    if why:
+        return False, why
+    at = time.time()
+    if not type_line(found[0], line):
+        return False, "tmux did not take the line"
+    while True:
+        result = pushed(row["sessionId"], at)
+        if result is not None:
+            return not result.startswith(("Not sent", "error: ")), result
+        if time.time() - at >= REMIND_WAIT:
+            return False, f"no push in {REMIND_WAIT} s"
+        time.sleep(REMIND_WAIT / 18)
+
+
+def remind_deliver(push, path):
+    """Send the push through the first that carries it: the oldest idle reporter in a tmux pane whose
+    story has no final report after its last close, then the next one; else the `notify` command of
+    handoff.conf, the push on its stdin; else a macOS notification. Returns what carried it, or ""."""
+    line = REMIND_RING.format(path=home_short(path), push=push)
+    try:
+        rows = [r for r in agents_json() if isinstance(r, dict)]
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        rows = []
+    for row in sorted(rows, key=lambda r: r.get("startedAt") or 0):
+        name = str(row.get("name") or "")
+        if not name.endswith("-report") or row.get("kind") != "interactive" or mode(row) != "idle" \
+                or not row.get("pid") or not row.get("sessionId") or story_reported(name[:-len("-report")]):
+            continue
+        sent, what = remind_ring(row, line)
+        print(f"ring {name}: {what}")
+        if sent:
+            return name
+    command = setting("notify", "")
+    if command:
+        try:
+            ok = subprocess.run(command, shell=True, input=push, capture_output=True, text=True, timeout=60).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            ok = False
+        print(f"notify: {'sent' if ok else 'failed'}")
+        if ok:
+            return "notify"
+    try:
+        ok = subprocess.run(["osascript", "-e", "on run argv", "-e", 'display notification (item 1 of argv) with title "flowkit"',
+                             "-e", "end run", push], capture_output=True, text=True, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    return "macOS notification" if ok else ""
+
+
+def remind():
+    """One pass, the tick's (remind=on): what waits on the user, sent while they are neither away nor
+    at the computer; kept as said only once a push arrived, so a pass whose push did not arrive is
+    said again at the next. One pass at a time: a delivery can take minutes."""
+    REMIND.parent.mkdir(parents=True, exist_ok=True)
+    with REMIND.with_suffix(".lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("remind: another pass is running")
+            return
+        now = time.time()
+        quiet = remind_quiet(now)
+        if quiet:
+            print(f"remind: silent, {'; '.join(quiet)}")
+            return
+        found, stale = remind_found(now)
+        heading, lines, state = remind_pass(found, stale, remind_state(), now)
+        if not lines:
+            remind_mark(state)
+            print("remind: nothing to say")
+            return
+        path = remind_file(heading, lines, now)
+        how = remind_deliver(remind_push(heading, lines), path)
+        if how:
+            remind_mark(state)
+        print(f"remind: sent through {how} ({home_short(path)})" if how else
+              f"remind: not delivered, said again at the next pass ({home_short(path)})")
+
+
 def remind_dry():
     now = time.time()
     quiet = remind_quiet(now)
@@ -1725,8 +1876,8 @@ def main(argv):
             context_hook()
         except Exception:
             pass
-    elif cmd == "remind" and args == ["--dry-run"]:
-        remind_dry()
+    elif cmd == "remind" and args in ([], ["--dry-run"]):
+        (remind_dry if args else remind)()
     elif cmd == "usage" and args in ([], ["--json"]):
         sys.exit(usage(*args))
     elif cmd == "wake" and len(args) == 2:

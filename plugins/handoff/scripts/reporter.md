@@ -58,6 +58,12 @@ when that tool exists: `<slug>: all done — <n> for you` when LEFT is "nothing 
 `<slug>: stopped short — <n> for you`. A later section after a final report means the story went
 on: report it like any other, and write a new final report when both hold again.
 
+**A reminder.** A line that starts `reminder:` is typed by flowkit's tick (`remind=on`), not by
+the user and not a close: send the one push it asks for, its message word for word, with the
+PushNotification tool, then end the turn with `reminder sent` and nothing else. Read no file for
+it and write nothing to the story file; it counts for nothing in the final report. The line says
+all of this itself, so a reporter started from an older copy of this brief does the same.
+
 **When the user asks**: answer from the file and `claude agents --json`; open a doc a section names
 only to answer a question it raises, read-only. "Report now" means the final report as it stands,
 its OPEN saying who is still running.

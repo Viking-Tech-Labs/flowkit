@@ -478,6 +478,24 @@ class Cache(Labels):
             self.ft.away_nudge()
             self.assertEqual(popen.call_count, 2, "it ran for this flag")
 
+    def test_the_tick_starts_remind_once_a_minute_with_remind_on(self):
+        self.ft.CONFIG, tick = self.tmp, self.tmp / "flowkit" / ".remind-tick"
+        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
+            self.line()
+            self.assertEqual(popen.call_count, 0, "no handoff.conf: off")
+            (self.tmp / "handoff.conf").write_text("remind=off\n")
+            self.ft.remind()
+            self.assertEqual(popen.call_count, 0)
+            (self.tmp / "handoff.conf").write_text("remind=off\nremind=on\n")
+            self.ft.CACHE.unlink()
+            self.line()
+            self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "handoff.py"), "remind"])
+            self.ft.remind()
+            self.assertEqual(popen.call_count, 1, "at most once a minute")
+            os.utime(tick, (0, 0))
+            self.ft.remind()
+            self.assertEqual(popen.call_count, 2, "a minute on")
+
     def test_a_line_younger_than_ten_seconds_comes_from_the_cache(self):
         self.session(1, status="waiting")
         first = self.line()

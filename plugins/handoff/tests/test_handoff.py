@@ -2,8 +2,11 @@
 dir and temp dir, a stub `claude` that serves a session list and a usage answer and records what
 else it was called with, and a stub `tmux` that serves a pane list, so nothing reaches a real
 session or the user's files."""
+import contextlib
+import fcntl
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import re
@@ -836,7 +839,8 @@ class Handoff(unittest.TestCase):
                        "Your last turn hit the output token limit at 03:00. Carry on, in smaller pieces.",
                        "away since 2026-11-19 23:15: I am off. Answer the question you asked with the recommended option",
                        "away: I am off. Answer the question", "report now", "closed demo-s2",
-                       "last call: the user goes away at 23:15. Ask now anything you need from them"):
+                       "last call: the user goes away at 23:15. Ask now anything you need from them",
+                       "reminder: from flowkit's tick, not the user. Send the user one push notification now"):
             self.context(10, prompt)
             self.assertTrue(denied(), prompt)
         self.context(10, "go with 2, and keep the old name")
@@ -1506,7 +1510,7 @@ class Handoff(unittest.TestCase):
         self.assertEqual(self.handoff("remind", "--dry-run").stdout, r.stdout, "a dry run keeps no state: the same again")
         self.assertFalse((self.tmp / "claude" / "flowkit" / "remind.json").exists())
         self.assertFalse(self.calls.exists(), "nothing typed, rung or started")
-        self.assertEqual(self.handoff("remind").returncode, 1, "sending is not built yet")
+        self.assertFalse((self.tmp / "claude" / "flowkit" / "remind").exists(), "no reminder written")
 
     def test_remind_is_silent_when_off_away_or_at_the_computer(self):
         self.env["XDG_CONFIG_HOME"] = str(self.tmp)
@@ -1594,6 +1598,114 @@ class Handoff(unittest.TestCase):
             self.assertEqual(look(T + 10 * H + 20, []), ("Waiting on you", [self.WAITS]))
             state = json.loads((self.tmp / "claude" / "flowkit" / "remind.json").read_text())
             self.assertEqual(state, {"once": {}, "digest": {"at": T + 10 * H + 20, "keys": ["waiting:s5:permission prompt"]}})
+
+    def push_answer(self, sid, answer, at):
+        """What a PushNotification call made at epoch `at` and its answer leave in a transcript."""
+        when = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")
+        return (json.dumps({"type": "assistant", "timestamp": when(at), "message": {"content": [
+                    {"type": "tool_use", "id": f"tu-{sid}", "name": "PushNotification", "input": {"message": "x"}}]}})
+                + "\n" + json.dumps({"type": "user", "timestamp": when(at + 1), "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": f"tu-{sid}", "content": answer}]}}) + "\n")
+
+    def test_remind_rings_the_oldest_idle_reporter_until_one_pushes(self):
+        T = time.time()
+        self.remind_world(T)
+        (self.stories / "done.md").write_text("# done\n\n## done-s1 · 2026-11-19 09:00\nx\n\n"
+                                              "## Final report · 2026-11-19 10:00\nall done\n")
+        reporters = [  # name, kind, status, pid, pane, started
+            ("demo-coord", "interactive", "idle", 4000, "%6", 10), ("done-report", "interactive", "idle", 4002, "%12", 50),
+            ("busy-report", "interactive", "busy", 4007, "%13", 60), ("bg-report", "background", "idle", 4008, None, 70),
+            ("demo-report", "interactive", "idle", 4001, "%7", 100), ("draft-report", "interactive", "idle", 4005, "%9", 150),
+            ("quiet-report", "interactive", "idle", 4006, "%10", 170), ("side-report", "interactive", "idle", 4003, "%8", 200),
+            ("late-report", "interactive", "idle", 4004, "%11", 300)]
+        self.agents([{"name": n, "kind": k, "status": s, "pid": pid, "sessionId": f"sid-{n}", "startedAt": t}
+                     for n, k, s, pid, _, t in reporters]
+                    + [{"name": "demo-s5", "sessionId": "s5", "status": "waiting", "waitingFor": "permission prompt"}])
+        projects = self.tmp / "claude" / "projects" / "-repo"
+        projects.mkdir(parents=True)
+        # a push from before the ring never counts
+        (projects / "sid-demo-report.jsonl").write_text(self.push_answer("old", "Terminal notification sent.", T - 3600))
+        # what a reporter's push leaves in its transcript once the ring is typed into its pane
+        for pane, sid, answer in (("%10", "sid-quiet-report", "Not sent — this terminal is active, so your output "
+                                   "here already reaches the user"),
+                                  ("%8", "sid-side-report", "Terminal notification sent. Mobile push requested.")):
+            (self.tmp / f"push{pane}").write_text(self.push_answer(sid, answer, T + 60))
+            (self.tmp / f"push{pane}.to").write_text(str(projects / f"{sid}.jsonl"))
+        stub = self.tmp / "bin" / "tmux"
+        stub.write_text("#!/bin/sh\ncase \"$1\" in\n"
+                        "list-panes) printf '%s\\n' " + " ".join(f"'{pid} {pane} 0'" for *_, pid, pane, _ in reporters if pane)
+                        + ";;\ncapture-pane) if [ \"$4\" = %9 ]; then echo '│ > half typed'; else echo '│ > '; fi;;\n"
+                        f"send-keys) echo tmux \"$@\" >> {self.calls}; f={self.tmp}/push$3; "
+                        "if [ -f \"$f\" ]; then cat \"$f\" >> \"$(cat \"$f.to\")\"; fi;;\n"
+                        f"*) echo tmux \"$@\" >> {self.calls};; esac\n")
+        stub.chmod(0o755)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            loader = importlib.machinery.SourceFileLoader("flowkit_handoff_ring", str(HANDOFF))
+            handoff = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+            loader.exec_module(handoff)
+            handoff.REMIND_WAIT = 0.3
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                handoff.remind()
+            lines = out.getvalue().splitlines()
+            self.assertEqual(lines[:4], ["ring demo-report: no push in 0.3 s", "ring draft-report: draft",
+                                         "ring quiet-report: Not sent — this terminal is active, so your output here "
+                                         "already reaches the user",
+                                         "ring side-report: Terminal notification sent. Mobile push requested."])
+            self.assertRegex(lines[4], r"^remind: sent through side-report \(.*/flowkit/remind/\d{8}-\d{6}\.md\)$")
+            self.assertEqual(len(lines), 5)
+            typed = self.calls.read_text().splitlines()
+            self.assertEqual([t.split(" -l ")[0] for t in typed],
+                             ["tmux send-keys -t %7", "tmux send-keys -t %10", "tmux send-keys -t %8"])
+            push = ("Waiting on you: a pane is parked at a start-up prompt: Accessing workspace: (tab demo, pane 2, "
+                    "story demo) (+5 more in remind-latest.md)")
+            self.assertTrue(typed[0].split(" -l ")[1].startswith("reminder: from flowkit's tick, not the user. "))
+            self.assertTrue(typed[0].endswith(f"Message: {push} ; run-shell sleep 0.5 ; send-keys -t %7 Enter"))
+            files = list((self.tmp / "claude" / "flowkit" / "remind").glob("*.md"))
+            self.assertEqual(len(files), 1)
+            text = files[0].read_text()
+            self.assertTrue(text.startswith("# Waiting on you · "))
+            self.assertEqual(text.split("\n\n", 1)[1], "".join(f"- {x}\n" for x in (
+                self.PARKED, self.LIMIT, self.WAITS, self.LOGIN, self.COLOURS, self.RECEIPTS)))
+            self.assertEqual((self.tmp / "claude" / "flowkit" / "remind-latest.md").read_text(), text)
+            self.assertTrue((self.tmp / "claude" / "flowkit" / "remind.json").exists(), "kept as said once a push arrived")
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                handoff.remind()
+            self.assertEqual(out.getvalue(), "remind: nothing to say\n", "said: nobody is rung again")
+            self.assertEqual(len(self.calls.read_text().splitlines()), 3)
+
+    def test_remind_falls_back_to_notify_then_the_mac_and_keeps_only_what_arrived(self):
+        self.remind_world(time.time())
+        said = self.tmp / "claude" / "flowkit" / "remind.json"
+        notified, mac = self.tmp / "notified", self.tmp / "mac"
+        self.handoff("conf", "notify", f"cat > {notified}")
+        osascript = self.tmp / "bin" / "osascript"
+        osascript.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {mac}\nexit 0\n")
+        osascript.chmod(0o755)
+        out = self.handoff("remind").stdout.splitlines()
+        self.assertEqual(out[0], "notify: sent")
+        self.assertRegex(out[1], r"^remind: sent through notify \(")
+        self.assertTrue(notified.read_text().startswith("Waiting on you: a pane is parked at a start-up prompt"))
+        self.assertTrue(said.exists())
+        self.assertFalse(mac.exists())
+        said.unlink()
+        self.handoff("conf", "notify", "false")
+        out = self.handoff("remind").stdout.splitlines()
+        self.assertEqual(out[0], "notify: failed")
+        self.assertRegex(out[1], r"^remind: sent through macOS notification \(")
+        self.assertEqual(mac.read_text().splitlines()[-1], notified.read_text(), "the push is osascript's last argument")
+        said.unlink()
+        osascript.write_text("#!/bin/sh\nexit 1\n")
+        out = self.handoff("remind").stdout.splitlines()
+        self.assertRegex(out[-1], r"^remind: not delivered, said again at the next pass \(")
+        self.assertFalse(said.exists(), "nothing arrived: nothing kept")
+        self.assertEqual(len(list((self.tmp / "claude" / "flowkit" / "remind").glob("*.md"))), 1,
+                         "the same text again: no second file")
+        with (self.tmp / "claude" / "flowkit" / "remind.lock").open("w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.assertEqual(self.handoff("remind").stdout, "remind: another pass is running\n")
+        self.idle(5)
+        self.assertRegex(self.handoff("remind").stdout, r"^remind: silent, at the computer")
+        self.assertFalse(said.exists())
 
 
 if __name__ == "__main__":

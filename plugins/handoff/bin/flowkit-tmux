@@ -9,7 +9,8 @@
                               listed in ~/.claude/flowkit/parked.json while it does;
                               starts again the waiter of a session stopped on a usage limit;
                               nudges the sessions parked on a question once the away flag
-                              takes effect;
+                              takes effect; with remind=on in handoff.conf it sends the
+                              reminders (`handoff.py remind`);
                               with autoclose=on in handoff.conf it also closes a finished slice's
                               pane once its successor runs or its watch is open, and finished
                               story tabs
@@ -639,6 +640,28 @@ def away_nudge():
         pass
 
 
+def remind():
+    """With remind=on in handoff.conf, `handoff.py remind` starts detached at most once a minute: it
+    tells the user what waits on them while they are neither away nor at the computer, and its own
+    lock keeps one pass at a time. Off costs one read of handoff.conf."""
+    if setting("remind") != "on":
+        return
+    state = CLAUDE / "flowkit"
+    try:
+        if time.time() - (state / ".remind-tick").stat().st_mtime < 60:
+            return
+    except OSError:
+        pass
+    try:
+        state.mkdir(parents=True, exist_ok=True)
+        (state / ".remind-tick").touch()
+        subprocess.Popen([sys.executable, str(plugin_root() / "scripts" / "handoff.py"), "remind"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+
+
 def status_line():
     """`waiting` for the status bar. tmux reruns a #() job at every redraw that falls in a new
     second, not every status-interval, so the line comes from the cache while it is younger than
@@ -667,6 +690,7 @@ def status_line():
         watch()
         limits()
         away_nudge()
+        remind()
         line = out.getvalue()
         fresh = CACHE.with_suffix(".tmp")
         fresh.write_text(json.dumps({"at": time.time(), "line": line}))
