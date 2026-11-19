@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
@@ -135,9 +136,24 @@ def change(args):
     return text, render(rows, max_on)
 
 
+def away():
+    """The away flag is in effect: its first line, the stamp it takes effect (handoff's `away` sets it
+    five minutes ahead; a stamp that does not parse counts from the file's write), has passed, and
+    neither it nor the file's last re-stamp is AWAY_HOURS old."""
+    try:
+        stamp, mtime = AWAY.read_text().partition("\n")[0].strip(), AWAY.stat().st_mtime
+    except OSError:
+        return False
+    try:
+        at = datetime.strptime(stamp, "%Y-%m-%d %H:%M").timestamp()
+    except ValueError:
+        at = mtime
+    return at <= time.time() < max(at, mtime) + AWAY_HOURS * 3600
+
+
 def gate():
     """Ask before a launch at effort max, only for a table this plugin wrote with max on; while
-    the away flag is set, run it at xhigh instead. Everything else passes silently."""
+    the away flag is in effect, run it at xhigh instead. Everything else passes silently."""
     _, managed, _, max_on = read()
     if not (managed and max_on):
         return
@@ -149,7 +165,7 @@ def gate():
     if not (LAUNCH.search(cmd) and MAX.search(cmd)):
         return
     out = {"hookEventName": "PreToolUse"}
-    if AWAY.is_file() and time.time() - AWAY.stat().st_mtime < AWAY_HOURS * 3600:
+    if away():
         out.update(permissionDecision="allow",
                    permissionDecisionReason="You are away: the max launch runs at xhigh, (auto).",
                    updatedInput={**data["tool_input"], "command": MAX.sub(r"\1\2xhigh\3", cmd)})

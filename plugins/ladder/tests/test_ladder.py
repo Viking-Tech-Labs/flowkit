@@ -82,6 +82,9 @@ class Ladder(unittest.TestCase):
         self.assertEqual(self.gate("CLAUDE_CODE_EFFORT_LEVEL=max claude")["permissionDecision"], "ask")
         self.assertIsNone(self.gate("claude --effort xhigh -p hi"))
         self.assertIsNone(self.gate("cat ~/.claude/x --effort max"))
+        (self.tmp / "claude" / "away").write_text("2999-01-01 00:00\nby: coord-a\n")
+        self.assertEqual(self.gate("flowkit-spawn --effort max x")["permissionDecision"], "ask",
+                         "a flag not yet in effect: the user is still there")
         (self.tmp / "claude" / "away").write_text("2026-10-17 02:00\n")
         out = self.gate("flowkit-spawn --effort 'max' x")
         self.assertEqual(out["permissionDecision"], "allow")
