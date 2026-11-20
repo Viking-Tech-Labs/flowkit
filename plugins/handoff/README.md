@@ -69,7 +69,8 @@ PATH, so a copy older than the one `installed_plugins.json` names hands over to 
 with the newest release anyway; only the skill text waits for a restart.
 
 The background driver (`driver=background`) starts the session with `claude --bg`, Claude's own
-background sessions, so no tmux is needed:
+background sessions, so no tmux is needed (and one account only, see "Two logins on one config
+folder"):
 
 - the session shows in `claude agents`, in the board and on your phone (Remote Control);
   `claude attach <name>` opens it in a terminal;
@@ -198,7 +199,7 @@ computer stays up for the nudge at the effective time.
   question you answered, in the last five minutes may still ask, at the computer or from the
   phone. Typed by you means not a task's notification, another session's message, a `/command`'s
   or a `!` line's wrapper, a line flowkit types (the doorbells, the limit and error continues, the
-  away nudge, the last call), nor the session's first prompt, which is its launch brief. The
+  away nudge, the last call, a `/remote-control`), nor the session's first prompt, which is its launch brief. The
   context hook keeps that stamp per session (UserPromptSubmit, and PostToolUse on
   AskUserQuestion).
 - **Every session hears of it.** At its next prompt or batch of tool calls, each session gets one
@@ -236,8 +237,8 @@ Week 49% used, resets Tue 02:59 (in 15 h) · Fable 37% of its bucket, 19% of the
 
 New in 0.6.0, the same line from `handoff.py usage` (`--json` for the fields), or `flowkit-usage`,
 which `/handoff:setup-tmux` copies to `~/.local/bin`. Claude Code answers it itself (a `get_usage`
-request through `claude -p`, no model call, no transcript, about 5 s), kept 10 minutes per config
-folder. A failed call says so and falls back to the newest `~/.claude/usage-stats/week-*.json` a
+request through `claude -p`, no model call, no transcript, about 5 s), kept 10 minutes per
+account (`--json` names it, see "Two logins on one config folder"). A failed call says so and falls back to the newest `~/.claude/usage-stats/week-*.json` a
 status line of yours may record, marked old.
 
 ## API errors
@@ -306,8 +307,57 @@ Off with `autoContinueAtUsageLimit: false` in your `settings.json`, or with `lim
 `handoff.conf` (`handoff.py conf limitresume off`); the stop is still recorded and the tab labelled.
 The record (`~/.claude/flowkit/retry/<session id>.json`) keeps what the waiter knows: `reset`,
 `due`, `continues`, a `state` (`waiting`, `continued`, `moved`, `native`, `unreachable`, or what is
-in the way: `not idle`, `copy mode`, `draft`, `dialog`, `no prompt box`), and the session's status
-and bottom pane rows as it stopped and at rest.
+in the way: `not idle`, `copy mode`, `draft`, `dialog`, `no prompt box`), the session's status
+and bottom pane rows as it stopped and at rest, and the login it stopped on (`config`, `account`;
+next section).
+
+## Two logins on one config folder
+
+New in 0.10.0. Claude Code keeps who is logged in in one file, `.claude.json`: inside
+`CLAUDE_CONFIG_DIR`, or in your home folder (`~/.claude.json`) when the variable is unset. So a
+session started with `CLAUDE_CONFIG_DIR=$HOME/.claude` and one started without it share `~/.claude`
+whole (settings, hooks, plugins, transcripts, flowkit's own files) and differ only in the account
+they run on. flowkit works on the folder, so it sees the sessions of both. Where the account
+matters it reads that file as the session's own environment names it and compares the account
+and organization ids in it; it has no label or variable of its own for a login.
+
+- `flowkit-usage` keeps its 10-minute answer per account and names the account in `--json`
+  (`account`), so one login never answers for the other, nor for the account before a `/login`.
+- A usage-limit record keeps the login its session stopped on: `config` (its `CLAUDE_CONFIG_DIR`,
+  `null` when it had none) and `account`. Its waiter asks for usage as that login, also when the
+  tick started it from the tmux server's environment, and refuses a reading that names another
+  account.
+- **An account change counts as a reset.** A `/login` moves every session of that login to the
+  new account. A waiter notices when the ids in its record's account file change and the session
+  shows it too: its Remote Control link is gone, or its transcript says it dropped because the
+  account changed. The record then starts over: no continue counted, and what it was left to is
+  open again (you, after three continues; Claude Code's own wait, which ends at an account change
+  without continuing; the tick starts a waiter for those when none lives). The story file gets
+  `> limit <session> · <time> · the account it runs on changed: counted as a reset`. Only a live
+  reading of the new account counts then, the limit line being the old one's: with no capped
+  bucket for the session's model the waiter types `Your last turn stopped on the usage limit at
+  <time>; the account it runs on has changed since. Carry on from where you were.` at once; with
+  one capped it waits for that reset; with no reading it tries after 2 minutes. A stop within a
+  minute of the change (a request already under way) is not counted and is looked at again once
+  the minute is over.
+- **Remote Control comes back.** At an account change Claude Code drops the link of every session
+  on that login, says so in each transcript and reconnects none. The tick sees the change in the
+  account files (`~/.claude/flowkit/logins.json` keeps what it last saw there) and `handoff.py
+  reconnect` types `/remote-control` into each session that shows no link and whose transcript
+  says it lost one that way: once per notice, and only while the session is idle and its prompt
+  box is on screen, empty, with no dialog below it. A session at work or on a question gets it at
+  its next clean turn end (the Stop hook) or at the tick's next pass; a limited one gets it just
+  before its continue. The link has 20 seconds to show. When it does not, a dialog the command
+  left open is closed with Esc and the story file gets one line: `> remote <session> · <time> ·
+  Remote Control did not come back after the account changed; type /remote-control in the
+  session`. A session whose link stands, one that never had Remote Control and one you
+  disconnected yourself get nothing, and no session is restarted for it.
+
+Moving a session from one login to the other is not flowkit's: which account a session starts
+on, and whether a stopped one may carry on under the other, are yours to decide and to script (a
+wrapper that sets `CLAUDE_CONFIG_DIR` by folder, say). `driver=background` is single-account:
+`claude --bg` has one daemon per config folder, which keeps the environment of whoever started
+it first, so every background session runs on that caller's login until the daemon idles out.
 
 ## Start-up prompts
 
