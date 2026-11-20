@@ -565,12 +565,27 @@ def watch():
         pass
 
 
+def relogged(rec):
+    """The login a limit record's session stopped on is another account's now: its account file
+    (<CLAUDE_CONFIG_DIR as the session had it>/.claude.json, ~/.claude.json when it had none) names
+    other ids than the record keeps."""
+    if not rec.get("account"):
+        return False
+    try:
+        who = json.loads((Path(rec.get("config") or Path.home()) / ".claude.json").read_text()).get("oauthAccount")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(who, dict) and bool(who.get("accountUuid")) and \
+        {"account": who["accountUuid"], "organization": who.get("organizationUuid")} != rec["account"]
+
+
 def limits():
     """A session stopped on a usage limit needs its waiter (`handoff.py retry-wait`), which the
     StopFailure hook starts and which lives until the record goes: one that died is started again,
     at most once a minute. Never for a record its waiter is done with (continued, left to the user
-    or to Claude Code's own wait), with limit resume off, or whose session is gone. No record costs
-    one directory read."""
+    or to Claude Code's own wait) unless the account under its session changed since, which opens
+    it again; never with limit resume off, or for a session that is gone. No record costs one
+    directory read."""
     state = CLAUDE / "flowkit" / "retry"
     try:
         names = [e.name for e in os.scandir(state) if e.name.endswith(".json") and not e.name.startswith(".")]
@@ -590,7 +605,8 @@ def limits():
     for name in names:
         try:
             rec = json.loads((state / name).read_text())
-            if rec.get("kind") != "rate_limit" or not rec.get("resume") or rec.get("handled") == rec.get("at"):
+            if rec.get("kind") != "rate_limit" or not rec.get("resume") or \
+                    (rec.get("handled") == rec.get("at") and not relogged(rec)):
                 continue
             os.kill(int(rec["pid"]), 0)
         except (OSError, ValueError, TypeError, AttributeError, KeyError):

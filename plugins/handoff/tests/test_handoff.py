@@ -936,6 +936,46 @@ class Handoff(unittest.TestCase):
         self.assertEqual(json.loads(self.handoff("usage", "--json").stdout)["source"], "old")
         self.assertEqual(self.probes(), 2)
 
+    def login(self, account, organization="org-1", path=None):
+        """A fake account file: who is logged in under the test's CLAUDE_CONFIG_DIR, or at `path`."""
+        (path or self.tmp / "claude" / ".claude.json").write_text(json.dumps({
+            "claudeInChromeDefaultEnabled": False,
+            "oauthAccount": {"accountUuid": account, "organizationUuid": organization, "displayName": "Me"}}))
+        return {"account": account, "organization": organization}
+
+    def two_logins(self):
+        """Two logins on one config folder, as Claude Code keeps them: the home's ~/.claude is the
+        test's config folder; with CLAUDE_CONFIG_DIR unset the account file is ~/.claude.json, with
+        it set to ~/.claude it is the one inside. Returns (who is which, the folder's spelling)."""
+        home = self.tmp / "home"
+        home.mkdir()
+        (home / ".claude").symlink_to(self.tmp / "claude")
+        self.env["HOME"] = str(home)
+        return self.login("acct-home", path=home / ".claude.json"), self.login("acct-folder"), str(home / ".claude")
+
+    def test_usage_is_kept_and_named_per_account(self):
+        plain, folder, spelled = self.two_logins()
+        self.usage_answer()
+        ask = lambda *args: json.loads(self.handoff("usage", "--json", *args).stdout)
+        del self.env["CLAUDE_CONFIG_DIR"]
+        first = ask()
+        self.assertEqual((first["source"], first["account"], self.probes()), ("live", plain, 1))
+        self.env["CLAUDE_CONFIG_DIR"] = spelled
+        other = ask()
+        self.assertEqual((other["source"], other["account"], self.probes()), ("live", folder, 2),
+                         "the same folder, another login: never the first one's answer")
+        del self.env["CLAUDE_CONFIG_DIR"]
+        again = ask()
+        self.assertEqual((again["source"], again["account"], self.probes()), ("cache", plain, 2))
+        swapped = self.login("acct-home", "org-2", path=self.tmp / "home" / ".claude.json")
+        after = ask()
+        self.assertEqual((after["source"], after["account"], self.probes()), ("live", swapped, 3),
+                         "a /login to another organization: the answer before it is not this account's")
+        (self.tmp / "usage.jsonl").unlink()
+        old = json.loads(subprocess.run(["python3", str(PLUGIN / "bin" / "flowkit-usage"), "--json", "--live"],
+                                        capture_output=True, text=True, env=self.env).stdout)
+        self.assertEqual((old["source"], old["account"]), ("old", None), "figures of no call name no account")
+
     def test_usage_falls_back_to_the_newest_week_file(self):
         out = self.handoff("usage")
         self.assertEqual(out.returncode, 1)
@@ -1451,6 +1491,158 @@ class Handoff(unittest.TestCase):
         self.assertTrue(lock.exists(), "the new waiter stays beside the record")
         self.api_error("rate_limit")  # woken while limited: the stop is noted, without another line
         self.assertEqual(len([l for l in self.log() if l.startswith("> retry")]), 1)
+
+    NOTICE = ("Remote Control disconnected \u2014 signed-in claude.ai account or organization changed on this machine "
+              "\u2014 run /remote-control to start a session for the current account")
+
+    def notice(self):
+        """The line a session logs when its login changed under it, appended to the transcript."""
+        with self.transcript.open("a") as f:
+            f.write(json.dumps({"type": "system", "subtype": "informational", "level": "warning",
+                                "timestamp": self.iso(time.time()), "content": self.NOTICE}) + "\n")
+
+    def unlink_remote(self):
+        """The session's Remote Control link goes, as it does when its login changes."""
+        path = self.tmp / "claude" / "sessions" / f"{self.pid}.json"
+        path.write_text(json.dumps({k: v for k, v in json.loads(path.read_text()).items() if k != "bridgeSessionId"}))
+
+    def module(self):
+        loader = importlib.machinery.SourceFileLoader("flowkit_handoff", str(HANDOFF))
+        handoff = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(handoff)
+        return handoff
+
+    def test_limit_record_keeps_its_login_and_a_waiter_started_elsewhere_asks_as_it(self):
+        plain, folder, spelled = self.two_logins()
+        stub = self.tmp / "bin" / "claude"
+        stub.write_text(stub.read_text().replace("echo probe >>", 'echo "probe ${CLAUDE_CONFIG_DIR-unset}" >>'))
+        self.limit_setup()  # no quota answer in the limit line: a reading is asked for
+        del self.env["CLAUDE_CONFIG_DIR"]
+        base = self.buckets(week=(100, 7200))
+        self.api_error("rate_limit")
+        rec = self.rec_when(lambda r: r.get("due"))
+        self.assertEqual((rec["config"], rec["account"], rec["reset"]), (None, plain, base + 7200))
+        lock = self.tmp / "claude" / "flowkit" / "retry" / f"{self.SID}.lock"
+        os.kill(int(lock.read_text()), signal.SIGKILL)  # its waiter dies; the tick starts one, in its own environment
+        path = self.tmp / "claude" / "flowkit" / "retry" / f"{self.SID}.json"
+        path.write_text(json.dumps({**rec, "at": rec["at"] + 1, "due": None, "reset": None}))
+        base = self.buckets(week=(100, 9000))
+        tick = subprocess.Popen(["python3", str(HANDOFF), "retry-wait", self.SID], env={**self.env, "CLAUDE_CONFIG_DIR": spelled})
+        self.addCleanup(lambda: (tick.kill(), tick.wait()))
+        rec = self.rec_when(lambda r: r.get("due"))
+        self.assertEqual((rec["reset"], (self.tmp / "probes").read_text().splitlines()), (base + 9000, ["probe unset"] * 2),
+                         "asked as the login the session stopped on, not as the other one on this folder")
+        self.limit_setup()
+        self.env["CLAUDE_CONFIG_DIR"] = spelled
+        self.api_error("rate_limit")
+        rec = self.rec_when(lambda r: r.get("due"))
+        self.assertEqual((rec["config"], rec["account"]), (spelled, folder))
+        del self.env["CLAUDE_CONFIG_DIR"]
+        self.api_error("rate_limit")
+        rec = self.record()
+        self.assertEqual((rec["config"], rec["account"]), (spelled, folder), "one process, one login: kept as first read")
+        path = self.tmp / "claude" / "flowkit" / "retry" / f"{self.SID}.json"
+        path.write_text(json.dumps({**rec, "pid": 999999}))
+        self.api_error("rate_limit")
+        rec = self.record()
+        self.assertEqual((rec["config"], rec["account"]), (None, plain), "resumed in a new process, on the other login")
+
+    def test_limit_never_takes_a_reset_from_another_accounts_reading(self):
+        one = self.login("acct-1")
+        self.limit_setup()
+        self.env["FLOWKIT_RETRY_MINUTE"] = "6"  # the stop is planned a second after it
+        self.buckets(week=(100, 7200))
+        self.api_error("rate_limit")
+        self.login("acct-2")  # the file alone: the session's Remote Control link stands, so it is no change of its own
+        rec = self.rec_when(lambda r: r.get("due"), 6.0)
+        self.assertEqual((rec["account"], rec["reset"], self.probes()), (one, None, 1),
+                         "the other account's capped week names no reset for this session")
+        self.assertEqual(rec["due"], rec["at"] + 2 * 6, "so it is tried like an API error")
+        self.login("acct-1")
+        self.limit_setup()
+        base = self.buckets(week=(100, 7200))
+        self.api_error("rate_limit")
+        self.assertEqual(self.rec_when(lambda r: r.get("due"))["reset"], base + 7200, "its own account's reading is taken")
+
+    def test_limit_an_account_change_is_a_reset(self):
+        one = self.login("acct-1")
+        self.limit_setup(reset=time.time() + 3600)
+        self.api_error("rate_limit")
+        rec = self.rec_when(lambda r: r.get("due"))
+        self.assertEqual((rec["config"], rec["account"]), (str(self.tmp / "claude"), one))
+        two = self.login("acct-2")
+        self.buckets()
+        self.assertEqual(self.sent(0.6), "", "the file alone is no change: the session's Remote Control link stands")
+        self.assertEqual(self.record()["account"], one)
+        self.unlink_remote()
+        typed = self.sent()
+        self.assertIn("tmux send-keys -t %7 -l Your last turn stopped on the usage limit at ", typed)
+        self.assertIn("; the account it runs on has changed since. Carry on from where you were. ; run-shell", typed)
+        rec = self.rec_when(lambda r: r.get("state") == "continued")
+        self.assertEqual((rec["account"], rec["continues"], rec["reset"], self.probes()), (two, 1, None, 1))
+        self.assertRegex(self.log()[-1], r"^> limit s4 · .* · the account it runs on changed: counted as a reset$")
+        time.sleep(0.5)
+        self.assertEqual(self.calls.read_text().count("-l Your last turn"), 1, "one continue")
+
+        self.login("acct-1")  # the new account is at its limit too: its reset is waited for
+        self.limit_setup(reset=time.time() + 3600, remote=False)
+        self.api_error("rate_limit")
+        self.rec_when(lambda r: r.get("due"))
+        base = self.buckets(week=(100, 7200))
+        self.login("acct-2")
+        rec = self.rec_when(lambda r: r.get("switched") and r.get("due"))
+        self.assertEqual((rec["reset"], rec["state"], self.sent(0.4)), (base + 7200, "waiting", ""))
+        self.assertAlmostEqual(rec["due"], base + 7200 + 3 * 0.05)
+
+        self.login("acct-1")  # a link that came back before anyone looked: the transcript still says it dropped
+        self.limit_setup(reset=time.time() + 3600)
+        self.api_error("rate_limit")
+        self.rec_when(lambda r: r.get("due"))
+        self.buckets()
+        self.login("acct-1", "org-2")
+        self.notice()
+        self.assertIn("has changed since", self.sent(), "another organization is another account")
+
+        self.login("acct-1")  # left to Claude Code's own wait, which ends at the change without continuing
+        self.limit_setup(reset=time.time() + 600, remote=False, settings={"autoContinueAtUsageLimit": True})
+        self.api_error("rate_limit")
+        self.assertEqual(self.rec_when(lambda r: r.get("handled"))["state"], "native")
+        self.buckets()
+        self.login("acct-2")
+        self.assertIn("has changed since", self.sent())
+        self.assertEqual(self.rec_when(lambda r: r.get("state") == "continued")["continues"], 1)
+
+    def test_limit_plan_after_an_account_change_by_the_clock(self):
+        handoff = self.module()
+        clock, marks, reading = [1000.0], [], [None]
+        open_week = {"week": {"percent": 49, "resets_at": 9000}}
+        capped = {"week": {"percent": 100, "resets_at": 9000}, "five_hour": {"percent": 100, "resets_at": 5000}}
+        rec = {"at": 900.0, "switched": 950.0, "pid": 1, "name": "s4", "session": self.SID, "transcript": "",
+               "continues": 3, "continued_for": 9000.0}
+
+        def plan(**change):
+            marks.clear()
+            return handoff.limit_plan(self.SID, {**rec, **change}, 60)
+
+        with mock.patch.multiple(handoff, limit_pane=lambda rec: None, session_file=lambda *a: {},
+                                 usage_reading=lambda rec: reading[0],
+                                 limit_mark=lambda sid, key=None, line=None, **fields: marks.append(fields)), \
+                mock.patch.object(handoff.time, "time", lambda: clock[0]):
+            reading[0] = open_week
+            self.assertEqual(plan(), (1000.0, None), "a stop from before the change, the new account open: at once")
+            self.assertEqual((marks[0]["continues"], marks[0]["continued_for"]), (0, None), "counted from nothing")
+            reading[0] = capped
+            self.assertEqual(plan(), (9000 + 3 * 60, 9000), "capped: after the new account's last reset")
+            reading[0] = None
+            self.assertEqual(plan(), (950.0 + 2 * 60, None), "no reading: tried like an API error")
+            reading[0] = open_week
+            clock[0] = 1009.5
+            self.assertEqual(plan(at=1009.0), (1010.0, None), "a stop 59 s after the change: once the minute is over")
+            self.assertEqual(marks[0]["continues"], 0, "and no continue that failed")
+            clock[0] = 1012.0
+            self.assertIsNone(plan(at=1011.0), "61 s after it, the stop is the new account's own")
+            self.assertEqual(marks[0]["state"], "unreachable")
+            self.assertEqual(plan(at=1011.0, continues=0, continued_for=None)[0], 1011.0 + 2 * 60)
 
     PARKED = "a pane is parked at a start-up prompt: Accessing workspace: (tab demo, pane 2, story demo)"
     LIMIT = "demo-s2 stopped on the usage limit and flowkit cannot continue it (story demo)"

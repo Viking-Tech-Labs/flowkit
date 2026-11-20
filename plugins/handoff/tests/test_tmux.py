@@ -458,6 +458,19 @@ class Cache(Labels):
                 self.assertEqual(popen.call_count, 2, "its waiter lives: it holds the lock")
             tick()
             self.assertEqual(popen.call_count, 3, "a lock file nobody holds is a dead waiter's")
+            login = self.tmp / "login"
+            login.mkdir()
+            who = {"account": "acct-1", "organization": "org-1"}
+            native = dict(handled=5.0, state="native", config=str(login), account=who)
+            for org, count, why in (("org-1", 3, "the account it stopped on: still Claude Code's own to continue"),
+                                    ("org-2", 4, "another organization under its login: open again")):
+                (login / ".claude.json").write_text(json.dumps(
+                    {"oauthAccount": {"accountUuid": "acct-1", "organizationUuid": org}}))
+                tick(**native)
+                self.assertEqual(popen.call_count, count, why)
+            (login / ".claude.json").write_text("{}")
+            tick(**native)
+            self.assertEqual(popen.call_count, 4, "nobody logged in is no change")
 
     def test_the_tick_starts_the_away_nudge_until_it_ran_for_the_flag(self):
         flag, tick = self.tmp / "away", self.tmp / "flowkit" / ".away-tick"

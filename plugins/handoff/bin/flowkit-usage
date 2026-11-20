@@ -6,11 +6,13 @@
   flowkit-usage --live    ask now, whatever the cache holds (with or without --json)
 
 Claude Code answers it itself: a `get_usage` control request through `claude -p` stream-json,
-with no model call and no transcript left behind. An answer is kept 10 minutes per config folder
-(CLAUDE_CONFIG_DIR), so a second account has its own. When the call fails the line says so and
-falls back to the newest week-*.json a status line of your own may record under
-~/.claude/usage-stats/ (seven_day_pct, resets_at, five_hour_pct), marked old and without the
-per-model figures.
+with no model call and no transcript left behind. An answer is kept 10 minutes per account: the one
+logged in under this environment (the account file is <CLAUDE_CONFIG_DIR>/.claude.json, or
+~/.claude.json with the variable unset), so two logins that share one config folder, and the
+account before a /login, never answer for each other; --json names it (`account`). When the call
+fails the line says so and falls back to the newest week-*.json a status line of your own may
+record under ~/.claude/usage-stats/ (seven_day_pct, resets_at, five_hour_pct), marked old, naming
+no account and without the per-model figures.
 
 The plugin runs its own copy (`handoff.py usage`; `handoff.py away` prints the line);
 `/handoff:setup-tmux` copies this file to ~/.local/bin, kept at the plugin's version at every
@@ -28,11 +30,29 @@ from pathlib import Path
 
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 WEEKS = CLAUDE / "usage-stats"
-CACHE = Path(tempfile.gettempdir()) / f"flowkit-usage-{hashlib.sha1(str(CLAUDE).encode()).hexdigest()[:12]}.json"
 CACHE_SECONDS = 600
 TIMEOUT = 20
 REQUEST = {"type": "control_request", "request_id": "flowkit-usage",
            "request": {"subtype": "get_usage", "skip_behaviors": True}}
+
+
+def identity():
+    """Who is logged in under this environment: the account and organization ids of its account
+    file, or None when it names none (no login, an API key)."""
+    try:
+        who = json.loads((Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home()) / ".claude.json").read_text())
+        who = who.get("oauthAccount")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return {"account": who["accountUuid"], "organization": who.get("organizationUuid")} \
+        if isinstance(who, dict) and who.get("accountUuid") else None
+
+
+def cache_file(who):
+    """Where that account's last answer is kept; with no login to read, per value of the variable
+    (unset is one of them)."""
+    key = json.dumps(who, sort_keys=True) if who else repr(os.environ.get("CLAUDE_CONFIG_DIR"))
+    return Path(tempfile.gettempdir()) / f"flowkit-usage-{hashlib.sha1(key.encode()).hexdigest()[:12]}.json"
 
 
 def probe():
@@ -130,24 +150,29 @@ def line(f, now):
 
 
 def usage(live=False):
-    """(fields, source, error): source is live, cache or old; fields None when nothing is known."""
+    """(fields, source, error): source is live, cache or old; fields None when nothing is known.
+    A live or cached answer names the account it is of; one asked while the login changed is none."""
     now = time.time()
+    who = identity()
+    cache = cache_file(who)
     try:
-        cached = json.loads(CACHE.read_text())
+        cached = json.loads(cache.read_text())
         if not live and now - cached["at"] < CACHE_SECONDS:
-            return {**cached["fields"], "as_of": cached["at"]}, "cache", None
+            return {**cached["fields"], "as_of": cached["at"], "account": who}, "cache", None
     except (OSError, ValueError, KeyError, TypeError):
         pass
     try:
         f = fields(probe())
+        if identity() != who:
+            raise RuntimeError("the login changed while asking")
     except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError, AttributeError) as e:
         error = f"timed out after {TIMEOUT} s" if isinstance(e, subprocess.TimeoutExpired) else str(e)
         return fallback(), "old", error or type(e).__name__
     try:
-        CACHE.write_text(json.dumps({"at": int(now), "fields": f}))
+        cache.write_text(json.dumps({"at": int(now), "fields": f}))
     except OSError:
         pass
-    return {**f, "as_of": int(now)}, "live", None
+    return {**f, "as_of": int(now), "account": who}, "live", None
 
 
 def main(argv):
@@ -155,7 +180,7 @@ def main(argv):
         sys.exit(__doc__)
     f, source, error = usage("--live" in argv)
     if "--json" in argv:
-        print(json.dumps({"source": source, "error": error, **(f or {})}, indent=2))
+        print(json.dumps({"source": source, "error": error, "account": None, **(f or {})}, indent=2))
     elif source != "old":
         print(line(f, time.time()))
     elif f:

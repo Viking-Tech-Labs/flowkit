@@ -115,6 +115,9 @@ LIMIT_GRACE = 3  # minutes after a usage limit's reset before the session is con
 LIMIT_HOLD = 30  # minutes before that from which the computer is kept awake
 LIMIT_CONTINUES = 3  # continues that ended on the limit again, no clean turn end in between: then it waits for the user
 NATIVE_HOURS = 24  # a reset this near is Claude Code's own to wait for, in a session without Remote Control
+SWITCH_QUIET = 1  # minutes after an account change in which a stop on the limit says nothing of the new account
+NOTICE = ("Remote Control disconnected", "account or organization changed")  # what a session logs when its login changed
+ACCOUNTS = {}  # account file → (what stat said, who it named then): parsed again only once it was rewritten
 TAIL = 2 * 1024 * 1024  # bytes of a transcript's end read for its last limit line and what follows it
 LOCAL = ("<command-", "<local-command-", "<bash-")  # how the lines of a /command or a ! shell line start: no turn
 WRAPPERS = ("<task-notification", "Another Claude session sent a message", "<cross-session-message",
@@ -601,6 +604,42 @@ def reachable():
     return bool(away_since()) or awake
 
 
+def account_file(config):
+    """The file Claude Code keeps a login in, under an environment whose CLAUDE_CONFIG_DIR is `config`
+    (None or "": unset): <config>/.claude.json, else ~/.claude.json. Two logins share one config
+    folder when one runs with the variable unset and the other with it set to ~/.claude, so the
+    folder (CLAUDE above) never tells them apart; this file does."""
+    return Path(config or HOME) / ".claude.json"
+
+
+def identity(config):
+    """Who is logged in under that environment: the account and organization ids of its account
+    file, or None when it names none (no login, an API key) or cannot be read."""
+    path = account_file(config)
+    try:
+        st = path.stat()
+        seen = (st.st_mtime_ns, st.st_size, st.st_ino)
+        if ACCOUNTS.get(path, (None,))[0] != seen:
+            who = json.loads(path.read_text()).get("oauthAccount")
+            ACCOUNTS[path] = (seen, {"account": who["accountUuid"], "organization": who.get("organizationUuid")}
+                              if isinstance(who, dict) and who.get("accountUuid") else None)
+        return ACCOUNTS[path][1]
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def login_env(rec):
+    """This process's environment with the login of a limit record's session: CLAUDE_CONFIG_DIR as
+    it was at the stop, unset when it was unset. A waiter the tick starts has the tmux server's
+    environment, whose login may be the other one."""
+    env = dict(os.environ)
+    if "config" in rec:
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        if rec["config"] is not None:
+            env["CLAUDE_CONFIG_DIR"] = rec["config"]
+    return env
+
+
 def session_file(pid, sid=None):
     """~/.claude/sessions/<pid>.json, with a sid only while it is still that session's: pids are
     reused."""
@@ -700,12 +739,16 @@ def api_error_hook():
 
     def change(rec):
         rec = rec or {"first": now, "attempts": 0}
+        resumed = rec.get("pid") != (int(pid) if pid.isdigit() else None)  # the first stop, or of a new process
         rec.update(session=sid, kind=kind, at=now, pid=int(pid) if pid.isdigit() else None,
                    name=info.get("name") or sid[:8], background=info.get("kind") == "background",
                    transcript=str(data.get("transcript_path") or ""), story=story if SAFE.match(story) else "")
         if kind == "rate_limit":  # what the session looked like as it stopped, and one line however often it is woken
             rec.update(remote=bool(info.get("bridgeSessionId")), resume=limit_resume(),
                        status=info.get("status"), screen=screen)
+            if resumed or "config" not in rec:  # the login this process runs on; its waiter notices when
+                config = os.environ.get("CLAUDE_CONFIG_DIR")  # the account under it changes
+                rec.update(config=config, account=identity(config))
             fresh[0] = once(rec, "retry")
         return rec
 
@@ -949,6 +992,16 @@ def moved_on(rows, at):
     return False
 
 
+def disconnected(rows, after):
+    """When the transcript last noted, after `after`, that Remote Control dropped because the
+    login changed under the session (an epoch), or None."""
+    for row in reversed(rows):
+        if row.get("type") == "system" and all(part in str(row.get("content") or "") for part in NOTICE):
+            when = stamp(row)
+            return when if when and when > after else None
+    return None
+
+
 def last_model(rows):
     """The model of the transcript's last real reply (a limit line's is <synthetic>), or ""."""
     for row in reversed(rows):
@@ -958,19 +1011,27 @@ def last_model(rows):
     return ""
 
 
-def usage_reset(model, after):
-    """From a live usage reading, the latest reset among the capped buckets that bind a session on
-    `model`: the week, the 5 hours and the model's own (the first word of its display name inside
-    the model id; when none matches, every model's). None without a live reading (never the cache
-    or old figures, whose reset may have passed) or a capped bucket that resets after `after`."""
+def usage_reading(rec):
+    """A live usage reading taken as the login of a limit record's session, or None: never the
+    cache or old figures (their reset may have passed), and never a reading of another account
+    than the record's, which is what the other login on this config folder would answer."""
     try:
         out = subprocess.run([sys.executable, str(USAGE_BIN), "--json", "--live"],
-                             capture_output=True, text=True, timeout=60).stdout
+                             capture_output=True, text=True, timeout=60, env=login_env(rec)).stdout
         reading = json.loads(out)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
-    if not isinstance(reading, dict) or reading.get("source") != "live":
+    if not isinstance(reading, dict) or reading.get("source") != "live" or \
+            ("account" in rec and reading.get("account") != rec["account"]):
         return None
+    return reading
+
+
+def usage_reset(reading, model, after):
+    """From a usage reading, the latest reset among the capped buckets that bind a session on
+    `model`: the week, the 5 hours and the model's own (the first word of its display name inside
+    the model id; when none matches, every model's). None without a capped bucket that resets
+    after `after`."""
     models = [m for m in reading.get("models") or [] if isinstance(m, dict)]
     own = [m for m in models if str(m.get("model") or "?").split()[0].lower() in model.lower()]
     resets = [b["resets_at"] for b in [reading.get("week"), reading.get("five_hour"), *(own or models)]
@@ -1019,7 +1080,8 @@ def limit_reset(rec, rows, now):
     reset = quota.get("resetsAt") if isinstance(quota.get("resetsAt"), (int, float)) else None
     if reset and reset > floor:
         return reset
-    live = usage_reset(last_model(rows), max(now, floor))
+    reading = usage_reading(rec)
+    live = usage_reset(reading, last_model(rows), max(now, floor)) if reading else None
     if live or reset:  # a quota answer already continued for: the line's words say nothing newer
         return live
     said = spoken_reset(row_text(line), stamp(line) or rec["at"])
@@ -1051,30 +1113,83 @@ def limit_pane(rec):
         return None
 
 
+def switched(sid, rec):
+    """The account a limited session runs on changed since its record was written: the account file
+    of its login names another account or organization (the ids compared, never the file's time: it
+    is rewritten all day), and the session shows it too, its Remote Control link gone or its
+    transcript saying it dropped for that reason. Returns who it is now, else None."""
+    who = identity(rec.get("config")) if rec.get("account") else None
+    if not who or who == rec["account"]:
+        return None
+    if session_file(rec["pid"], sid).get("bridgeSessionId") and \
+            not disconnected(transcript_tail(rec.get("transcript")), rec.get("first") or 0):
+        return None
+    return who
+
+
+def limit_switch(sid, who):
+    """An account change counts as a reset. The record starts over as the new account's: no
+    continue counted, no reset continued for, every line free to be said once more, and what it was
+    left to is open again (the user, after three continues; Claude Code's own wait, which ends at
+    an account change without continuing)."""
+    def change(rec):
+        if rec is None:
+            return None
+        for key in ("continued_for", "handled", "reset", "due"):
+            rec.pop(key, None)
+        rec.update(account=who, switched=time.time(), continues=0, lines=[], state="switched")
+        return rec
+
+    rec = retry_update(sid, change)
+    if rec:
+        retry_log(rec, f"> limit {rec['name']} · {time.strftime('%Y-%m-%d %H:%M')} · the account it runs on changed: "
+                  "counted as a reset")
+
+
+def after_switch(rec, unit):
+    """The record's stop says nothing of the account the session runs on now: the account changed
+    after it, or less than SWITCH_QUIET minutes before it (a request already under way, a notice
+    that woke the session)."""
+    return rec["at"] < rec.get("switched", 0) + SWITCH_QUIET * unit
+
+
 def limit_plan(sid, rec, unit):
     """A new stop on the limit. Stores what the session looks like at rest and returns (when to
     continue, the reset that is for, or None when no source names one: then RETRY_STEPS, as after
     an API error). Returns None, the record marked handled, after LIMIT_CONTINUES continues that
     ended on the limit again, and for a session Claude Code's own wait covers: no Remote Control,
-    autoContinueAtUsageLimit: true, the reset within NATIVE_HOURS."""
+    autoContinueAtUsageLimit: true, the reset within NATIVE_HOURS. A stop from before an account
+    change (after_switch) is planned from a live reading of the new account alone, its limit line
+    being the old one's: no capped bucket binds the session's model, so it is continued at once
+    (a stop that came after the change: once SWITCH_QUIET is over, and never counted as a continue
+    that failed); one does, so after its reset; no reading, so like a stop no source names a reset for."""
     at, now = rec["at"], time.time()
     found = None if rec.get("background") else limit_pane(rec)
     rest = {"status": session_file(rec["pid"], sid).get("status"), "screen": bottom(found[0]) if found else []}
     head = f"> limit {rec['name']} · {time.strftime('%Y-%m-%d %H:%M')} · "
-    if rec.get("continues", 0) >= LIMIT_CONTINUES:
-        limit_mark(sid, "stopped", f"{head}not continued: {LIMIT_CONTINUES} continues ended on the limit again; "
-                   "it waits for you", handled=at, state="unreachable", rest=rest)
-        return None
-    reset = limit_reset(rec, transcript_tail(rec.get("transcript")), now)
-    if reset and not rec.get("remote") and not rec.get("background") and auto_continue() and \
-            reset - now <= NATIVE_HOURS * 3600:
-        limit_mark(sid, handled=at, state="native", rest=rest)
-        return None
-    due = reset + LIMIT_GRACE * unit if reset else \
-        at + RETRY_STEPS[min(rec.get("continues", 0), len(RETRY_STEPS) - 1)] * unit
+    fields = {}
+    if after_switch(rec, unit):
+        reading = usage_reading(rec)
+        reset = usage_reset(reading, last_model(transcript_tail(rec.get("transcript"))), now) if reading else None
+        quiet = rec["switched"] + SWITCH_QUIET * unit if at > rec["switched"] else now
+        due = reset + LIMIT_GRACE * unit if reset else quiet if reading else \
+            max(at, rec["switched"]) + RETRY_STEPS[0] * unit
+        fields = {"continues": 0, "continued_for": None}
+    else:
+        if rec.get("continues", 0) >= LIMIT_CONTINUES:
+            limit_mark(sid, "stopped", f"{head}not continued: {LIMIT_CONTINUES} continues ended on the limit again; "
+                       "it waits for you", handled=at, state="unreachable", rest=rest)
+            return None
+        reset = limit_reset(rec, transcript_tail(rec.get("transcript")), now)
+        if reset and not rec.get("remote") and not rec.get("background") and auto_continue() and \
+                reset - now <= NATIVE_HOURS * 3600:
+            limit_mark(sid, handled=at, state="native", rest=rest)
+            return None
+        due = reset + LIMIT_GRACE * unit if reset else \
+            at + RETRY_STEPS[min(rec.get("continues", 0), len(RETRY_STEPS) - 1)] * unit
     limit_mark(sid, f"due {int(reset)}" if reset else None,
                f"{head}continues at {time.strftime('%Y-%m-%d %H:%M', time.localtime(due))}, once the limit has "
-               "reset: the computer must be awake then", rest=rest, reset=reset, due=due, state="waiting")
+               "reset: the computer must be awake then", rest=rest, reset=reset, due=due, state="waiting", **fields)
     return due, reset
 
 
@@ -1122,19 +1237,28 @@ def limit_wait(sid):
     it. Each new stop is planned once (limit_plan). The computer is kept awake only from LIMIT_HOLD
     minutes before the continue. When that is due the session gets one line, if it has not gone on
     by itself and its pane can take it; else the next slot, or a line saying it waits for the
-    user. No 12-hour cap and no away or autoretry test: limit resume is its own setting."""
+    user. No 12-hour cap and no away or autoretry test: limit resume is its own setting. An account
+    change under the session (switched) is looked for at every nap, whatever the record was left
+    to, and starts it over (limit_switch)."""
     lock = limit_lock(sid)
     if lock is None:
         return
     unit = float(os.environ.get("FLOWKIT_RETRY_MINUTE") or 60)
     nap = max(min(5.0, unit / 12), 0.05)
-    awake, at, due, reset = None, None, None, None
+    awake, at, due, reset, look = None, None, None, None, 0
     try:
         while True:
             rec = retry_record(sid)
             if not rec or rec.get("kind") != "rate_limit" or not rec.get("pid") or not alive(rec["pid"]) or \
                     not session_file(rec["pid"], sid):
                 return
+            if rec.get("account") and identity(rec.get("config")) not in (None, rec["account"]) and time.time() >= look:
+                who = switched(sid, rec)
+                if who:
+                    limit_switch(sid, who)
+                    at = None  # planned again, as the new account's
+                    continue
+                look = time.time() + unit / 4  # the session does not show it yet: its transcript is not read at every nap
             if (rec["at"] != at or (due is not None and time.time() >= due)) and not limit_resume():
                 retry_set(sid, resume=False)  # turned off since: read before each plan and each continue
                 return
@@ -1152,8 +1276,9 @@ def limit_wait(sid):
                 time.sleep(nap if due is None else min(nap, due - now))
                 continue
             when = time.strftime("%H:%M", time.localtime(at))
+            since = "it has reset" if reset or not after_switch(rec, unit) else "the account it runs on has changed since"
             why = "moved" if moved_on(transcript_tail(rec.get("transcript")), at) else limit_continue(
-                rec, f"Your last turn stopped on the usage limit at {when}; it has reset. Carry on from where you were.")
+                rec, f"Your last turn stopped on the usage limit at {when}; {since}. Carry on from where you were.")
             head = f"> limit {rec['name']} · {time.strftime('%Y-%m-%d %H:%M')} · not continued: "
             if why == "":
                 retry_update(sid, lambda r: r and {
