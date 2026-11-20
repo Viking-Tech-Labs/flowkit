@@ -472,6 +472,59 @@ class Cache(Labels):
             tick(**native)
             self.assertEqual(popen.call_count, 4, "nobody logged in is no change")
 
+    def test_the_tick_starts_the_reconnect_when_the_account_of_a_login_changes(self):
+        state = self.tmp / "flowkit"
+        wrote = [time.time_ns()]
+
+        def login(path, account, org="org-1"):
+            path.write_text(json.dumps({"oauthAccount": {"accountUuid": account, "organizationUuid": org}}) if account else "{}")
+            wrote[0] += 10 ** 9
+            os.utime(path, ns=(wrote[0], wrote[0]))
+
+        def tick(minutes=2):
+            if (state / ".remote-tick").exists():
+                os.utime(state / ".remote-tick", (time.time() - minutes * 60,) * 2)
+            self.ft.logins()
+
+        own = self.tmp / ".claude.json"
+        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
+            handoff = str(BIN.parent.parent / "scripts" / "handoff.py")
+            login(own, "acct-1")
+            tick()
+            login(own, "acct-1")
+            tick()
+            self.assertEqual(popen.call_count, 0, "the first sight, then the same account rewritten")
+            login(own, "acct-2")
+            tick()
+            self.assertEqual(popen.call_args[0][0][1:], [handoff, "reconnect", "--all"])
+            tick(minutes=0.5)
+            self.assertEqual(popen.call_count, 1, "at most once a minute")
+            tick()
+            self.assertEqual((popen.call_count, popen.call_args[0][0][-1]), (2, "--all"), "its notice may come late")
+            seen = json.loads((state / "logins.json").read_text())
+            (state / "logins.json").write_text(json.dumps({**seen, "changed": time.time() - self.ft.LOOK - 1}))
+            tick()
+            self.assertEqual(popen.call_count, 2, "three minutes on, nobody owed: two stats and a directory read")
+            (state / "remote").mkdir()
+            (state / "remote" / "s1.owed").write_text("1")
+            tick()
+            self.assertEqual((popen.call_count, popen.call_args[0][0][1:]), (3, [handoff, "reconnect"]), "one is owed its link")
+            (state / "remote" / "s1.owed").unlink()
+            login(own, None)
+            tick()
+            login(own, "acct-2", "org-2")
+            tick()
+            self.assertEqual((popen.call_count, popen.call_args[0][0][-1]), (4, "--all"), "logged out, then another organization")
+            home = self.tmp / "home"
+            (home / ".claude").mkdir(parents=True)
+            self.ft.CLAUDE = home / ".claude"
+            with mock.patch.object(self.ft.Path, "home", return_value=home):
+                login(home / ".claude.json", "acct-1")
+                tick()
+                login(home / ".claude.json", "acct-3")
+                tick()
+            self.assertEqual(popen.call_count, 5, "for ~/.claude the login without the variable counts too")
+
     def test_the_tick_starts_the_away_nudge_until_it_ran_for_the_flag(self):
         flag, tick = self.tmp / "away", self.tmp / "flowkit" / ".away-tick"
         with mock.patch.object(self.ft.subprocess, "Popen") as popen:

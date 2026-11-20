@@ -1612,6 +1612,23 @@ class Handoff(unittest.TestCase):
         self.assertIn("has changed since", self.sent())
         self.assertEqual(self.rec_when(lambda r: r.get("state") == "continued")["continues"], 1)
 
+    def test_limit_an_account_change_brings_remote_control_back_before_the_continue(self):
+        self.login("acct-1")
+        self.limit_setup(reset=time.time() + 3600)
+        kept = self.tmp / "claude" / "projects" / "-repo" / f"{self.SID}.jsonl"
+        kept.parent.mkdir(parents=True)
+        self.transcript = Path(shutil.move(self.transcript, kept))
+        self.api_error("rate_limit")
+        self.rec_when(lambda r: r.get("due"))
+        self.buckets()
+        self.notice()
+        self.unlink_remote()
+        self.login("acct-2")
+        self.rec_when(lambda r: r.get("state") == "continued")
+        typed = self.calls.read_text()
+        self.assertEqual((typed.count("-l /remote-control ;"), typed.count("-l Your last turn stopped")), (1, 1))
+        self.assertLess(typed.index("/remote-control"), typed.index("Your last turn"), "so the turn shows on the phone")
+
     def test_limit_plan_after_an_account_change_by_the_clock(self):
         handoff = self.module()
         clock, marks, reading = [1000.0], [], [None]
@@ -1643,6 +1660,159 @@ class Handoff(unittest.TestCase):
             self.assertIsNone(plan(at=1011.0), "61 s after it, the stop is the new account's own")
             self.assertEqual(marks[0]["state"], "unreachable")
             self.assertEqual(plan(at=1011.0, continues=0, continued_for=None)[0], 1011.0 + 2 * 60)
+
+    def remote_setup(self, notice=True, linked=False, **kw):
+        """retry_setup's session with its transcript where Claude Code keeps it: one that had a Remote
+        Control link and, with `notice`, logged that an account change took it."""
+        self.retry_setup(autoretry="off", away=False, **kw)
+        shutil.rmtree(self.tmp / "claude" / "flowkit" / "remote", ignore_errors=True)
+        (self.tmp / "claude" / "flowkit" / "retries.log").unlink(missing_ok=True)
+        self.transcript = self.tmp / "claude" / "projects" / "-repo" / f"{self.SID}.jsonl"
+        self.transcript.parent.mkdir(parents=True, exist_ok=True)
+        self.transcript.write_text(json.dumps({"type": "bridge-session", "bridgeSessionId": "cse_old"}) + "\n")
+        if notice:
+            self.notice()
+        self.session(status=kw.get("status", "idle"), **({"bridgeSessionId": "cse_old"} if linked else {}))
+
+    def session(self, **fields):
+        path = self.tmp / "claude" / "sessions" / f"{self.pid}.json"
+        path.write_text(json.dumps({"sessionId": self.SID, "name": "s4", "kind": "interactive", **fields}))
+
+    def remote(self, suffix):
+        return self.tmp / "claude" / "flowkit" / "remote" / f"{self.SID}.{suffix}"
+
+    TYPED = "tmux send-keys -t %7 -l /remote-control ; run-shell sleep 0.5 ; send-keys -t %7 Enter\n"
+
+    def test_reconnect_types_remote_control_once_per_notice_into_a_free_idle_session(self):
+        self.remote_setup()
+        self.handoff("reconnect", self.SID)
+        self.assertEqual(self.calls.read_text(), self.TYPED)
+        self.assertEqual(json.loads(self.remote("json").read_text())["state"], "failed")
+        self.assertRegex(self.log()[-1], r"^> remote s4 · \d{4}-\d\d-\d\d \d\d:\d\d · Remote Control did not come back after "
+                                         r"the account changed; type /remote-control in the session$")
+        self.handoff("reconnect", self.SID)
+        self.handoff("reconnect", "--all")
+        self.assertEqual((self.calls.read_text(), len(self.log())), (self.TYPED, 1), "never twice for one notice")
+        time.sleep(0.01)
+        self.notice()
+        self.handoff("reconnect", "--all")
+        self.assertEqual(self.calls.read_text(), self.TYPED * 2, "the account changed again")
+        with self.transcript.open("a") as f:
+            f.write(json.dumps({"type": "system", "subtype": "informational", "timestamp": self.iso(time.time()),
+                                "content": "Remote Control disconnected"}) + "\n")
+        self.handoff("reconnect", "--all")
+        self.assertEqual(self.calls.read_text(), self.TYPED * 2, "a link that went for another reason is the user's")
+        for kw, why in ((dict(linked=True), "its link stands"), (dict(notice=False), "it never lost one to an account change")):
+            self.remote_setup(**kw)
+            self.handoff("reconnect", "--all")
+            self.assertFalse(self.calls.exists() or self.remote("owed").exists() or self.remote("json").exists(), why)
+        self.remote_setup()
+        with self.transcript.open("a") as f:
+            f.write(json.dumps({"type": "system", "subtype": "bridge_status", "timestamp": self.iso(time.time() + 1),
+                                "content": "/remote-control is active"}) + "\n")
+        self.handoff("reconnect", "--all")
+        self.assertFalse(self.calls.exists(), "it came back since, and whoever dropped it then meant to")
+
+    def test_reconnect_waits_for_the_turn_end_and_a_free_prompt_box(self):
+        menu = "│ > \n  1. Yes\n  2. No\n  Enter to confirm · Esc to cancel\n"
+        for kw in (dict(status="busy"), dict(status="waiting"), dict(screen="│ > half a thought\n"), dict(screen=menu),
+                   dict(in_mode="1")):
+            self.remote_setup(**kw)
+            self.handoff("reconnect", "--all")
+            self.assertEqual((self.calls.exists(), self.remote("owed").exists()), (False, True), kw)
+        self.remote_setup(status="busy")
+        self.handoff("reconnect", "--all")
+        self.handoff("reconnect")
+        self.assertFalse(self.calls.exists(), "still at work")
+        self.session(status="idle")
+        self.handoff("api-ok", stdin=json.dumps({"session_id": self.SID, "hook_event_name": "Stop"}))
+        self.assertEqual(self.sent(), self.TYPED, "its turn ended: the Stop hook starts it")
+        self.remote_setup(status="busy")
+        self.handoff("reconnect", "--all")
+        self.session(status="idle")
+        self.handoff("reconnect")
+        self.assertEqual(self.calls.read_text(), self.TYPED, "or the tick's next pass, for those owed")
+        self.assertFalse(self.remote("owed").exists())
+        self.proc.kill()
+        self.proc.wait()
+        self.handoff("reconnect")
+        self.assertFalse(self.remote("json").exists() or self.remote("lock").exists(), "a session that is gone leaves nothing")
+
+    def test_reconnect_sees_the_link_back_or_closes_what_the_command_left_open(self):
+        for left in (False, True):
+            self.remote_setup()
+            self.env["FLOWKIT_RETRY_MINUTE"] = "6"  # the link has 2 s
+            run = subprocess.Popen(["python3", str(HANDOFF), "reconnect", self.SID], env=self.env)
+            self.addCleanup(lambda: (run.kill(), run.wait()))
+            self.assertEqual(self.sent(), self.TYPED)
+            if left:
+                (self.tmp / "screen").write_text("│ > \n  Remote Control\n  Enter to confirm · Esc to cancel\n")
+            else:
+                self.session(status="idle", bridgeSessionId="cse_new")
+            run.wait(timeout=10)
+            state = json.loads(self.remote("json").read_text())["state"]
+            if left:
+                self.assertEqual((state, self.calls.read_text()), ("failed", self.TYPED + "tmux send-keys -t %7 Escape\n"))
+                self.assertIn("did not come back after the account changed: the dialog it left open was closed; type",
+                              self.log()[-1])
+            else:
+                self.assertEqual((state, self.calls.read_text(), self.log()), ("back", self.TYPED, []))
+
+    def test_a_typed_remote_control_is_not_the_user_at_the_keyboard(self):
+        self.set_flag(time.time() - 60)
+        self.context(10, "first prompt", sid="rc")
+        self.context(10, "/remote-control", sid="rc")
+        self.assertIsNotNone(self.gate("rc"), "flowkit typed it: the session still decides alone")
+        self.context(10, "/remote-control please", sid="rc")
+        self.assertIsNone(self.gate("rc"))
+
+    @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+    def test_reconnect_pass_in_real_panes(self):
+        """A throwaway tmux server whose panes run tests/fake_session.py: one lost its link to an
+        account change, one kept it, one never had one, one lost it while at work."""
+        sock = f"flowkit-remote-{os.getpid()}"
+        real = lambda *a: subprocess.run(["tmux", "-L", sock, *a], capture_output=True, text=True)
+        self.addCleanup(real, "kill-server")
+        config = self.tmp / "claude"
+        (config / "projects" / "-repo").mkdir(parents=True)
+        (self.tmp / "bin" / "tmux").unlink()
+        self.env.update(FLOWKIT_TMUX_SOCKET=sock, FLOWKIT_RETRY_MINUTE="6")
+        sids = {}
+        for n, (name, flags, lost) in enumerate((("lost", "", True), ("kept", "linked", True), ("never", "", False),
+                                                 ("working", "busy", True))):
+            sids[name] = f"0000000{n}-0000-0000-0000-000000000000"
+            fake = f"python3 {PLUGIN / 'tests' / 'fake_session.py'} {config} {sids[name]} {name} {flags}"
+            real(*(("-f", "/dev/null", "new-session", "-d", "-x", "120", "-y", "20") if n == 0 else ("split-window", "-d")), fake)
+            rows = [{"type": "bridge-session", "bridgeSessionId": "cse_old"}] if name != "never" else []
+            if lost:
+                rows.append({"type": "system", "subtype": "informational", "timestamp": self.iso(time.time()),
+                             "content": self.NOTICE})
+            (config / "projects" / "-repo" / f"{sids[name]}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+            real("select-layout", "tiled")
+        deadline = time.time() + 10
+        while time.time() < deadline and len(list((config / "sessions").glob("*.json"))) < 4:
+            time.sleep(0.1)
+        typed = lambda name: (config / f"typed-{name}.log").read_text() if (config / f"typed-{name}.log").exists() else ""
+        mark = lambda name, suffix: config / "flowkit" / "remote" / f"{sids[name]}.{suffix}"
+        self.handoff("reconnect", "--all")
+        self.assertEqual([typed(n) for n in ("lost", "kept", "never", "working")], ["/remote-control\n", "", "", ""])
+        self.assertEqual(json.loads(mark("lost", "json").read_text())["state"], "back")
+        self.assertTrue(mark("working", "owed").exists(), "owed at its turn end")
+        pane = {name: pid for name in sids for pid, text in
+                ((p.stem, json.loads(p.read_text())) for p in (config / "sessions").glob("*.json")) if text["name"] == name}
+        panes = dict(line.split() for line in real("list-panes", "-a", "-F", "#{pane_pid} #{pane_id}").stdout.splitlines())
+        self.assertFalse(self.log(), "nothing went wrong")
+        real("send-keys", "-t", panes.get(pane["working"], "%3"), "idle", "Enter")
+        deadline = time.time() + 5
+        while time.time() < deadline and "idle" not in typed("working"):
+            time.sleep(0.1)
+        self.handoff("api-ok", stdin=json.dumps({"session_id": sids["working"], "hook_event_name": "Stop"}))
+        deadline = time.time() + 8
+        while time.time() < deadline and "/remote-control" not in typed("working"):
+            time.sleep(0.1)
+        self.assertEqual(typed("working"), "idle\n/remote-control\n")
+        self.handoff("reconnect", "--all")
+        self.assertEqual([typed(n) for n in ("lost", "kept", "never")], ["/remote-control\n", "", ""], "once")
 
     PARKED = "a pane is parked at a start-up prompt: Accessing workspace: (tab demo, pane 2, story demo)"
     LIMIT = "demo-s2 stopped on the usage limit and flowkit cannot continue it (story demo)"

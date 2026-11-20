@@ -41,6 +41,10 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py api-error | api-ok                  StopFailure and Stop hooks: the retry record and line, and
                                                  the waiter (retry-wait <session id>): after a usage limit
                                                  unless limitresume=off, after an API error with autoretry=on
+  handoff.py reconnect [--all | <session id>]    the tick's and the Stop hook's, after the account of a login
+                                                 changed: /remote-control typed into each session that lost
+                                                 its link to it, once it is idle with a free prompt box
+                                                 (--all: every session is looked at, not only those owed)
   handoff.py remind [--dry-run]                  the tick's, with remind=on: what waits on the user (a pane
                                                  parked at a start-up prompt, a usage-limit stop flowkit
                                                  cannot continue, the sessions and test items waiting on
@@ -117,13 +121,15 @@ LIMIT_CONTINUES = 3  # continues that ended on the limit again, no clean turn en
 NATIVE_HOURS = 24  # a reset this near is Claude Code's own to wait for, in a session without Remote Control
 SWITCH_QUIET = 1  # minutes after an account change in which a stop on the limit says nothing of the new account
 NOTICE = ("Remote Control disconnected", "account or organization changed")  # what a session logs when its login changed
+REMOTE = CLAUDE / "flowkit" / "remote"  # <session id>.owed while a session is owed its Remote Control, .json: what came of it
+REMOTE_WAIT = 20  # seconds a typed /remote-control has to bring the session's link back
 ACCOUNTS = {}  # account file → (what stat said, who it named then): parsed again only once it was rewritten
 TAIL = 2 * 1024 * 1024  # bytes of a transcript's end read for its last limit line and what follows it
 LOCAL = ("<command-", "<local-command-", "<bash-")  # how the lines of a /command or a ! shell line start: no turn
 WRAPPERS = ("<task-notification", "Another Claude session sent a message", "<cross-session-message",
             "[Cross-session") + LOCAL  # prompts nobody typed: a task's notice, another session's message
 FLOWKIT_LINE = re.compile(r"Your last turn (?:stopped on the usage limit|ended on an API error|hit the output token limit)"
-                          r"|away(?: since .+?)?: I am off\.|report now$|closed [\w.-]+$|last call: |reminder: ")  # lines flowkit types
+                          r"|away(?: since .+?)?: I am off\.|report now$|closed [\w.-]+$|last call: |reminder: |/remote-control$")  # lines flowkit types
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 RESETS = re.compile(r"resets (?:at )?(?:(?P<mon>[A-Za-z]{3}) (?P<day>\d{1,2}),? (?:at )?)?(?P<h>\d{1,2})(?::(?P<m>\d\d))?"
                     r"(?: ?(?P<ap>[ap]m))?(?: \((?P<tz>[^)\s]+)\))?", re.I)
@@ -1276,7 +1282,13 @@ def limit_wait(sid):
                 time.sleep(nap if due is None else min(nap, due - now))
                 continue
             when = time.strftime("%H:%M", time.localtime(at))
-            since = "it has reset" if reset or not after_switch(rec, unit) else "the account it runs on has changed since"
+            since = "it has reset"
+            if after_switch(rec, unit):
+                try:
+                    reconnect(sid)  # its Remote Control first, so the turn that follows shows on the phone
+                except Exception:
+                    pass
+                since = since if reset else "the account it runs on has changed since"
             why = "moved" if moved_on(transcript_tail(rec.get("transcript")), at) else limit_continue(
                 rec, f"Your last turn stopped on the usage limit at {when}; {since}. Carry on from where you were.")
             head = f"> limit {rec['name']} · {time.strftime('%Y-%m-%d %H:%M')} · not continued: "
@@ -1290,6 +1302,10 @@ def limit_wait(sid):
                 limit_mark(sid, "unreachable", f"{head}it does not run in a tmux pane; it waits for you",
                            handled=at, state="unreachable")
             else:  # at work, copy mode, a draft, a dialog: the next slot
+                if after_switch(rec, unit) and time.time() < rec["switched"] + SWITCH_QUIET * unit:
+                    limit_mark(sid, state=why)
+                    due = time.time() + unit / 2  # the account change itself may be what is in the way: soon again
+                    continue
                 limit_mark(sid, "dialog" if why == "dialog" else None,
                            f"{head}a dialog is open below its prompt box; looked at again every "
                            f"{RETRY_STEPS[-1]} minutes", state=why)
@@ -1306,12 +1322,103 @@ def limit_wait(sid):
         lock.close()
 
 
+def sessions():
+    """The sessions file of every live session."""
+    found = []
+    for path in (CLAUDE / "sessions").glob("*.json"):
+        info = session_file(path.stem) if path.stem.isdigit() else {}
+        if info.get("sessionId") and alive(int(path.stem)):
+            found.append({**info, "pid": int(path.stem)})
+    return found
+
+
+def reconnect(sid, patience=0):
+    """One session's Remote Control after the account of its login changed. Claude Code drops the
+    link then, says so in the transcript and brings it back only when asked, so `/remote-control`
+    is typed for the session: once per notice, and only while it shows no link, is idle (not at
+    work, not on a question) and its prompt box is on screen, empty, with no dialog below it. Until
+    then it stays owed (<sid>.owed), for the next turn end and the tick. The link has REMOTE_WAIT
+    seconds to show; when it does not, a dialog the command left open is closed with Esc and one
+    line says so. A session whose link stands gets nothing, nor does one that never said it lost
+    it to an account change; no session is ever restarted for this. Returns what was typed, or ""."""
+    info = next((i for i in sessions() if i["sessionId"] == sid), None)
+    mark, owed = REMOTE / f"{sid}.json", REMOTE / f"{sid}.owed"
+    if info is None or info.get("kind") != "interactive":
+        return ""
+    unit = float(os.environ.get("FLOWKIT_RETRY_MINUTE") or 60) / 60
+    REMOTE.mkdir(parents=True, exist_ok=True)
+    with (REMOTE / f"{sid}.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # the tick's pass, a turn end and a limit waiter may all come for it
+        pid, fresh = info["pid"], lambda: session_file(info["pid"], sid)
+        if fresh().get("bridgeSessionId"):
+            owed.unlink(missing_ok=True)
+            return ""
+        try:
+            done = json.loads(mark.read_text()).get("notice") or 0
+        except (OSError, ValueError, AttributeError):
+            done = 0
+        rows = [r for path in (CLAUDE / "projects").glob(f"*/{sid}.jsonl") for r in transcript_tail(path)]
+        notice = disconnected(rows, done)
+        if not notice or any(r.get("subtype") == "bridge_status" and (stamp(r) or 0) > notice for r in rows):
+            owed.unlink(missing_ok=True)  # nothing new since the last one handled, or the link came back after it
+            return ""
+        deadline = time.time() + patience * unit
+        while fresh().get("status") != "idle" and time.time() < deadline:
+            time.sleep(0.2)
+        try:
+            found = pane_of(pid) if fresh().get("status") == "idle" else None
+            pane = found[0] if found and not found[1] and not parked(found[0]) else None
+        except (OSError, subprocess.SubprocessError):
+            pane = None
+        if pane is None or not type_line(pane, "/remote-control"):
+            owed.write_text(str(notice))
+            return ""
+        mark.write_text(json.dumps({"notice": notice, "at": time.time(), "state": "typed"}))
+        owed.unlink(missing_ok=True)
+        deadline = time.time() + REMOTE_WAIT * unit
+        while time.time() < deadline and not fresh().get("bridgeSessionId"):
+            time.sleep(min(0.5, REMOTE_WAIT * unit / 10))
+        back = bool(fresh().get("bridgeSessionId"))
+        if not back and fresh():
+            left = parked(pane) == "dialog"
+            if left:
+                tmux("send-keys", "-t", pane, "Escape")
+            story = tmux("show-options", "-wqv", "-t", pane, "@flowkit_story").stdout.strip()
+            retry_log({"story": story if SAFE.match(story) else ""},
+                      f"> remote {info.get('name') or sid[:8]} · {time.strftime('%Y-%m-%d %H:%M')} · Remote Control did not "
+                      f"come back after the account changed{': the dialog it left open was closed' if left else ''}; "
+                      "type /remote-control in the session")
+        mark.write_text(json.dumps({"notice": notice, "at": time.time(), "state": "back" if back else "failed"}))
+        return "/remote-control"
+
+
+def reconnect_pass(every):
+    """The tick's pass: every session that is owed its Remote Control, or with `every` each live
+    interactive one that shows no link (its transcript says whether it lost one to an account
+    change), at the same time; then the files of sessions that are gone go."""
+    live = {i["sessionId"]: i for i in sessions()}
+    REMOTE.mkdir(parents=True, exist_ok=True)
+    for path in REMOTE.iterdir():
+        if path.suffix in (".json", ".owed", ".lock") and path.stem not in live:
+            path.unlink(missing_ok=True)
+    due = [sid for sid, i in live.items() if i.get("kind") == "interactive" and not i.get("bridgeSessionId")
+           and (every or (REMOTE / f"{sid}.owed").exists())]
+    if due:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(reconnect, due))
+
+
 def api_ok_hook():
-    """Stop: the turn ended cleanly, so the session's retry record goes."""
+    """Stop: the turn ended cleanly, so the session's retry record goes; a session owed its Remote
+    Control since an account change gets it now, from a process of its own."""
     sid = str(json.load(sys.stdin).get("session_id") or "")
     if SAFE.match(sid) and (RETRY / f"{sid}.json").exists():
         with retry_lock():
             (RETRY / f"{sid}.json").unlink(missing_ok=True)
+    if SAFE.match(sid) and (REMOTE / f"{sid}.owed").exists():
+        subprocess.Popen([sys.executable, __file__, "reconnect", sid], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def tmux(*args):
@@ -2016,6 +2123,11 @@ def main(argv):
     elif cmd == "wake" and len(args) == 3 and args[0] == "--id":
         try:
             wake("", args[2], patience=300, sid=args[1])
+        except Exception:
+            pass
+    elif cmd == "reconnect" and (args in ([], ["--all"]) or (len(args) == 1 and SAFE.match(args[0]))):
+        try:
+            reconnect(args[0], patience=SETTLE) if args and args != ["--all"] else reconnect_pass(bool(args))
         except Exception:
             pass
     elif cmd in ("api-error", "api-ok", "retry-wait") and len(args) == (cmd == "retry-wait"):

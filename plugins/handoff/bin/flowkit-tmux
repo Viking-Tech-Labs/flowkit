@@ -8,6 +8,8 @@
                               a claude pane left at a start-up prompt waits on you too, and is
                               listed in ~/.claude/flowkit/parked.json while it does;
                               starts again the waiter of a session stopped on a usage limit;
+                              when the account of a login changes, brings Remote Control back
+                              to the sessions that lost it (`handoff.py reconnect`);
                               nudges the sessions parked on a question once the away flag
                               takes effect; with remind=on in handoff.conf it sends the
                               reminders (`handoff.py remind`);
@@ -65,6 +67,7 @@ RULE = re.compile(r"^\s*[─-╿]{10,}\s*$")  # a row of box-drawing characters
 PARKED = 60  # a dialog this long on a claude pane with no session listed is a start-up prompt nobody answered
 CACHE = Path(tempfile.gettempdir()) / f"flowkit-tmux-{os.getuid()}.json"  # the last status line and when
 FRESH = 10  # a status line this young is printed again without asking `claude agents`
+LOOK = 3 * 60  # after the account of a login changed, every session is looked at again this long: its notice may come late
 
 
 def run(*cmd):
@@ -565,6 +568,75 @@ def watch():
         pass
 
 
+def account(path):
+    """The account and organization ids an account file names, or None."""
+    try:
+        who = json.loads(path.read_text()).get("oauthAccount")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return {"account": who["accountUuid"], "organization": who.get("organizationUuid")} \
+        if isinstance(who, dict) and who.get("accountUuid") else None
+
+
+def logins():
+    """When the account of a login changes (a /login in any session), Claude Code drops the Remote
+    Control link of every session on it and brings none back, so `handoff.py reconnect` does: it
+    starts detached, with --all at the change and once a minute for LOOK seconds after it, then
+    once a minute while a session is still owed its link (it was at work, or on a question). The
+    change is read from the account files: this folder's own (CLAUDE_CONFIG_DIR set) and, for
+    ~/.claude, the home's ~/.claude.json (the variable unset), their ids compared with what the
+    last tick saw in flowkit/logins.json; a file is parsed only once it was rewritten. Nothing
+    changed and nobody owed costs two stats and one directory read."""
+    state = CLAUDE / "flowkit"
+    files = [CLAUDE / ".claude.json"]
+    if CLAUDE.resolve() == (Path.home() / ".claude").resolve():
+        files.append(Path.home() / ".claude.json")
+    try:
+        seen = json.loads((state / "logins.json").read_text())
+    except (OSError, ValueError):
+        seen = {}
+    if not isinstance(seen, dict):
+        seen = {}
+    now, changed, dirty = time.time(), False, False
+    for path in files:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        was = seen.get(str(path)) if isinstance(seen.get(str(path)), dict) else {}
+        if was.get("stat") == [st.st_mtime_ns, st.st_size]:
+            continue
+        who = account(path)
+        if who and was.get("account") and who != was["account"]:
+            seen["changed"], changed = now, True
+        seen[str(path)] = {"stat": [st.st_mtime_ns, st.st_size], "account": who or was.get("account")}
+        dirty = True
+    try:
+        if dirty:
+            state.mkdir(parents=True, exist_ok=True)
+            fresh = state / "logins.tmp"
+            fresh.write_text(json.dumps(seen))
+            os.replace(fresh, state / "logins.json")
+        looking = now - (seen.get("changed") or 0) < LOOK
+        if not looking and not any(name.endswith(".owed") for name in os.listdir(state / "remote")):
+            return
+    except OSError:
+        return
+    try:
+        if not changed and now - (state / ".remote-tick").stat().st_mtime < 60:
+            return
+    except OSError:
+        pass
+    try:
+        (state / ".remote-tick").touch()
+        subprocess.Popen([sys.executable, str(plugin_root() / "scripts" / "handoff.py"), "reconnect",
+                          *(["--all"] if looking else [])],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+
+
 def relogged(rec):
     """The login a limit record's session stopped on is another account's now: its account file
     (<CLAUDE_CONFIG_DIR as the session had it>/.claude.json, ~/.claude.json when it had none) names
@@ -705,6 +777,7 @@ def status_line():
         drain()
         watch()
         limits()
+        logins()
         away_nudge()
         remind()
         line = out.getvalue()
