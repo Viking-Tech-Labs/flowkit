@@ -2074,6 +2074,9 @@ class Handoff(unittest.TestCase):
             self.assertEqual(look(T + 10 * H + 20, []), ("Waiting on you", [self.WAITS]))
             state = json.loads((self.tmp / "claude" / "flowkit" / "remind.json").read_text())
             self.assertEqual(state, {"once": {}, "digest": {"at": T + 10 * H + 20, "keys": ["waiting:s5:permission prompt"]}})
+            push = handoff.remind_push("Waiting on you", ["a pane is parked " + "x" * 300, "one more"])
+            self.assertEqual(len(push), 195, "the heading's colon and space count too")
+            self.assertTrue(push.endswith("x… (+1 more in remind-latest.md)"))
 
     def push_answer(self, sid, answer, at):
         """What a PushNotification call made at epoch `at` and its answer leave in a transcript."""
@@ -2184,8 +2187,9 @@ class Handoff(unittest.TestCase):
         said.unlink()
         osascript.write_text("#!/bin/sh\nexit 1\n")
         out = self.handoff("remind").stdout.splitlines()
-        self.assertRegex(out[-1], r"^remind: not delivered, said again at the next pass \(")
-        self.assertFalse(said.exists(), "nothing arrived: nothing kept")
+        self.assertRegex(out[-1], r"^remind: not delivered, next try \d\d:\d\d \(")
+        self.assertEqual(list(json.loads(said.read_text())), ["failed"], "nothing arrived: nothing kept as said")
+        said.unlink()
         self.assertEqual(len(list((self.tmp / "claude" / "flowkit" / "remind").glob("*.md"))), 1,
                          "the same text again: no second file")
         with (self.tmp / "claude" / "flowkit" / "remind.lock").open("w") as held:
@@ -2194,6 +2198,48 @@ class Handoff(unittest.TestCase):
         self.idle(5)
         self.assertRegex(self.handoff("remind").stdout, r"^remind: silent, at the computer")
         self.assertFalse(said.exists())
+
+    def test_remind_waits_ten_minutes_before_it_tries_an_undelivered_reminder_again(self):
+        self.remind_world(time.time())
+        self.agents([{"name": "demo-report", "kind": "interactive", "status": "idle", "pid": 4001, "sessionId": "sid-r",
+                      "startedAt": 1}])
+        stub = self.tmp / "bin" / "tmux"
+        stub.write_text("#!/bin/sh\ncase \"$1\" in\nlist-panes) echo '4001 %7 0';;\ncapture-pane) echo '│ > ';;\n"
+                        f"*) echo tmux \"$@\" >> {self.calls};; esac\n")
+        stub.chmod(0o755)
+        osascript = self.tmp / "bin" / "osascript"
+        osascript.write_text("#!/bin/sh\nexit 1\n")
+        osascript.chmod(0o755)
+        said = self.tmp / "claude" / "flowkit" / "remind.json"
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            loader = importlib.machinery.SourceFileLoader("flowkit_handoff_retry", str(HANDOFF))
+            handoff = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+            loader.exec_module(handoff)
+            handoff.REMIND_WAIT = 0.2
+
+            def one_pass():
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    handoff.remind()
+                return out.getvalue().splitlines()
+
+            rung = lambda: self.calls.read_text().count(" -l reminder: ")
+            lines = one_pass()
+            self.assertEqual(lines[0], "ring demo-report: no push in 0.2 s")
+            self.assertRegex(lines[1], r"^remind: not delivered, next try \d\d:\d\d \(")
+            lines = one_pass()
+            self.assertEqual(len(lines), 1)
+            self.assertRegex(lines[0], r"^remind: not delivered at \d\d:\d\d, next try \d\d:\d\d$")
+            self.assertEqual(rung(), 1, "a minute on: the reporter is not rung again")
+            self.limit_record("s-zz", name="demo-s7", at=200)
+            self.assertEqual(one_pass()[0], "ring demo-report: no push in 0.2 s", "something else waits: tried at once")
+            self.assertEqual((rung(), len(one_pass()), rung()), (2, 1, 2))
+            state = json.loads(said.read_text())
+            state["failed"]["at"] -= 601
+            said.write_text(json.dumps(state))
+            osascript.write_text("#!/bin/sh\nexit 0\n")
+            self.assertRegex(one_pass()[-1], r"^remind: sent through macOS notification \(")
+            self.assertEqual(rung(), 3, "ten minutes on, the same reminder is tried again")
+            self.assertNotIn("failed", json.loads(said.read_text()), "delivered: nothing left to try")
 
 
 if __name__ == "__main__":

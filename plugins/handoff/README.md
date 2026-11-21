@@ -441,9 +441,11 @@ tmux kit's tick runs `handoff.py remind` at most once a minute, which
   2. `notify=<command>` in `handoff.conf`: run through the shell with the line on its stdin, sent
      when it exits 0 (`notify=curl -s -d @- ntfy.sh/<your topic>`).
   3. a macOS notification (`osascript`).
-- keeps what it said in `~/.claude/flowkit/remind.json` only once something carried it, so a
-  reminder that reached nobody is said again at the next pass (the same text, no second file).
-  One pass runs at a time; one prints a line per reporter it rang and what carried the push.
+- keeps what it said in `~/.claude/flowkit/remind.json` only once something carried it. A
+  reminder that reached nobody is tried again 10 minutes later (the same text, no second file),
+  not at every pass, since each try rings every idle reporter; when what waits changes in
+  between, the new one is tried at once. One pass runs at a time; one prints a line per reporter
+  it rang and what carried the push, or `remind: not delivered at <time>, next try <time>`.
 
 `handoff.py remind --dry-run` prints what a pass would say now and why it would stay silent; it
 sends nothing and keeps nothing. The ring line is a line flowkit types: it never counts as you

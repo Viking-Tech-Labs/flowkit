@@ -137,11 +137,13 @@ FLOWKIT_LINE = re.compile(r"Your last turn (?:stopped on the usage limit|ended o
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 RESETS = re.compile(r"resets (?:at )?(?:(?P<mon>[A-Za-z]{3}) (?P<day>\d{1,2}),? (?:at )?)?(?P<h>\d{1,2})(?::(?P<m>\d\d))?"
                     r"(?: ?(?P<ap>[ap]m))?(?: \((?P<tz>[^)\s]+)\))?", re.I)
-REMIND = CLAUDE / "flowkit" / "remind.json"  # what the reminders have said: {once: {key: when}, digest: {at, keys}}
+REMIND = CLAUDE / "flowkit" / "remind.json"  # what the reminders have said: {once: {key: when}, digest: {at, keys}},
+#                                             and the last one nothing carried: failed: {at, lines}
 REMIND_IDLE = 10  # minutes without keyboard or mouse input after which the user is not at the computer
 REMIND_EVERY = 120  # minutes between two digests
 REMIND_DIR = CLAUDE / "flowkit" / "remind"  # each reminder's text as <stamp>.md; remind-latest.md beside the folder
 REMIND_WAIT = 90  # seconds a rung reporter has to show its push in its transcript before the next one is rung
+REMIND_RETRY = 10  # minutes before a reminder that nothing carried is tried again
 REMIND_RING = ("reminder: from flowkit's tick, not the user. Send the user one push notification now with the "
                "PushNotification tool (load it through ToolSearch if it is not loaded), its message word for word "
                'everything after "Message: "; then end the turn with "reminder sent" and nothing else. The full '
@@ -1723,10 +1725,10 @@ def remind_file(heading, lines, now):
 
 
 def remind_push(heading, lines):
-    """The push: one line under 200 characters, the first thing that waits and how many more."""
+    """The push: one line of at most 195 characters, the first thing that waits and how many more."""
     more = f" (+{len(lines) - 1} more in remind-latest.md)" if len(lines) > 1 else ""
     first = " ".join(lines[0].split())
-    room = 195 - len(heading) - len(more)
+    room = 195 - len(heading) - len(": ") - len(more)
     return f"{heading}: {first if len(first) <= room else first[:room - 1].rstrip() + '…'}{more}"
 
 
@@ -1814,8 +1816,9 @@ def remind_deliver(push, path):
 
 def remind():
     """One pass, the tick's (remind=on): what waits on the user, sent while they are neither away nor
-    at the computer; kept as said only once a push arrived, so a pass whose push did not arrive is
-    said again at the next. One pass at a time: a delivery can take minutes."""
+    at the computer; kept as said only once a push arrived. One that nothing carried is tried again
+    REMIND_RETRY minutes later, not at every pass (each try rings every idle reporter), unless what
+    waits has changed. One pass at a time: a delivery can take minutes."""
     REMIND.parent.mkdir(parents=True, exist_ok=True)
     with REMIND.with_suffix(".lock").open("w") as lock:
         try:
@@ -1829,17 +1832,22 @@ def remind():
             print(f"remind: silent, {'; '.join(quiet)}")
             return
         found, stale = remind_found(now)
-        heading, lines, state = remind_pass(found, stale, remind_state(), now)
+        said = remind_state()
+        heading, lines, state = remind_pass(found, stale, said, now)
         if not lines:
             remind_mark(state)
             print("remind: nothing to say")
             return
+        clock = lambda when: time.strftime("%H:%M", time.localtime(when))
+        failed = said.get("failed") if isinstance(said.get("failed"), dict) else {}
+        if failed.get("lines") == lines and now < (failed.get("at") or 0) + REMIND_RETRY * 60:
+            print(f"remind: not delivered at {clock(failed['at'])}, next try {clock(failed['at'] + REMIND_RETRY * 60)}")
+            return
         path = remind_file(heading, lines, now)
         how = remind_deliver(remind_push(heading, lines), path)
-        if how:
-            remind_mark(state)
+        remind_mark(state if how else {**said, "failed": {"at": time.time(), "lines": lines}})
         print(f"remind: sent through {how} ({home_short(path)})" if how else
-              f"remind: not delivered, said again at the next pass ({home_short(path)})")
+              f"remind: not delivered, next try {clock(time.time() + REMIND_RETRY * 60)} ({home_short(path)})")
 
 
 def remind_dry():
