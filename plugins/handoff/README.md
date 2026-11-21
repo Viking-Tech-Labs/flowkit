@@ -68,6 +68,12 @@ PATH, so a copy older than the one `installed_plugins.json` names hands over to 
 (`--dry-run` says which copy answered). A close in a session started before a release spawns
 with the newest release anyway; only the skill text waits for a restart.
 
+New in 0.10.2: a pane `flowkit-spawn` creates no longer starts with the caller's plugin
+directories on its PATH. tmux gives a pane a script creates the script's PATH, so a session
+spawned by a session kept that one's `bin/` directories ahead of its own, release after release,
+and the other commands of an older release answered there (`command -v flowkit-capacity` naming
+an old version is the sign). A pane created before 0.10.2 keeps that PATH until it is closed.
+
 The background driver (`driver=background`) starts the session with `claude --bg`, Claude's own
 background sessions, so no tmux is needed (and one account only, see "Two logins on one config
 folder"):
@@ -198,7 +204,9 @@ them.
   after a `-`. The line is typed as the doorbells type, only into an idle session in a tmux pane
   whose prompt box is free (no draft, no dialog, not in copy mode); never into a reporter, the
   session that set the flag, or a session that is busy or waits. One line per coordinator comes
-  back: `last call <name>`, or `no last call <name>: <why>`.
+  back: `last call <name>`, or `no last call <name>: <why>`. A draft is what you typed or pasted:
+  the dim text Claude Code draws in an empty box (its prompt suggestion, a new session's `Try …`)
+  is none, here and wherever flowkit types into a pane (new in 0.10.2).
 - **Then no session asks you anything.** A PreToolUse hook on AskUserQuestion (`hooks/hooks.json`)
   denies the question while the flag is in effect, with a reason the session acts on: take the
   recommended option, mark it "(auto)" in its decision log and its close, carry on, never end a
@@ -422,7 +430,9 @@ answer it once in a session of your own first.
 ## Reminders
 
 New in 0.10.0, off until you turn it on (`handoff.py conf remind on`, or `/handoff:setup`). New in
-0.10.1: a reminder that reached nobody is tried again after 10 minutes, not at every pass.
+0.10.1: a reminder that reached nobody is tried again after 10 minutes, not at every pass. New in
+0.10.2: an idle reporter whose prompt box shows Claude Code's prompt suggestion is rung (0.10.1
+read that dim text as a draft of yours, rang nobody and fell through to the next carrier).
 Claude Code pushes to your phone when a session waits on you, but some things that wait on you
 it cannot see: a pane parked at a start-up prompt has no session yet, a session a usage limit
 stopped that flowkit cannot continue (outside tmux, or three continues that ended on the limit
