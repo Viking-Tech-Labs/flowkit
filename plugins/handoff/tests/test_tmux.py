@@ -34,11 +34,16 @@ class Labels(unittest.TestCase):
             (self.tmp / sub).mkdir(parents=True)
         self.ft = load()
         self.ft.CLAUDE = self.tmp
+        self.ft.CONFIG = self.tmp  # never the user's handoff.conf: with remind=on there the tick would start a real pass
         self.ft.CACHE = self.tmp / "status.json"
         self.ft.run = self.run_stub
         self.rows, self.pane_list, self.windows, self.writes = [], [], {}, []
         self.later, self.listed, self.asked = None, 0, 0  # a second pane list, served from the second list-panes on
         self.screens = {}  # pane id → what capture-pane shows
+
+    def test_a_test_reads_its_own_handoff_conf(self):
+        (self.tmp / "handoff.conf").write_text("remind=on\n")
+        self.assertEqual(self.ft.setting("remind"), "on")
 
     def run_stub(self, *cmd):
         if cmd[:2] == ("claude", "agents"):
@@ -526,7 +531,7 @@ class Cache(Labels):
             self.assertEqual(popen.call_count, 5, "for ~/.claude the login without the variable counts too")
 
     def test_the_tick_starts_remind_once_a_minute_with_remind_on(self):
-        self.ft.CONFIG, tick = self.tmp, self.tmp / "flowkit" / ".remind-tick"
+        tick = self.tmp / "flowkit" / ".remind-tick"
         with mock.patch.object(self.ft.subprocess, "Popen") as popen:
             self.line()
             self.assertEqual(popen.call_count, 0, "no handoff.conf: off")
@@ -577,7 +582,6 @@ class Closer(Labels):
 
     def setUp(self):
         super().setUp()
-        self.ft.CONFIG = self.tmp
         (self.tmp / "handoff.conf").write_text("driver=tmux\nautoclose=on\n")
         self.killed = []
         self.ft.terminate = lambda pid: self.killed.append(pid) or True
