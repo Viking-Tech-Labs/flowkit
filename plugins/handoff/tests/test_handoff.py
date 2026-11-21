@@ -1852,6 +1852,32 @@ class Handoff(unittest.TestCase):
         self.handoff("reconnect")
         self.assertFalse(self.remote("json").exists() or self.remote("lock").exists(), "a session that is gone leaves nothing")
 
+    def test_reconnect_keeps_a_session_owed_through_two_megabytes_of_work(self):
+        self.remote_setup(status="busy")
+        self.handoff("reconnect", "--all")
+        self.assertTrue(self.remote("owed").exists())
+        row = json.dumps({"type": "assistant", "timestamp": self.iso(time.time()),
+                          "message": {"content": [{"type": "text", "text": "x" * 4000}]}}) + "\n"
+        with self.transcript.open("a") as f:
+            f.write(row * 560)  # 2.2 MB after the notice: the tail read no longer holds it
+        self.handoff("reconnect")
+        self.assertEqual((self.calls.exists(), self.remote("owed").exists()), (False, True), "still at work: still owed")
+        self.session(status="idle")
+        self.handoff("reconnect")
+        self.assertEqual(self.calls.read_text(), self.TYPED, "idle again: it gets its /remote-control")
+        self.assertFalse(self.remote("owed").exists())
+        self.handoff("reconnect", "--all")
+        self.assertEqual(self.calls.read_text(), self.TYPED, "once for that notice")
+
+    def test_the_pass_drops_what_is_owed_to_a_session_whose_link_is_back(self):
+        self.remote_setup(status="busy")
+        self.handoff("reconnect", "--all")
+        self.assertTrue(self.remote("owed").exists())
+        self.session(status="busy", bridgeSessionId="cse_new")  # the user typed /remote-control themselves
+        self.handoff("reconnect")
+        self.assertFalse(self.remote("owed").exists(), "nothing owed: the tick stops starting a pass a minute for it")
+        self.assertFalse(self.calls.exists())
+
     def test_reconnect_sees_the_link_back_or_closes_what_the_command_left_open(self):
         for left in (False, True):
             self.remote_setup()

@@ -1402,7 +1402,8 @@ def reconnect(sid, patience=0):
     link then, says so in the transcript and brings it back only when asked, so `/remote-control`
     is typed for the session: once per notice, and only while it shows no link, is idle (not at
     work, not on a question) and its prompt box is on screen, empty, with no dialog below it. Until
-    then it stays owed (<sid>.owed), for the next turn end and the tick. The link has REMOTE_WAIT
+    then it stays owed (<sid>.owed, which keeps the notice's time: a session at work can write the
+    notice out of the transcript's tail), for the next turn end and the tick. The link has REMOTE_WAIT
     seconds to show; when it does not, a dialog the command left open is closed with Esc and one
     line says so. A session whose link stands gets nothing, nor does one that never said it lost
     it to an account change; no session is ever restarted for this. Returns what was typed, or ""."""
@@ -1424,6 +1425,12 @@ def reconnect(sid, patience=0):
             done = 0
         rows = [r for path in (CLAUDE / "projects").glob(f"*/{sid}.jsonl") for r in transcript_tail(path)]
         notice = disconnected(rows, done)
+        if not notice:  # none in the tail: what the session is owed for still counts
+            try:
+                notice = float(owed.read_text())
+            except (OSError, ValueError):
+                notice = 0
+            notice = notice if notice > done else None
         if not notice or any(r.get("subtype") == "bridge_status" and (stamp(r) or 0) > notice for r in rows):
             owed.unlink(missing_ok=True)  # nothing new since the last one handled, or the link came back after it
             return ""
@@ -1460,11 +1467,13 @@ def reconnect(sid, patience=0):
 def reconnect_pass(every):
     """The tick's pass: every session that is owed its Remote Control, or with `every` each live
     interactive one that shows no link (its transcript says whether it lost one to an account
-    change), at the same time; then the files of sessions that are gone go."""
+    change), at the same time; first the files of sessions that are gone go, and what is owed to a
+    session whose link is back (the user typed /remote-control themselves)."""
     live = {i["sessionId"]: i for i in sessions()}
     REMOTE.mkdir(parents=True, exist_ok=True)
     for path in REMOTE.iterdir():
-        if path.suffix in (".json", ".owed", ".lock") and path.stem not in live:
+        if path.suffix in (".json", ".owed", ".lock") and path.stem not in live or \
+                path.suffix == ".owed" and live[path.stem].get("bridgeSessionId"):
             path.unlink(missing_ok=True)
     due = [sid for sid, i in live.items() if i.get("kind") == "interactive" and not i.get("bridgeSessionId")
            and (every or (REMOTE / f"{sid}.owed").exists())]
