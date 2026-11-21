@@ -162,6 +162,12 @@ New in 0.10.0: the flag takes effect five minutes after it is set, with a last c
 coordinators first; a session you typed to in the last five minutes may still ask; every session
 hears who set and who cleared it.
 
+New in 0.10.1: the nudge at the minute the flag takes effect comes from a process `away` starts,
+so it runs without the tmux tick too, and it leaves a session you are answering until five minutes
+after your last prompt to it; the ladder plugin's `max` gate and `autoretry` count the flag from
+the moment it is set; a coordinator's wake of a stopped worker no longer counts as you typing;
+`away --by` takes a session's title, spaces and all.
+
 `/handoff:away` runs `handoff.py away --by <this session>`, the one command that sets the flag.
 It writes `~/.claude/away`:
 
@@ -330,6 +336,10 @@ they run on. flowkit works on the folder, so it sees the sessions of both. Where
 matters it reads that file as the session's own environment names it and compares the account
 and organization ids in it; it has no label or variable of its own for a login.
 
+New in 0.10.1: a session owed its Remote Control stays owed however much it writes before its turn
+ends (0.10.0 forgot it past 2 MB of transcript), and what is owed is dropped once you bring the
+link back yourself.
+
 - `flowkit-usage` keeps its 10-minute answer per account and names the account in `--json`
   (`account`), so one login never answers for the other, nor for the account before a `/login`.
 - A usage-limit record keeps the login its session stopped on: `config` (its `CLAUDE_CONFIG_DIR`,
@@ -411,7 +421,8 @@ answer it once in a session of your own first.
 
 ## Reminders
 
-New in 0.10.0, off until you turn it on (`handoff.py conf remind on`, or `/handoff:setup`).
+New in 0.10.0, off until you turn it on (`handoff.py conf remind on`, or `/handoff:setup`). New in
+0.10.1: a reminder that reached nobody is tried again after 10 minutes, not at every pass.
 Claude Code pushes to your phone when a session waits on you, but some things that wait on you
 it cannot see: a pane parked at a start-up prompt has no session yet, a session a usage limit
 stopped that flowkit cannot continue (outside tmux, or three continues that ended on the limit
