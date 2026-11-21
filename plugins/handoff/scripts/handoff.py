@@ -21,13 +21,16 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py settings diff|install <key=json>…   values for the user's settings.json (a.b nests)
   handoff.py away [--by <session>]               the ~/.claude/away flag: in effect 5 minutes from now (its
                                                  first line), for 12 hours; names who set it and when; a
-                                                 last call is typed into every idle coordinator now; a flag
-                                                 already set stays as it is
+                                                 last call is typed into every idle coordinator now, and
+                                                 `away-nudge --wait` starts; a flag already set stays as it is
   handoff.py back [--by <session>]               clear the flag, then list the sessions waiting on the user
   handoff.py away-status                         away: since <stamp> (in effect), from <stamp> (set, not
                                                  yet in effect) or off
-  handoff.py away-nudge                          the tick's: once the flag is in effect, nudge the sessions
-                                                 parked on a question (bin/flowkit-away), once per flag
+  handoff.py away-nudge [--wait]                 once the flag is in effect, nudge the sessions parked on a
+                                                 question (bin/flowkit-away), once per flag; one the user
+                                                 typed to in the last 5 minutes is left for a later pass.
+                                                 --wait, what `away` starts: from the minute the flag takes
+                                                 effect, then once a minute while a session was left
   handoff.py restamp                             an unattended close: the flag's 12 hours start again
                                                  while it exists (no nudge, no usage), so a chain
                                                  longer than that stays unattended
@@ -78,7 +81,7 @@ CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or HOME / ".claude")
 AWAY = CLAUDE / "away"
 AWAY_HOURS = 12
 AWAY_DELAY = 5  # minutes from `away` to the flag taking effect: the coordinators' last call
-AWAY_NUDGED = CLAUDE / "flowkit" / "away-nudged"  # the flag the tick's nudge ran for
+AWAY_NUDGED = CLAUDE / "flowkit" / "away-nudged"  # the flag the nudge ran for, nobody left for a later pass
 AWAY_CLEARED = CLAUDE / "flowkit" / "away-cleared"  # who cleared the flag last, when, and which flag it was
 PRESENT = 5  # minutes after the user typed to a session (or answered its question) in which it may still ask
 COORDINATOR = re.compile(r"^Coordinator: (\S+)", re.M)  # a coordination board names its coordinator
@@ -271,8 +274,8 @@ def away_status():
 def away(by):
     """Set the away flag: in effect AWAY_DELAY minutes from now, naming who set it and when. The idle
     coordinators get a last call now; the sessions parked on a question get the nudge once it takes
-    effect (the tick runs `away-nudge`). A flag already set stays as it is, and nudges again once in
-    effect."""
+    effect, from a process of its own started here (`away-nudge --wait`), so it needs no tmux tick. A
+    flag already set stays as it is, and nudges again once in effect."""
     flag = away_flag()
     if flag:
         print(f"away: {'since' if flag['at'] <= time.time() else 'from'} {flag['stamp']} (already set by "
@@ -289,6 +292,8 @@ def away(by):
     usage()
     if not flag:
         last_call(by, stamp)
+        subprocess.Popen([sys.executable, __file__, "away-nudge", "--wait"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     elif flag["at"] <= time.time():
         reach("nudge")
 
@@ -336,25 +341,63 @@ def last_call(by, stamp):
         print(f"no last call {name}: {why}" if why else f"last call {name} (tmux {pane})")
 
 
-def away_nudge():
-    """The tick's, while a flag waits for it: once the flag is in effect, the sessions parked on a
-    question get the nudge, once per flag (an expired flag is marked done without one)."""
+def nudge_pass():
+    """Nudge the sessions parked on a question (bin/flowkit-away), but not one the user typed to, or
+    whose question they answered, in the last PRESENT minutes: they may be answering it now. True
+    when nobody was left for a later pass. With `claude agents` unreadable everybody is nudged."""
     try:
-        text = AWAY.read_text()
-    except OSError:
-        return
-    flag = away_flag()
-    if flag and flag["at"] > time.time():
-        return
-    try:
-        if AWAY_NUDGED.read_text() == text:
-            return
-    except OSError:
-        pass
-    AWAY_NUDGED.parent.mkdir(parents=True, exist_ok=True)
-    AWAY_NUDGED.write_text(text)
-    if flag:
+        rows = [r for r in agents_json() if isinstance(r, dict) and r.get("status") == "waiting"]
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        rows = []
+    name = lambda r: str(r.get("name") or "?")
+    later = {name(r) for r in rows if r.get("waitingFor") == "input needed" and not name(r).endswith("-report")
+             and SAFE.match(str(r.get("sessionId") or "")) and present(r["sessionId"])}
+    if not later:
         reach("nudge")
+        return True
+    for who in sorted(later):
+        print(f"present {who}: the user typed to it in the last {PRESENT} minutes; nudged once those are over")
+    only = [name(r) for r in rows if name(r) not in later]  # by name: a namesake of one left waits with it
+    sys.stdout.flush()
+    if only:
+        reach("nudge", *(arg for who in only for arg in ("--only", who)))
+    return False
+
+
+def nudge_round(text, flag):
+    """One pass for the flag in effect, one at a time; True once the flag needs none: it ran with
+    nobody left for later (AWAY_NUDGED says so from then on), or the flag has expired."""
+    with AWAY_NUDGED.with_suffix(".lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False  # another pass is at it
+        try:
+            done = AWAY_NUDGED.read_text() == text
+        except OSError:
+            done = False
+        if not done and (not flag or nudge_pass()):
+            AWAY_NUDGED.write_text(text)  # after the nudge returned: one that died is tried again
+            done = True
+        return done
+
+
+def away_nudge(wait=False):
+    """The nudge of the flag once it is in effect, once per flag: one pass now, or with `wait` (the
+    process `away` starts) from the minute the flag takes effect, then once a minute while a pass
+    left a session for later. It follows the flag that is there and ends with it."""
+    unit = float(os.environ.get("FLOWKIT_RETRY_MINUTE") or 60)
+    AWAY_NUDGED.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            text = AWAY.read_text()
+        except OSError:
+            return
+        flag = away_flag()
+        ahead = flag["at"] - time.time() if flag else 0
+        if (ahead <= 0 and nudge_round(text, flag)) or not wait:
+            return
+        time.sleep(min(ahead, unit / 2) if ahead > 0 else unit)
 
 
 def mark_file(sid):
@@ -2109,8 +2152,8 @@ def main(argv):
         chain_end(*args)
     elif cmd in ("away", "back") and (not args or (len(args) == 2 and args[0] == "--by")):
         (away if cmd == "away" else back)(label(args[1]) if args else "unknown")
-    elif cmd == "away-nudge" and not args:
-        away_nudge()
+    elif cmd == "away-nudge" and args in ([], ["--wait"]):
+        away_nudge(bool(args))
     elif cmd == "restamp" and not args:
         if AWAY.is_file():
             os.utime(AWAY)

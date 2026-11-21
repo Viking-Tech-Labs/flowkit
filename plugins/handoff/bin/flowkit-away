@@ -13,8 +13,8 @@ Reporters (`<story>-report`) never ask and are skipped. Idle and busy sessions a
 the handoff plugin's hook denies their next question while the away flag is in effect. The
 session running this is busy, so it is never nudged.
 
-The plugin runs its own copy (the tick's `handoff.py away-nudge`, once the flag `handoff.py away`
-sets takes effect); `/handoff:setup-tmux` copies this file to
+The plugin runs its own copy (`handoff.py away-nudge`, which `handoff.py away` starts for the
+minute its flag takes effect); `/handoff:setup-tmux` copies this file to
 ~/.local/bin, kept at the plugin's version at every session start, so a shell function of your
 own can call `flowkit-away nudge` too.
 """

@@ -41,6 +41,7 @@ class Handoff(unittest.TestCase):
         (self.tmp / "claude" / ".claude.json").write_text('{"claudeInChromeDefaultEnabled": false}')
         self.agents([])
         self.panes("")
+        self.addCleanup(lambda: self.flag.unlink(missing_ok=True))  # the waiter a test's `away` started ends with it
 
     def agents(self, rows):
         (self.tmp / "agents.json").write_text(json.dumps(rows))
@@ -743,7 +744,7 @@ class Handoff(unittest.TestCase):
         self.assertEqual(self.away("waiting").stdout.strip(), "nobody waits on you")
         self.assertEqual(self.away("nudge", "--what").returncode, 2)
 
-    def test_away_writes_the_flag_the_tick_nudges_once_in_effect_and_back_lists(self):
+    def test_away_writes_the_flag_the_nudge_runs_once_in_effect_and_back_lists(self):
         self.agents([
             {"name": "s3", "kind": "interactive", "pid": 1, "status": "waiting", "waitingFor": "permission prompt"},
         ])
@@ -765,6 +766,81 @@ class Handoff(unittest.TestCase):
         self.assertEqual(out, ["away: off", "s3: waits on permission prompt"])
         self.assertFalse(self.calls.exists())
         self.assertEqual(nudge(), "")
+
+    def asks(self, name, sid, status="waiting"):
+        return {"name": name, "kind": "interactive", "pid": os.getpid(), "sessionId": sid, "status": status,
+                "waitingFor": "input needed"}
+
+    def nudging_tmux(self):
+        """A tmux whose one pane, %7, is this test's shell, and in which Escape lets a session leave its
+        question: from then on `claude agents` answers what next.json holds."""
+        stub, then = self.tmp / "bin" / "tmux", self.tmp / "next.json"
+        stub.write_text(f"#!/bin/sh\ncase \"$1\" in\nlist-panes) echo '{os.getppid()} %7';;\n"
+                        f"send-keys) echo tmux \"$@\" >> {self.calls}; "
+                        f"if [ \"$4\" = Escape ] && [ -f {then} ]; then mv {then} {self.tmp / 'agents.json'}; fi;;\n"
+                        f"*) echo tmux \"$@\" >> {self.calls};; esac\n")
+        stub.chmod(0o755)
+        return then
+
+    def escaped(self, wait):
+        """Whether a nudge's Escape was typed within `wait` seconds."""
+        deadline = time.time() + wait
+        while time.time() < deadline and not (self.calls.exists() and "Escape" in self.calls.read_text()):
+            time.sleep(0.05)
+        return self.calls.exists() and "Escape" in self.calls.read_text()
+
+    def test_the_nudge_leaves_a_session_the_user_is_answering_for_a_later_pass(self):
+        self.agents([self.asks("demo-coord", "sa"), self.asks("demo-s2", "sb")])
+        then = self.nudging_tmux()
+        self.set_flag(time.time() - 60, by="coord-b")
+        mark, nudged = self.tmp / "flowkit-context-sa.json", self.tmp / "claude" / "flowkit" / "away-nudged"
+        mark.write_text(json.dumps({"prompted": True, "typed": time.time() - 60}))
+        then.write_text(json.dumps([self.asks("demo-coord", "sa"), self.asks("demo-s2", "sb", "idle")]))
+        nudge = lambda: self.handoff("away-nudge").stdout.splitlines()
+        left = "present demo-coord: the user typed to it in the last 5 minutes; nudged once those are over"
+        self.assertEqual(nudge(), [left, "nudged demo-s2 (tmux %7)"])
+        self.assertEqual(self.calls.read_text().count("Escape"), 1, "the question the user is answering stays open")
+        self.assertFalse(nudged.exists(), "one was left: a later pass comes back for it")
+        self.assertEqual(nudge(), [left])
+        self.assertEqual(self.calls.read_text().count("Escape"), 1)
+        mark.write_text(json.dumps({"prompted": True, "typed": time.time() - 301}))
+        then.write_text(json.dumps([self.asks("demo-coord", "sa", "idle"), self.asks("demo-s2", "sb", "idle")]))
+        self.assertEqual(nudge(), ["nudged demo-coord (tmux %7)"], "five minutes after the last prompt typed to it")
+        self.assertEqual(nudged.read_text(), self.flag.read_text())
+        self.assertEqual(nudge(), [], "once per flag")
+        self.set_flag(time.time() - 120, by="coord-b")
+        (self.tmp / "agents.json").write_text("{")
+        self.assertEqual(nudge(), ["cannot read `claude agents --json`: no session nudged"],
+                         "who is present is unknown: the nudge of everybody, as it was")
+
+    def test_away_starts_the_waiter_that_nudges_once_the_flag_is_in_effect(self):
+        self.agents([self.asks("demo-s2", "sb")])
+        then = self.nudging_tmux()
+        self.usage_answer()
+        self.env["FLOWKIT_RETRY_MINUTE"] = "0.2"  # the waiter's minute
+        mark, nudged = self.tmp / "flowkit-context-sb.json", self.tmp / "claude" / "flowkit" / "away-nudged"
+        self.handoff("away", "--by", "coord-a")
+        self.assertFalse(self.escaped(0.6), "not before the flag takes effect")
+        mark.write_text(json.dumps({"prompted": True, "typed": time.time()}))
+        self.set_flag(time.time() - 60, by="coord-a")
+        self.assertFalse(self.escaped(0.8), "in effect, and the user is answering its question")
+        self.assertFalse(nudged.exists())
+        then.write_text(json.dumps([self.asks("demo-s2", "sb", "idle")]))
+        mark.write_text(json.dumps({"prompted": True, "typed": time.time() - 301}))
+        self.assertTrue(self.escaped(5), "the waiter comes back for it, with no tick and no tmux client")
+        deadline = time.time() + 5
+        while time.time() < deadline and not nudged.exists():
+            time.sleep(0.05)
+        self.assertEqual(nudged.read_text(), self.flag.read_text())
+        waiter = lambda: subprocess.Popen([sys.executable, str(HANDOFF), "away-nudge", "--wait"], env=self.env)
+        self.assertEqual(waiter().wait(timeout=5), 0, "its flag was nudged: nothing to wait for")
+        self.set_flag(time.time() + 240, by="coord-a")
+        proc = waiter()
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        time.sleep(0.5)
+        self.assertIsNone(proc.poll(), "it waits for the flag to take effect")
+        self.flag.unlink()
+        self.assertEqual(proc.wait(timeout=5), 0, "and ends with the flag")
 
     def test_away_takes_effect_five_minutes_on_and_counts_twelve_hours_from_then(self):
         self.usage_answer()

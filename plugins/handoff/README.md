@@ -208,18 +208,24 @@ them.
 - **Every session hears of it.** At its next prompt or batch of tool calls, each session gets one
   line when the flag is set (who set it, when, and when it takes effect) and one when it is
   cleared (by whom and when, or that it expired or was removed by hand).
-- **A session already sitting on a question is nudged** once the flag takes effect: the tmux
-  status bar's tick runs `handoff.py away-nudge` (at most once a minute, until it has run for the
-  flag), which runs `bin/flowkit-away nudge` once per flag. It reads `claude agents --json`; each
-  session with `status: waiting` on `input needed` gets the away line: in a tmux pane, Escape ends
-  the question's turn and the line is typed as its next prompt (as the reporter doorbell types); a
-  background session is stopped and resumed with the line as its prompt. Without tmux nothing
-  runs the nudge, and a waiting session reads the flag at its next question. `flowkit-away nudge`
-  sorts the sessions as `nudged`, `permission` (a permission prompt is never answered, since
-  nothing here approves on your behalf: answer it from the phone), `unreachable` (a question in a
-  plain terminal outside tmux), `skipped` (a `<story>-report`, which never asks). Idle and busy
-  sessions are left alone, since the hook catches their next question; a session that ended its
-  turn on a question in prose stays as it is.
+- **A session already sitting on a question is nudged** once the flag takes effect: `away` starts
+  a process of its own (`handoff.py away-nudge --wait`) that waits for that minute and then runs
+  `bin/flowkit-away nudge`, once per flag. It reads `claude agents --json`; each session with
+  `status: waiting` on `input needed` gets the away line: in a tmux pane, Escape ends the
+  question's turn and the line is typed as its next prompt (as the reporter doorbell types); a
+  background session is stopped and resumed with the line as its prompt. One session is left
+  alone: the one you typed to, or whose question you answered, in the last five minutes, since
+  you may be answering it right now; the process comes back once a minute and nudges it when
+  those five minutes are over. The nudge needs no tmux: with `driver=background`, without the kit
+  or with no client attached it runs the same, and a background session parked on a question is
+  resumed with the line; only a question in a plain terminal outside tmux cannot be reached, and
+  waits for you. A flag written raw starts no such process: a shell function that writes one
+  calls `flowkit-away nudge` itself. `flowkit-away nudge` sorts the sessions as `nudged`,
+  `permission` (a permission prompt is never answered, since nothing here approves on your
+  behalf: answer it from the phone), `unreachable` (a question in a plain terminal outside tmux),
+  `skipped` (a `<story>-report`, which never asks). Idle and busy sessions are left alone, since
+  the hook catches their next question; a session that ended its turn on a question in prose
+  stays as it is.
 
 `/handoff:back` runs `handoff.py back --by <this session>`: the flag goes, every session hears who
 cleared it, and the sessions waiting on you are listed.

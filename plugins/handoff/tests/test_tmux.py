@@ -525,25 +525,6 @@ class Cache(Labels):
                 tick()
             self.assertEqual(popen.call_count, 5, "for ~/.claude the login without the variable counts too")
 
-    def test_the_tick_starts_the_away_nudge_until_it_ran_for_the_flag(self):
-        flag, tick = self.tmp / "away", self.tmp / "flowkit" / ".away-tick"
-        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
-            self.line()
-            self.assertEqual(popen.call_count, 0, "no flag: one read")
-            flag.write_text("2026-11-19 23:15\nby: coord-a\nset: 2026-11-19 23:10\n")
-            self.ft.CACHE.unlink()
-            self.line()
-            self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "handoff.py"), "away-nudge"])
-            self.ft.away_nudge()
-            self.assertEqual(popen.call_count, 1, "at most once a minute")
-            os.utime(tick, (0, 0))
-            self.ft.away_nudge()
-            self.assertEqual(popen.call_count, 2, "a minute on, while the flag still waits for it")
-            (self.tmp / "flowkit" / "away-nudged").write_text(flag.read_text())
-            os.utime(tick, (0, 0))
-            self.ft.away_nudge()
-            self.assertEqual(popen.call_count, 2, "it ran for this flag")
-
     def test_the_tick_starts_remind_once_a_minute_with_remind_on(self):
         self.ft.CONFIG, tick = self.tmp, self.tmp / "flowkit" / ".remind-tick"
         with mock.patch.object(self.ft.subprocess, "Popen") as popen:
