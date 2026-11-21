@@ -10,8 +10,8 @@ calls this with plain arguments; nothing here asks.
                                       transcript, against capacity.conf's coordinator_growth
   coordinate.py workers <name> ...    one line per worker: live (message it), retired (a stopped
                                       background session: wake it), or missing
-  coordinate.py wake <name> <message> wake a retired background worker with the message as its
-                                      prompt, under its own id and saved options
+  coordinate.py wake <name> <message> wake a retired background worker with `wake: <message>` as
+                                      its prompt, under its own id and saved options
 """
 import json
 import os
@@ -194,8 +194,9 @@ def cmd_wake(name, message):
         fail(f"{name} is live: message it with SendMessage", 5)
     if st != "retired":
         fail(f"{name} is {st}: no background session to wake", 6)
-    # No other flag: a resume that passes any starts a copy instead of waking it.
-    p = subprocess.run(["claude", "--bg", "--resume", r["sessionId"], message],
+    # No other flag: a resume that passes any starts a copy instead of waking it. The prefix marks the
+    # prompt as a session's, so handoff's away gate does not take it for one the user typed.
+    p = subprocess.run(["claude", "--bg", "--resume", r["sessionId"], f"wake: {message}"],
                        capture_output=True, text=True, cwd=r.get("cwd") or None)
     print((p.stdout + p.stderr).strip())
     sys.exit(p.returncode)

@@ -192,7 +192,7 @@ Coordinator: <name> · Mission: <path or "pasted"> · Updated: <date time>
 - **To reach a worker**, `coordinate.py workers <worker>` first. `live`: SendMessage to its name;
   a busy worker gets it between tool calls. `retired`: a background session Claude stopped after
   it sat idle for hours, its conversation kept; `coordinate.py wake <worker> "<message>"` wakes it
-  with the message as its prompt. `ended` or `missing`: its pane was closed or it crashed; tell the
+  with `wake: <message>` as its prompt (the prefix tells it the line is yours, not the user's). `ended` or `missing`: its pane was closed or it crashed; tell the
   user, and its `claude --resume <session id>` from its repo (the Sessions list) brings it back.
 - A worker silent for long: check it the same way before assuming anything.
 

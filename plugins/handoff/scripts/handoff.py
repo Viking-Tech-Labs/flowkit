@@ -129,7 +129,8 @@ LOCAL = ("<command-", "<local-command-", "<bash-")  # how the lines of a /comman
 WRAPPERS = ("<task-notification", "Another Claude session sent a message", "<cross-session-message",
             "[Cross-session") + LOCAL  # prompts nobody typed: a task's notice, another session's message
 FLOWKIT_LINE = re.compile(r"Your last turn (?:stopped on the usage limit|ended on an API error|hit the output token limit)"
-                          r"|away(?: since .+?)?: I am off\.|report now$|closed [\w.-]+$|last call: |reminder: |/remote-control$")  # lines flowkit types
+                          r"|away(?: since .+?)?: I am off\.|report now$|closed [\w.-]+$|last call: |reminder: |/remote-control$"
+                          r"|wake: ")  # lines flowkit types, coordinate's wake of a stopped worker among them
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 RESETS = re.compile(r"resets (?:at )?(?:(?P<mon>[A-Za-z]{3}) (?P<day>\d{1,2}),? (?:at )?)?(?P<h>\d{1,2})(?::(?P<m>\d\d))?"
                     r"(?: ?(?P<ap>[ap]m))?(?: \((?P<tz>[^)\s]+)\))?", re.I)
@@ -365,7 +366,7 @@ def mark_file(sid):
 def typed_by_user(prompt, first):
     """A prompt the user typed, at the computer or from the phone: not the session's first (a
     launch's brief), not a wrapper (a task's notice, a /command's lines, another session's message)
-    and not a line flowkit types."""
+    and not a line flowkit types (a coordinator's `wake: ` of a stopped worker is one)."""
     prompt = prompt.lstrip()
     return not first and not prompt.startswith(WRAPPERS) and not FLOWKIT_LINE.match(prompt)
 

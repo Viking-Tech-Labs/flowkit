@@ -867,7 +867,8 @@ class Handoff(unittest.TestCase):
                        "away since 2026-11-19 23:15: I am off. Answer the question you asked with the recommended option",
                        "away: I am off. Answer the question", "report now", "closed demo-s2",
                        "last call: the user goes away at 23:15. Ask now anything you need from them",
-                       "reminder: from flowkit's tick, not the user. Send the user one push notification now"):
+                       "reminder: from flowkit's tick, not the user. Send the user one push notification now",
+                       "wake: S2 merged: rebase onto main and carry on"):
             self.context(10, prompt)
             self.assertTrue(denied(), prompt)
         self.context(10, "go with 2, and keep the old name")

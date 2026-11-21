@@ -53,7 +53,7 @@ class Coordinate(unittest.TestCase):
                       "cwd": str(self.tmp)}])
         p = self.run_("wake", "s-b", "go on")
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(self.calls.read_text().strip(), "--bg --resume B go on")
+        self.assertEqual(self.calls.read_text().strip(), "--bg --resume B wake: go on")
 
     def test_wake_refuses_live(self):
         self.agents([{"name": "s-a", "pid": 10, "kind": "background", "sessionId": "A"}])

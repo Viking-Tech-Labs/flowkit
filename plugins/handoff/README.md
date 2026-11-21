@@ -199,9 +199,9 @@ computer stays up for the nudge at the effective time.
   question you answered, in the last five minutes may still ask, at the computer or from the
   phone. Typed by you means not a task's notification, another session's message, a `/command`'s
   or a `!` line's wrapper, a line flowkit types (the doorbells, the limit and error continues, the
-  away nudge, the last call, a `/remote-control`), nor the session's first prompt, which is its launch brief. The
-  context hook keeps that stamp per session (UserPromptSubmit, and PostToolUse on
-  AskUserQuestion).
+  away nudge, the last call, a `/remote-control`, a coordinator's `wake: ` of a stopped worker),
+  nor the session's first prompt, which is its launch brief. The context hook keeps that stamp per
+  session (UserPromptSubmit, and PostToolUse on AskUserQuestion).
 - **Every session hears of it.** At its next prompt or batch of tool calls, each session gets one
   line when the flag is set (who set it, when, and when it takes effect) and one when it is
   cleared (by whom and when, or that it expired or was removed by hand).

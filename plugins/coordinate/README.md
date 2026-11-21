@@ -64,7 +64,9 @@ status`, which lists every open watch with its state, when it was armed and its 
 Workers sit idle by design, waiting for the next message. In tmux they wait as long as their pane
 is open. A background session that sits idle for hours is stopped by Claude, its conversation
 kept; the coordinator checks before each message (`coordinate.py workers`) and wakes a stopped
-worker with the message as its prompt (`coordinate.py wake`), under its own id and settings.
+worker with the message as its prompt (`coordinate.py wake`), under its own id and settings. The
+prompt arrives as `wake: <message>`: to handoff's away flag it is a session's line, never one you
+typed, so a woken worker does not ask you a question while you are away.
 
 ## Waves
 
