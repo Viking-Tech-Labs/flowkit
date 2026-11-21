@@ -493,6 +493,46 @@ class Handoff(unittest.TestCase):
         self.assertEqual(self.tmux("show-options", "-pqv", "-t", pane, "@flowkit_parked").stdout, "",
                          "the launch clears the stamp of the pane's last session")
 
+    @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+    def test_spawn_keeps_the_caller_s_plugin_directories_off_the_new_pane_s_path(self):
+        """tmux starts a pane a script creates with the script's PATH: a spawn from a session would
+        hand that session's plugin bin/ directories, an older release's among them, to the next."""
+        repo = self.spawn_repo()
+        (self.tmp / "flowkit" / "handoff.conf").write_text("driver=tmux\nreporter=off\n")
+        (self.tmp / "bin" / "tmux").unlink()
+        pidfile, given = self.tmp / "claude.pid", self.tmp / "given"
+        fake = self.tmp / "bin" / "claude"
+        fake.write_text(
+            "#!/bin/sh\n"
+            f"if [ \"$1\" = agents ]; then\n"
+            f"  if [ -f {pidfile} ]; then printf '[{{\"name\":\"st-s1\",\"pid\":%s,\"kind\":\"interactive\","
+            f"\"status\":\"idle\",\"cwd\":\"{repo}\"}}]' \"$(cat {pidfile})\"; else echo '[]'; fi\n"
+            "  exit 0\n"
+            "fi\n"
+            f"echo $$ > {pidfile}\n"
+            "exec sleep 30\n")
+        fake.chmod(0o755)
+        env = {k: v for k, v in self.env.items() if k not in ("TMUX", "TMUX_PANE", "CLAUDE_PID")}
+        env["TMUX_TMPDIR"] = str(self.tmp)  # a server of its own: nothing reaches the user's tmux
+        sock = f"fp-{os.getpid()}"
+        real = lambda *a: subprocess.run(["tmux", "-L", sock, *a], capture_output=True, text=True, env=env)
+        self.addCleanup(real, "kill-server")
+        # every new pane writes down the PATH tmux gave it, then is a bare bash with the fake claude first
+        shell = f"env PATH={self.tmp / 'bin'}:/usr/bin:/bin /bin/bash --noprofile --norc"
+        real("-f", "/dev/null", "new-session", "-d", "-s", "main", "-x", "200", "-y", "50", shell)
+        real("set-option", "-g", "default-shell", "/bin/sh")
+        real("set-option", "-g", "default-command", f"echo \"$PATH\" >> {given}; exec {shell}")
+        stale = self.tmp / "claude" / "plugins" / "cache" / "market" / "handoff" / "0.0.1" / "bin"
+        env["PATH"] = f"{self.tmp / 'bin'}:{stale}:{env['PATH']}:{stale.parent.parent / '0.0.2' / 'bin'}/"
+        prompt = self.tmp / "p.md"
+        prompt.write_text("hi\n")
+        out = subprocess.run([str(SPAWN_BIN), "--tmux-socket", sock, "--tmux-session", "main", "--no-rc", "--repo", str(repo),
+                              "--name", "st-s1", "--story", "st", str(prompt)], capture_output=True, text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        (path,) = given.read_text().splitlines()  # the one pane the spawn created
+        self.assertIn(str(self.tmp / "bin"), path.split(":"), "the caller's PATH")
+        self.assertEqual([p for p in path.split(":") if "/plugins/cache/" in p], [], "without its plugin directories")
+
     def capacity_state(self):
         """What the capacity state holds: resource -> holder, the launching pids, the log's events."""
         state = self.tmp / "claude" / "capacity"

@@ -156,7 +156,12 @@ settings="$settings${settings:+${iso:+,}}$iso"
 [ -n "$settings" ] && flags+="--settings '{$settings}' "
 
 # Which tmux: an explicit server, else the one this runs inside, else none (print the command).
-tm() { if [ -n "$socket" ]; then tmux -L "$socket" "$@"; else tmux "$@"; fi; }
+# tmux starts a pane a script creates with the script's PATH, not the server's. Called from a
+# session, that PATH holds the session's plugin bin/ directories, which the session started in
+# the pane would keep ahead of its own: an older release's commands would answer there. So tmux
+# is called without them.
+pane_path="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '/plugins/cache/.*/bin/*$' | paste -s -d: - || true)"
+tm() { if [ -n "$socket" ]; then PATH="${pane_path:-$PATH}" tmux -L "$socket" "$@"; else PATH="${pane_path:-$PATH}" tmux "$@"; fi; }
 here="${TMUX_PANE:-}"
 if [ "$driver" = background ]; then here=""
 elif [ -z "$socket" ] && [ -z "${TMUX:-}" ]; then
