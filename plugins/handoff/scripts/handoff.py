@@ -174,6 +174,12 @@ def safe(name, what):
     return name
 
 
+def label(name):
+    """A session's name as the flag keeps it: a hand-started session carries its title, spaces and
+    all, so what `safe` would refuse becomes `-`; nothing usable left: `unknown`."""
+    return re.sub(r"[^A-Za-z0-9._-]", "-", name).lstrip("._-") or "unknown"
+
+
 def slugify(text):
     """A story's slug, as flowkit-spawn makes it for the tab and `<slug>-report`."""
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).lstrip("-")[:32].rstrip("-")
@@ -320,16 +326,13 @@ def last_call(by, stamp):
             'questions are denied and you take the recommended option, marked "(auto)".')
     for row in rows:
         name = str(row.get("name") or "")
-        if name == by or name.endswith("-report") or not (name in boards or COORD_NAME.search(name)):
+        if label(name) == by or name.endswith("-report") or not (name in boards or COORD_NAME.search(name)):
             continue
         if mode(row) != "idle":
             print(f"no last call {name}: {mode(row)}")
             continue
-        found = pane_of(row["pid"]) if row.get("kind") == "interactive" and row.get("pid") else None
-        why = "not in a tmux pane" if found is None else "copy mode" if found[1] else parked(found[0])
-        if not why and not type_line(found[0], text):
-            why = "tmux did not take the line"
-        print(f"no last call {name}: {why}" if why else f"last call {name} (tmux {found[0]})")
+        pane, why = type_into(row, text)
+        print(f"no last call {name}: {why}" if why else f"last call {name} (tmux {pane})")
 
 
 def away_nudge():
@@ -847,6 +850,20 @@ def type_line(pane, text):
     otherwise read as part of a paste."""
     return tmux("send-keys", "-t", pane, "-l", text, ";", "run-shell", "sleep 0.5",
                 ";", "send-keys", "-t", pane, "Enter").returncode == 0
+
+
+def type_into(row, text):
+    """Type a line into the tmux pane of the session a `claude agents` row names, only into a free
+    prompt box: (pane, "") once typed, else (None, why not). No tmux on the machine, or one that
+    hangs, is a why like the others."""
+    try:
+        found = pane_of(row["pid"]) if row.get("kind") == "interactive" and row.get("pid") else None
+        why = "not in a tmux pane" if found is None else "copy mode" if found[1] else parked(found[0])
+        if not why and not type_line(found[0], text):
+            why = "tmux did not take the line"
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"tmux or ps did not answer ({type(e).__name__})"
+    return (None, why) if why else (found[0], "")
 
 
 def continue_session(rec, text):
@@ -1701,13 +1718,10 @@ def remind_ring(row, line):
     """Ring one reporter: the line typed into its pane as the last call types it, then up to
     REMIND_WAIT seconds for the answer to the push it sends. (sent, what happened); a push the tool
     did not send ("Not sent — this terminal is active", an error) is not sent."""
-    found = pane_of(row["pid"])
-    why = "not in a tmux pane" if found is None else "copy mode" if found[1] else parked(found[0])
+    at = time.time()
+    why = type_into(row, line)[1]
     if why:
         return False, why
-    at = time.time()
-    if not type_line(found[0], line):
-        return False, "tmux did not take the line"
     while True:
         result = pushed(row["sessionId"], at)
         if result is not None:
@@ -1731,10 +1745,7 @@ def remind_deliver(push, path):
         if not name.endswith("-report") or row.get("kind") != "interactive" or mode(row) != "idle" \
                 or not row.get("pid") or not row.get("sessionId") or story_reported(name[:-len("-report")]):
             continue
-        try:
-            sent, what = remind_ring(row, line)
-        except (OSError, subprocess.TimeoutExpired) as e:  # no tmux here, or it hung: the next in line
-            sent, what = False, f"tmux or ps did not answer ({type(e).__name__})"
+        sent, what = remind_ring(row, line)
         print(f"ring {name}: {what}")
         if sent:
             return name
@@ -2094,14 +2105,13 @@ def main(argv):
     elif cmd == "chain-end" and len(args) in (1, 2):
         chain_end(*args)
     elif cmd in ("away", "back") and (not args or (len(args) == 2 and args[0] == "--by")):
-        (away if cmd == "away" else back)(safe(args[1], "the session name") if args else "unknown")
+        (away if cmd == "away" else back)(label(args[1]) if args else "unknown")
     elif cmd == "away-nudge" and not args:
         away_nudge()
     elif cmd == "restamp" and not args:
         if AWAY.is_file():
             os.utime(AWAY)
-            print(f"away: since {AWAY.read_text().strip() or 'set'} (re-stamped {time.strftime('%H:%M')}; "
-                  f"clears with back or after {AWAY_HOURS} hours)")
+            print(f"{away_status()} (re-stamped {time.strftime('%H:%M')}; clears with back or after {AWAY_HOURS} hours)")
         else:
             print("away: off")
     elif cmd == "question-gate" and not args:

@@ -22,10 +22,10 @@ session should do and goes into its Today section verbatim.
 - `quick`: skip the docs sweep (step 3).
 - `prompt-only`: print only the next session's prompt, or, when step 5 drafts none, only the one
   line saying what remains. Every other step still runs.
-- `overnight`: unattended. Run `handoff.py away --by <this session's name>` first (`handoff.py
-  self` prints the name), so the idle coordinators get their last call and every session down the
-  chain knows the user is off five minutes later, and put its usage line in the close; then follow
-  "Unattended" below.
+- `overnight`: unattended. Run `handoff.py away --by "<this session's name>"` first (`handoff.py
+  self` prints the name; keep the quotes, a title may hold spaces), so the idle coordinators get
+  their last call and every session down the chain knows the user is off five minutes later, and
+  put its usage line in the close; then follow "Unattended" below.
 - `spawn`: after the close, start the next session without the user (step 9): save its prompt
   and launch it through `flowkit-spawn` with Remote Control on: in the story's tmux tab, or in
   the background with `driver=background`. Where it cannot launch, the saved prompt and its launch

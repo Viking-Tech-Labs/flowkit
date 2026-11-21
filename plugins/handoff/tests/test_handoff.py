@@ -824,6 +824,33 @@ class Handoff(unittest.TestCase):
         self.handoff("away", "--by", "coord-b")
         self.assertEqual(len(self.calls.read_text().splitlines()), 2, "a flag already set rings nobody again")
 
+    def test_a_session_title_with_spaces_sets_and_clears_the_flag(self):
+        self.agents([{"name": "coord planning", "kind": "interactive", "pid": 101, "status": "idle"}])
+        self.panes("101 %1 0")
+        self.usage_answer()
+        out = self.handoff("away", "--by", "coord planning")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.flag.read_text().splitlines()[1], "by: coord-planning")
+        self.assertNotIn("last call", out.stdout, "the setter gets none, whatever its name holds")
+        out = self.handoff("back", "--by", "…")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertFalse(self.flag.exists())
+        self.assertEqual(json.loads((self.tmp / "claude" / "flowkit" / "away-cleared").read_text())["by"], "unknown")
+
+    def test_away_without_tmux_says_so_per_coordinator(self):
+        self.agents([{"name": n, "kind": "interactive", "pid": 101 + i, "status": "idle"}
+                     for i, n in enumerate(("demo-coord", "coord-b"))])
+        (self.tmp / "bin" / "tmux").unlink()
+        os.symlink(shutil.which("cat"), self.tmp / "bin" / "cat")
+        self.env["PATH"] = str(self.tmp / "bin")  # the stub claude and what it needs: no tmux on this machine
+        self.usage_answer()
+        out = subprocess.run([sys.executable, str(HANDOFF), "away", "--by", "x"], capture_output=True, text=True, env=self.env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertTrue(self.flag.is_file())
+        self.assertEqual([x for x in out.stdout.splitlines() if "last call" in x],
+                         [f"no last call {n}: tmux or ps did not answer (FileNotFoundError)" for n in ("demo-coord", "coord-b")])
+        self.assertEqual(out.stderr, "")
+
     def test_the_gate_lets_a_session_ask_within_five_minutes_of_a_prompt_the_user_typed(self):
         self.set_flag(time.time() - 60, by="coord-a")
         mark = self.tmp / "flowkit-context-s1.json"
@@ -902,6 +929,9 @@ class Handoff(unittest.TestCase):
         self.assertEqual(self.handoff("away-status").stdout, "away: since 2026-10-27 01:10\n")
         self.assertFalse(self.calls.exists(), "no nudge")
         self.assertFalse((self.tmp / "probes").exists(), "no usage call")
+        stamp = self.set_flag(time.time() + 240, by="coord-a")
+        self.assertRegex(self.handoff("restamp").stdout, rf"^away: from {stamp} \(set by coord-a at {stamp}\) "
+                         r"\(re-stamped \d\d:\d\d; clears with back or after 12 hours\)\n$", "one line, and not `since` before it is")
 
     def usage_answer(self, hours=15):
         stamp = datetime.fromtimestamp(time.time() + hours * 3600 + 60, timezone.utc).isoformat()

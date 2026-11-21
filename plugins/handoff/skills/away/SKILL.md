@@ -4,8 +4,9 @@ description: Mark the user as away, so sessions and closes run unattended (no qu
 ---
 
 Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py" self` for this session's name, then
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py" away --by <name>` (without a name, `away`
-alone; the flag then says `unknown`), and relay its lines: the first is the flag (`away: from
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py" away --by "<name>"` (the name in quotes: a
+session started by hand carries its title, spaces and all; without a name, `away` alone, and the
+flag then says `unknown`), and relay its lines: the first is the flag (`away: from
 <time>`, when it takes effect), the second how much of the plan's usage is left, the rest the last
 call: one line per coordinator (`last call <name>`, or `no last call <name>: <why>`: busy,
 waiting, a draft in its prompt box, not in a tmux pane). A flag already set stays as it is, and
