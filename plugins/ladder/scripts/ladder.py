@@ -137,9 +137,10 @@ def change(args):
 
 
 def away():
-    """The away flag is in effect: its first line, the stamp it takes effect (handoff's `away` sets it
-    five minutes ahead; a stamp that does not parse counts from the file's write), has passed, and
-    neither it nor the file's last re-stamp is AWAY_HOURS old."""
+    """The away flag is set: from the moment it is written, the minutes before it takes effect
+    included (handoff's `away` stamps its first line five minutes ahead, and an unattended close
+    launches within them), until AWAY_HOURS after that stamp or the file's last re-stamp, whichever
+    is later; a stamp that does not parse counts from the file's write."""
     try:
         stamp, mtime = AWAY.read_text().partition("\n")[0].strip(), AWAY.stat().st_mtime
     except OSError:
@@ -148,12 +149,12 @@ def away():
         at = datetime.strptime(stamp, "%Y-%m-%d %H:%M").timestamp()
     except ValueError:
         at = mtime
-    return at <= time.time() < max(at, mtime) + AWAY_HOURS * 3600
+    return time.time() < max(at, mtime) + AWAY_HOURS * 3600
 
 
 def gate():
     """Ask before a launch at effort max, only for a table this plugin wrote with max on; while
-    the away flag is in effect, run it at xhigh instead. Everything else passes silently."""
+    the away flag is set, run it at xhigh instead. Everything else passes silently."""
     _, managed, _, max_on = read()
     if not (managed and max_on):
         return

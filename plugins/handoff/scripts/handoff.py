@@ -606,12 +606,14 @@ def whoami():
 
 
 def reachable():
-    """Away, or the awake flag (out but reachable from a phone) younger than AWAY_HOURS."""
+    """Away, or the awake flag (out but reachable from a phone) younger than AWAY_HOURS. Away counts
+    from the moment the flag is set, the minutes before it takes effect included: an overnight close
+    launches within them, and an error that ends a turn then must still find its waiter."""
     try:
         awake = time.time() - AWAKE.stat().st_mtime <= AWAY_HOURS * 3600
     except OSError:
         awake = False
-    return bool(away_since()) or awake
+    return bool(away_flag()) or awake
 
 
 def account_file(config):

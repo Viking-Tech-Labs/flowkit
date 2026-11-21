@@ -47,9 +47,12 @@ python3 <plugin dir>/scripts/ladder.py write implementation=opus/high
 ## The effort gate
 
 Silent until you turn `max` on. From then, a Bash command that launches a Claude session at
-effort max (`claude --effort xhigh`, `flowkit-spawn --effort xhigh`, `CLAUDE_CODE_EFFORT_LEVEL=xhigh`)
-asks for your yes first, even in auto mode; while the `/handoff:away` flag is in effect (from
-handoff 0.10.0, five minutes after it is set) it runs at `xhigh` instead. It reads only a table this plugin wrote, so with a ladder of your own it never fires.
+effort max (`claude --effort max`, `flowkit-spawn --effort max`, `CLAUDE_CODE_EFFORT_LEVEL=max`)
+asks for your yes first, even in auto mode; while the `/handoff:away` flag is set it runs at
+`xhigh` instead. Set means from the moment the flag is written: handoff 0.10.0 stamps it five
+minutes ahead for the coordinators' last call, and `/handoff:close overnight spawn` launches
+within those minutes, so they count here (new in 0.1.2; 0.1.1 asked until the stamp had passed).
+It reads only a table this plugin wrote, so with a ladder of your own it never fires.
 
 ## Tests
 

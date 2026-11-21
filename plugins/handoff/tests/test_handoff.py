@@ -1193,6 +1193,13 @@ class Handoff(unittest.TestCase):
         self.api_error("server_error")
         self.assertIn("send-keys", self.typed())
 
+    def test_retry_counts_the_away_flag_from_its_write(self):
+        self.retry_setup(away=False)
+        self.set_flag(time.time() + 240, by="coord-a")
+        self.assertIsNone(self.gate(), "not in effect: questions still go through")
+        self.api_error("server_error")
+        self.assertIn("send-keys", self.typed(), "set five minutes ahead: the night has begun")
+
     def test_retry_types_nothing_unless_safe(self):
         for kw in (dict(status="busy"), dict(screen="│ > half a thought\n"), dict(in_mode="1")):
             self.retry_setup(**kw)

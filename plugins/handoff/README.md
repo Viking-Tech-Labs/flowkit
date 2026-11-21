@@ -177,10 +177,13 @@ exists (the file's time moves, the text stays), so a chain that runs longer than
 unattended until `/handoff:back`. A flag written raw, its stamp alone on one line, still works: it
 is in effect from its stamp, set by `unknown`. Running `away` while a flag is set leaves it as it
 is. `handoff.py away-status` prints `away: since <stamp>` (in effect), `away: from <stamp> (set by
-<name> at <time>)` (not yet) or `away: off`. Whatever asks whether you are away means in effect:
-the closes' "unattended", the coordinators' "ask nothing", the reminders' silence and the ladder
-plugin's `max` gate. Only the keep-awake hook counts the flag from the moment it is written, so the
-computer stays up for the nudge at the effective time.
+<name> at <time>)` (not yet) or `away: off`. Whatever asks whether you can still be asked means in
+effect: the question gate, the closes' "unattended", the coordinators' "ask nothing" and the
+reminders' silence. What only needs to know that the night has begun counts the flag from the
+moment it is written, the five minutes included: the keep-awake hook (the computer stays up for
+the nudge at the effective time), the ladder plugin's `max` gate and `autoretry`, since
+`/handoff:close overnight spawn` launches within those minutes and an API error can end a turn in
+them.
 
 - **A last call first.** `away` types one line into every idle coordinator at once (`last call:
   the user goes away at 23:15. Ask now anything you need from them; …`), so a coordinator that
