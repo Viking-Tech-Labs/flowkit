@@ -151,6 +151,9 @@ REMIND_RING = ("reminder: from flowkit's tick, not the user. Send the user one p
 PARKED = CLAUDE / "flowkit" / "parked.json"  # flowkit-tmux's: the panes parked at a start-up prompt
 PARKED_FRESH = 300  # seconds after which that file says nothing: the tick that writes it has stopped
 PROMPT_LINE = re.compile(r"^[│|\s]*[>❯]\s?(.*?)[\s│|]*$")
+# what `capture-pane -e` adds to a row: a change of attributes (its codes are group 1), a link, any other sequence
+ESCAPE = re.compile(r"\x1b\[([\d;:]*)m|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[^@-~]*[@-~]")
+COLOUR = re.compile(r"\b[345]8;(?:5;\d*|2;\d*;\d*;\d*)")  # a colour's own numbers are no attributes
 DIALOG = re.compile(r"enter to (?:confirm|select|continue)|esc to (?!interrupt)\w+|^\s*(?:[❯>]\s*)?\d+\.\s", re.I | re.M)
 HEADING = "WHERE TO PICK UP"
 NAMES = ("PLAN.md", "BUILD-PLAN.md", "HANDOFF.md", "ROADMAP.md", "docs/PLAN.md", "docs/plan.md", "docs/HANDOFF.md")
@@ -864,10 +867,34 @@ def session_pane(pid):
     return found[0] if found and not found[1] else None
 
 
+def shown(pane):
+    """The rows a pane shows, each as (text, typed): the row as plain text, and the same row with
+    its dim characters blanked. Claude Code draws a prompt suggestion dim in an empty prompt box,
+    which a plain capture shows as typed text. tmux writes a change of attributes where it happens
+    and not again on the next row, so the capture is read as one stream."""
+    rows, dim = [], False
+    for line in tmux("capture-pane", "-p", "-e", "-t", pane).stdout.splitlines():
+        text = typed = ""
+        parts = ESCAPE.split(line)  # text, an attribute change's codes (None for another sequence), text, …
+        for part, codes in zip(parts[::2], [*parts[1::2], None]):
+            text, typed = text + part, typed + (" " * len(part) if dim else part)
+            for code in COLOUR.sub("c", codes).split(";") if codes is not None else ():
+                dim = code == "2" if code in ("", "0", "2", "22") else dim
+        rows.append((text, typed))
+    return rows
+
+
+def drafted(row):
+    """The text typed into the prompt box a shown row holds: what follows its prompt mark and is
+    not dim."""
+    m = PROMPT_LINE.match(row[0])
+    return row[1][m.start(1):m.end(1)].strip()
+
+
 def draft(pane):
     """Text sitting in the pane's prompt box (the last line that starts with the prompt mark)."""
-    lines = [l for l in tmux("capture-pane", "-p", "-t", pane).stdout.splitlines() if PROMPT_LINE.match(l)]
-    return bool(lines) and bool(PROMPT_LINE.match(lines[-1]).group(1))
+    rows = [row for row in shown(pane) if PROMPT_LINE.match(row[0])]
+    return bool(rows) and bool(drafted(rows[-1]))
 
 
 def bottom(pane):
@@ -883,13 +910,13 @@ def parked(pane):
     dialog rows sit below it (a menu's numbered options, its Enter or Esc hint), or it holds a
     draft. Only rows below the last prompt-box line count, so a dialog quoted in the conversation
     above it never does."""
-    rows = tmux("capture-pane", "-p", "-t", pane).stdout.splitlines()
-    last = max((i for i, row in enumerate(rows) if PROMPT_LINE.match(row)), default=None)
+    rows = shown(pane)
+    last = max((i for i, row in enumerate(rows) if PROMPT_LINE.match(row[0])), default=None)
     if last is None:
         return "no prompt box"
-    if DIALOG.search("\n".join(rows[last + 1:])):
+    if DIALOG.search("\n".join(row[0] for row in rows[last + 1:])):
         return "dialog"
-    return "draft" if PROMPT_LINE.match(rows[last]).group(1) else ""
+    return "draft" if drafted(rows[last]) else ""
 
 
 def type_line(pane, text):

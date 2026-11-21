@@ -883,7 +883,8 @@ class Handoff(unittest.TestCase):
         stub = self.tmp / "bin" / "tmux"
         stub.write_text("#!/bin/sh\ncase \"$1\" in\n"
                         "list-panes) printf '%s\\n' " + " ".join(f"'{101 + i} %{i + 1} 0'" for i in range(8)) + ";;\n"
-                        "capture-pane) if [ \"$4\" = %7 ]; then echo '│ > half typed'; else echo '│ > '; fi;;\n"
+                        "capture-pane) if [ \"$5\" = %7 ]; then echo '│ > half typed'; "
+                        "else printf '│ > \\033[2mreport now\\033[0m\\n'; fi;;\n"
                         f"*) echo tmux \"$@\" >> {self.calls};; esac\n")
         stub.chmod(0o755)
         self.usage_answer()
@@ -1562,7 +1563,11 @@ class Handoff(unittest.TestCase):
         self.limit_setup(reset=time.time() + 0.2, screen=quoted)
         self.api_error("rate_limit")
         self.assertIn("usage limit", self.sent(), "a dialog quoted above the prompt box is none")
-        for kw, state in ((dict(screen="│ > half a thought\n"), "draft"), (dict(screen="  1. Yes\n  2. No\n"), "no prompt box"),
+        self.limit_setup(reset=time.time() + 0.2, screen=self.box("\x1b[39m❯\xa0\x1b[2mdo the next slice\x1b[0m"))
+        self.api_error("rate_limit")
+        self.assertIn("usage limit", self.sent(), "a prompt suggestion is no draft")
+        for kw, state in ((dict(screen="│ > half a thought\n"), "draft"), (dict(screen=self.box("\x1b[39m❯\xa05")), "draft"),
+                          (dict(screen="  1. Yes\n  2. No\n"), "no prompt box"),
                           (dict(in_mode="1"), "copy mode"), (dict(status="busy"), "not idle")):
             self.limit_setup(reset=time.time() + 0.2, **kw)
             self.api_error("rate_limit")
@@ -1575,6 +1580,79 @@ class Handoff(unittest.TestCase):
         rec = self.rec_when(lambda r: r.get("handled"))
         self.assertEqual((rec["state"], self.sent(0.3)), ("unreachable", ""))
         self.assertIn("· not continued: it does not run in a tmux pane; it waits for you", self.log()[-1])
+
+    # a prompt box as Claude Code 2.1.330 draws it and tmux 3.7 captures it with `-e`: a rule, the
+    # prompt line, a rule, two status rows (their dim parts are no draft either)
+    RULE = "\x1b[38;5;244m" + "─" * 60
+    STATUS = ("\x1b[39m  \x1b[2m\x1b[38;5;246mmain\x1b[0m\x1b[38;5;246m   \x1b[36m▰▰▱▱▱▱▱▱▱▱ 18%\x1b[2m\x1b[38;5;246m · 179k/1.0M"
+              "\x1b[0m\x1b[38;5;246m   \x1b[2mOpus 5.5 xhigh\x1b[0m\n  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m · ↓ to manage\x1b[39m\n")
+
+    def box(self, line, below=""):
+        return f"{self.RULE}\n{line}\n{self.RULE}\n{below}{self.STATUS}"
+
+    def test_a_prompt_suggestion_is_no_draft(self):
+        """Claude Code draws its prompt suggestion dim in an empty box; a plain capture shows it as typed."""
+        captured = [  # the prompt line as captured from a live pane, why the box takes no line, what it is
+            ("\x1b[39m❯\xa0\x1b[2mship it\x1b[0m", "", "a suggestion only"),
+            ("\x1b[39m❯\xa0\x1b[2mTry \"fix lint errors\"\x1b[0m", "", "a new session's hint"),
+            ("\x1b[39m❯\xa05", "draft", "a draft"),
+            ("\x1b[39m❯\xa0[Pasted text #1 +6 lines]", "draft", "pasted text"),
+            ("\x1b[39m❯\xa0\x1b[38;5;153m/model\x1b[39m  \x1b[38;5;246m[model]\x1b[39m", "draft", "a command and its hint"),
+            ("\x1b[39m❯\xa0", "", "an empty box"),
+            ("\x1b[38;5;246m❯\xa0\x1b[39m", "", "an empty box, its mark grey"),
+            # built by hand from here on
+            ("\x1b[39m❯\xa0typed \x1b[2mand dim\x1b[0m", "draft", "typed text, dim text after it"),
+            ("\x1b[39m❯\xa0\x1b[38;5;2mgreen\x1b[39m", "draft", "2 as a colour of 256 is not dim"),
+            ("\x1b[39m❯\xa0\x1b[38;2;2;2;2mnearly black\x1b[39m", "draft", "nor as a part of an RGB colour"),
+            ("\x1b[39m❯\xa0\x1b[1;2mbold and dim\x1b[m", "", "dim among other attributes"),
+            ("\x1b[39m❯\xa0\x1b[2;3mdim\x1b[22m typed\x1b[0m", "draft", "22 ends dim"),
+            ("\x1b[39m❯\xa0\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\", "draft", "a link is text"),
+        ]
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            handoff = self.module()
+            calls = []
+
+            def see(screen):
+                def tmux(*args):
+                    calls.append(args)
+                    return subprocess.CompletedProcess(args, 0, screen, "")
+                return mock.patch.object(handoff, "tmux", tmux)
+
+            for line, why, what in captured:
+                with see(self.box(line)):
+                    self.assertEqual((handoff.parked("%7"), handoff.draft("%7")), (why, bool(why)), what)
+            self.assertEqual(set(calls), {("capture-pane", "-p", "-e", "-t", "%7")})
+            hint = "  \x1b[2mEnter to confirm · Esc to cancel\x1b[0m\n"
+            with see(self.box("\x1b[39m❯\xa0", below=hint)):
+                self.assertEqual(handoff.parked("%7"), "dialog", "a dialog's dim hint is still read")
+            # tmux writes an attribute where it changes and carries it over the end of a row
+            with see("\x1b[2m" + "─" * 20 + "\n\x1b[0m❯\xa0typed under a dim rule\n"):
+                self.assertEqual(handoff.parked("%7"), "draft")
+            with see("\x1b[2m" + "─" * 20 + "\n\x1b[0m❯\xa0\x1b[2msuggested\n" + "─" * 20 + "\n"):
+                self.assertEqual(handoff.parked("%7"), "")
+
+    @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+    def test_a_real_pane_tells_a_suggestion_from_a_draft(self):
+        """A throwaway tmux server: each pane draws a prompt box under a dim rule as wide as the pane,
+        so the rule's last cell is dim and the prompt row has to say that its own is not."""
+        sock = f"flowkit-box-{os.getpid()}"
+        real = lambda *a: subprocess.run(["tmux", "-L", sock, *a], capture_output=True, text=True)
+        self.addCleanup(real, "kill-server")
+        rule = "\\033[2m" + "─" * 20 + "\\033[0m"
+        boxes = {"a suggestion": ("\\033[2msuggested\\033[0m", ""), "a draft": ("typed", "draft"), "an empty box": ("", "")}
+        for i, (line, _) in enumerate(boxes.values()):
+            draw = f"printf '{rule}❯\\302\\240{line}\\n{rule}'; exec sleep 60"
+            real(*(["-f", "/dev/null", "new-session", "-d", "-x", "20", "-y", "6"] if i == 0 else ["new-window", "-d"]), draw)
+        with mock.patch.dict(os.environ, {**self.env, "FLOWKIT_TMUX_SOCKET": sock}, clear=True):
+            (self.tmp / "bin" / "tmux").unlink()
+            handoff = self.module()
+            panes = real("list-panes", "-s", "-F", "#{pane_id}").stdout.split()
+            self.assertEqual(len(panes), 3)
+            deadline = time.time() + 5
+            while time.time() < deadline and not all("❯" in real("capture-pane", "-p", "-t", p).stdout for p in panes):
+                time.sleep(0.05)
+            for pane, (what, (_, why)) in zip(panes, boxes.items()):
+                self.assertEqual((handoff.parked(pane), handoff.draft(pane)), (why, bool(why)), what)
 
     def test_limit_with_no_reset_known_is_tried_like_an_api_error_three_times(self):
         self.limit_setup(text="API Error: 429 rate_limit_error")
@@ -2139,7 +2217,8 @@ class Handoff(unittest.TestCase):
         stub = self.tmp / "bin" / "tmux"
         stub.write_text("#!/bin/sh\ncase \"$1\" in\n"
                         "list-panes) printf '%s\\n' " + " ".join(f"'{pid} {pane} 0'" for *_, pid, pane, _ in reporters if pane)
-                        + ";;\ncapture-pane) if [ \"$4\" = %9 ]; then echo '│ > half typed'; else echo '│ > '; fi;;\n"
+                        + ";;\ncapture-pane) if [ \"$5\" = %9 ]; then echo '│ > half typed'; "
+                        "else printf '│ > \\033[2mreport now\\033[0m\\n'; fi;;\n"
                         f"send-keys) echo tmux \"$@\" >> {self.calls}; f={self.tmp}/push$3; "
                         "if [ -f \"$f\" ]; then cat \"$f\" >> \"$(cat \"$f.to\")\"; fi;;\n"
                         f"*) echo tmux \"$@\" >> {self.calls};; esac\n")
