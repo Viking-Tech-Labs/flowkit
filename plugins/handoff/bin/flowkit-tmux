@@ -643,12 +643,8 @@ def relogged(rec):
     other ids than the record keeps."""
     if not rec.get("account"):
         return False
-    try:
-        who = json.loads((Path(rec.get("config") or Path.home()) / ".claude.json").read_text()).get("oauthAccount")
-    except (OSError, ValueError, AttributeError):
-        return False
-    return isinstance(who, dict) and bool(who.get("accountUuid")) and \
-        {"account": who["accountUuid"], "organization": who.get("organizationUuid")} != rec["account"]
+    who = account(Path(rec.get("config") or Path.home()) / ".claude.json")
+    return bool(who) and who != rec["account"]
 
 
 def limits():
