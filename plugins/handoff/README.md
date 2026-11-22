@@ -432,7 +432,11 @@ answer it once in a session of your own first.
 New in 0.10.0, off until you turn it on (`handoff.py conf remind on`, or `/handoff:setup`). New in
 0.10.1: a reminder that reached nobody is tried again after 10 minutes, not at every pass. New in
 0.10.2: an idle reporter whose prompt box shows Claude Code's prompt suggestion is rung (0.10.1
-read that dim text as a draft of yours, rang nobody and fell through to the next carrier).
+read that dim text as a draft of yours, rang nobody and fell through to the next carrier). New in
+0.10.3: a rung reporter waits 70 seconds before it pushes. Claude Code takes the typed ring line for
+you at that terminal and skipped the push the line asked for (`Not sent`), so no reminder reached
+the phone through a reporter; and an answer that says the phone got nothing (Remote Control off)
+no longer counts as sent.
 Claude Code pushes to your phone when a session waits on you, but some things that wait on you
 it cannot see: a pane parked at a start-up prompt has no session yet, a session a usage limit
 stopped that flowkit cannot continue (outside tmux, or three continues that ended on the limit
