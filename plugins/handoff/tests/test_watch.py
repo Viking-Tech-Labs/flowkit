@@ -248,7 +248,14 @@ class Poller(Watch):
         self.assertIn("CLAUDE_CONFIG_DIR", keys)
         self.watch("drop", "probe")
         self.until(lambda: self.pid() is None, "the poller to go with its last watch")
-        self.assertRaises(OSError, os.kill, pid, 0)
+
+        def ended():  # the pidfile goes a moment before the process does
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return True
+
+        self.until(ended, "the poller's process to end")
 
     def test_a_dead_pollers_pidfile_is_replaced_by_ensure(self):
         self.watch("ensure")
