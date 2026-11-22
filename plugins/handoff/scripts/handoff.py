@@ -142,9 +142,12 @@ REMIND = CLAUDE / "flowkit" / "remind.json"  # what the reminders have said: {on
 REMIND_IDLE = 10  # minutes without keyboard or mouse input after which the user is not at the computer
 REMIND_EVERY = 120  # minutes between two digests
 REMIND_DIR = CLAUDE / "flowkit" / "remind"  # each reminder's text as <stamp>.md; remind-latest.md beside the folder
-REMIND_WAIT = 90  # seconds a rung reporter has to show its push in its transcript before the next one is rung
+REMIND_QUIET = 70  # seconds a rung reporter waits before its push: Claude Code skips one sent within a minute of a typed line
+REMIND_WAIT = 150  # seconds a rung reporter has to show its push in its transcript before the next one is rung
 REMIND_RETRY = 10  # minutes before a reminder that nothing carried is tried again
-REMIND_RING = ("reminder: from flowkit's tick, not the user. Send the user one push notification now with the "
+REMIND_RING = ("reminder: from flowkit's tick, not the user. Claude Code skips a push for a minute after a line is typed "
+               "into a session, this one included, so first run `sleep {quiet}` with the Bash tool, run_in_background "
+               "true, and end the turn; when its completion notice arrives, send the user one push notification with the "
                "PushNotification tool (load it through ToolSearch if it is not loaded), its message word for word "
                'everything after "Message: "; then end the turn with "reminder sent" and nothing else. The full '
                "list: {path}. Message: {push}")
@@ -1800,8 +1803,9 @@ def pushed(sid, after):
 
 def remind_ring(row, line):
     """Ring one reporter: the line typed into its pane as the last call types it, then up to
-    REMIND_WAIT seconds for the answer to the push it sends. (sent, what happened); a push the tool
-    did not send ("Not sent — this terminal is active", an error) is not sent."""
+    REMIND_WAIT seconds for the answer to the push it sends after the wait the line asks for. (sent,
+    what happened); a push the tool did not send to the phone ("Not sent — this terminal is active",
+    "Mobile push not sent (Remote Control inactive)", an error) is not sent."""
     at = time.time()
     why = type_into(row, line)[1]
     if why:
@@ -1809,7 +1813,7 @@ def remind_ring(row, line):
     while True:
         result = pushed(row["sessionId"], at)
         if result is not None:
-            return not result.startswith(("Not sent", "error: ")), result
+            return "not sent" not in result.lower() and not result.startswith("error: "), result
         if time.time() - at >= REMIND_WAIT:
             return False, f"no push in {REMIND_WAIT} s"
         time.sleep(REMIND_WAIT / 18)
@@ -1819,7 +1823,7 @@ def remind_deliver(push, path):
     """Send the push through the first that carries it: the oldest idle reporter in a tmux pane whose
     story has no final report after its last close, then the next one; else the `notify` command of
     handoff.conf, the push on its stdin; else a macOS notification. Returns what carried it, or ""."""
-    line = REMIND_RING.format(path=home_short(path), push=push)
+    line = REMIND_RING.format(quiet=REMIND_QUIET, path=home_short(path), push=push)
     try:
         rows = [r for r in agents_json() if isinstance(r, dict)]
     except (OSError, subprocess.TimeoutExpired, ValueError):

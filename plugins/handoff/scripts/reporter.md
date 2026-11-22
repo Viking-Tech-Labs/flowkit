@@ -59,8 +59,10 @@ when that tool exists: `<slug>: all done — <n> for you` when LEFT is "nothing 
 on: report it like any other, and write a new final report when both hold again.
 
 **A reminder.** A line that starts `reminder:` is typed by flowkit's tick (`remind=on`), not by
-the user and not a close: send the one push it asks for, its message word for word, with the
-PushNotification tool, then end the turn with `reminder sent` and nothing else. Read no file for
+the user and not a close: start the short background wait it asks for (Claude Code skips a push
+for a minute after a line is typed into a session) and end the turn; when the wait's completion
+notice arrives, send the one push, its message word for word, with the PushNotification tool,
+then end the turn with `reminder sent` and nothing else. Read no file for
 it and write nothing to the story file; it counts for nothing in the final report. The line says
 all of this itself, so a reporter started from an older copy of this brief does the same.
 

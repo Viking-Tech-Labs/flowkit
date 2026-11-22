@@ -454,10 +454,14 @@ tmux kit's tick runs `handoff.py remind` at most once a minute, which
   1. a story's reporter (`reporter=on`): the oldest idle `<story>-report` in a tmux pane whose
      story has no final report after its last close; never a coordinator. One line is typed into
      its pane as the doorbells type it, only into a free prompt box: `reminder: from flowkit's
-     tick, not the user. Send the user one push notification now … Message: <the line>`. It counts
-     as sent once the reporter's transcript shows its PushNotification call and the tool's answer
-     within 90 seconds, and not when the tool answered `Not sent` (it skips a push while its
-     terminal is active); then the next reporter is rung. The line says what to do itself, so a
+     tick, not the user. … first run sleep 70 … run_in_background … when its completion notice
+     arrives, send the user one push notification … Message: <the line>`. The wait is there because
+     Claude Code takes a line typed into a session for you at that terminal and skips a push for a
+     minute after it (`Not sent`): the reporter starts a 70-second wait in the background, ends its
+     turn and pushes from the turn the end of the wait opens. It counts as sent once the reporter's
+     transcript shows its PushNotification call and the tool's answer within 150 seconds, and not
+     when the answer says `not sent` (the terminal active again, Remote Control off, pushes turned
+     off in `/config`); then the next reporter is rung. The line says what to do itself, so a
      reporter started before this version does it too.
   2. `notify=<command>` in `handoff.conf`: run through the shell with the line on its stdin, sent
      when it exits 0 (`notify=curl -s -d @- ntfy.sh/<your topic>`).

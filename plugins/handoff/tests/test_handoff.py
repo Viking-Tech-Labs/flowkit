@@ -2239,7 +2239,8 @@ class Handoff(unittest.TestCase):
             ("demo-coord", "interactive", "idle", 4000, "%6", 10), ("done-report", "interactive", "idle", 4002, "%12", 50),
             ("busy-report", "interactive", "busy", 4007, "%13", 60), ("bg-report", "background", "idle", 4008, None, 70),
             ("demo-report", "interactive", "idle", 4001, "%7", 100), ("draft-report", "interactive", "idle", 4005, "%9", 150),
-            ("quiet-report", "interactive", "idle", 4006, "%10", 170), ("side-report", "interactive", "idle", 4003, "%8", 200),
+            ("quiet-report", "interactive", "idle", 4006, "%10", 170), ("norc-report", "interactive", "idle", 4009, "%14", 180),
+            ("side-report", "interactive", "idle", 4003, "%8", 200),
             ("late-report", "interactive", "idle", 4004, "%11", 300)]
         self.agents([{"name": n, "kind": k, "status": s, "pid": pid, "sessionId": f"sid-{n}", "startedAt": t}
                      for n, k, s, pid, _, t in reporters]
@@ -2251,6 +2252,8 @@ class Handoff(unittest.TestCase):
         # what a reporter's push leaves in its transcript once the ring is typed into its pane
         for pane, sid, answer in (("%10", "sid-quiet-report", "Not sent — this terminal is active, so your output "
                                    "here already reaches the user"),
+                                  ("%14", "sid-norc-report", "Terminal notification sent. Mobile push not sent (Remote "
+                                   "Control inactive)."),
                                   ("%8", "sid-side-report", "Terminal notification sent. Mobile push requested.")):
             (self.tmp / f"push{pane}").write_text(self.push_answer(sid, answer, T + 60))
             (self.tmp / f"push{pane}.to").write_text(str(projects / f"{sid}.jsonl"))
@@ -2267,22 +2270,30 @@ class Handoff(unittest.TestCase):
             loader = importlib.machinery.SourceFileLoader("flowkit_handoff_ring", str(HANDOFF))
             handoff = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
             loader.exec_module(handoff)
+            # Claude Code skips a push sent within a minute of a typed line: the reporter waits longer
+            # than that before it pushes, and the window leaves it time for the wait and both turns
+            self.assertGreater(handoff.REMIND_QUIET, 60)
+            self.assertGreaterEqual(handoff.REMIND_WAIT, handoff.REMIND_QUIET + 60)
             handoff.REMIND_WAIT = 0.3
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 handoff.remind()
             lines = out.getvalue().splitlines()
-            self.assertEqual(lines[:4], ["ring demo-report: no push in 0.3 s", "ring draft-report: draft",
+            self.assertEqual(lines[:5], ["ring demo-report: no push in 0.3 s", "ring draft-report: draft",
                                          "ring quiet-report: Not sent — this terminal is active, so your output here "
                                          "already reaches the user",
+                                         "ring norc-report: Terminal notification sent. Mobile push not sent (Remote "
+                                         "Control inactive).",
                                          "ring side-report: Terminal notification sent. Mobile push requested."])
-            self.assertRegex(lines[4], r"^remind: sent through side-report \(.*/flowkit/remind/\d{8}-\d{6}\.md\)$")
-            self.assertEqual(len(lines), 5)
+            self.assertRegex(lines[5], r"^remind: sent through side-report \(.*/flowkit/remind/\d{8}-\d{6}\.md\)$")
+            self.assertEqual(len(lines), 6)
             typed = self.calls.read_text().splitlines()
-            self.assertEqual([t.split(" -l ")[0] for t in typed],
-                             ["tmux send-keys -t %7", "tmux send-keys -t %10", "tmux send-keys -t %8"])
+            self.assertEqual([t.split(" -l ")[0] for t in typed], ["tmux send-keys -t %7", "tmux send-keys -t %10",
+                                                                   "tmux send-keys -t %14", "tmux send-keys -t %8"])
             push = ("Waiting on you: a pane is parked at a start-up prompt: Accessing workspace: (tab demo, pane 2, "
                     "story demo) (+5 more in remind-latest.md)")
             self.assertTrue(typed[0].split(" -l ")[1].startswith("reminder: from flowkit's tick, not the user. "))
+            self.assertIn(f"so first run `sleep {handoff.REMIND_QUIET}` with the Bash tool, run_in_background true, and "
+                          "end the turn; when its completion notice arrives, send the user one push", typed[0])
             self.assertTrue(typed[0].endswith(f"Message: {push} ; run-shell sleep 0.5 ; send-keys -t %7 Enter"))
             files = list((self.tmp / "claude" / "flowkit" / "remind").glob("*.md"))
             self.assertEqual(len(files), 1)
@@ -2295,7 +2306,7 @@ class Handoff(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 handoff.remind()
             self.assertEqual(out.getvalue(), "remind: nothing to say\n", "said: nobody is rung again")
-            self.assertEqual(len(self.calls.read_text().splitlines()), 3)
+            self.assertEqual(len(self.calls.read_text().splitlines()), 4)
             # no tmux on this machine: every reporter is a miss, and the push falls through to notify
             (self.tmp / "claude" / "flowkit" / "remind.json").unlink()
             conf = {"remind": "on", "notify": "true"}
@@ -2305,7 +2316,7 @@ class Handoff(unittest.TestCase):
                 handoff.remind()
             lines = out.getvalue().splitlines()
             self.assertEqual(lines[:-2], [f"ring {n}-report: tmux or ps did not answer (FileNotFoundError)"
-                                          for n in ("demo", "draft", "quiet", "side", "late")])
+                                          for n in ("demo", "draft", "quiet", "norc", "side", "late")])
             self.assertEqual(lines[-2], "notify: sent")
             self.assertTrue(lines[-1].startswith("remind: sent through notify ("))
 
