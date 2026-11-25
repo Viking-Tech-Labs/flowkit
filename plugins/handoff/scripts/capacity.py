@@ -30,6 +30,8 @@ STOPPING = "stop"  # why the minute pass holds a resource (as launch:<its pid>) 
 STOP_TIMEOUT = 60  # seconds a stop command gets before its process group is killed
 STOP_TRIES = 5  # failed stops in one free spell, a pass apart, before the user is told
 QUEUED = 11  # the gate's exit code when a launch is queued, which flowkit-spawn exits with
+RETRY = 5 * 60  # a drained launch that ended with no session is tried again this long after
+RETRY_TRIES = 6  # failed tries of one queued launch before it leaves the queue and the user is told
 HOLD_STALE = 2 * 3600  # a load hold this old is ignored, as flowkit-spawn ignores it
 STATUS_VERSION = 3  # status.json's schema; the board reads it, plugins/board/tests/fixtures/capacity-status.ts shows it
 SPAN_MAX = 12 * 3600  # a slice span longer than this is a parked chain, not a slice: left out of the medians
@@ -534,6 +536,7 @@ def refresh(rows, t):
         if not mark["alive"]:
             mark["path"].unlink(missing_ok=True)
             log("reclaim", t, launching=mark["pid"], tree=mark.get("tree", ""), story=mark.get("story", ""))
+            requeue(mark, t)
     try:
         listed = json.loads((state_dir() / "status.json").read_text())["queue"]
     except (OSError, ValueError, KeyError, TypeError):
@@ -1087,10 +1090,12 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
     return 0, kind
 
 
-def reserve(pid, tree, story, name, needs, t, closer=None, work=""):
-    """Under the lock: the launching/<pid>.json marker (with the launch's kind of work), and needs
-    leased to launch:<pid> (the closer's own leases among them handed over)."""
-    write_json(state_dir() / "launching" / f"{pid}.json", {"tree": tree, "story": story, "name": name, "work": work})
+def reserve(pid, tree, story, name, needs, t, closer=None, work="", entry=None):
+    """Under the lock: the launching/<pid>.json marker (with the launch's kind of work, and a drained
+    launch's queue entry for requeue), and needs leased to launch:<pid> (the closer's own leases
+    among them handed over)."""
+    write_json(state_dir() / "launching" / f"{pid}.json", {"tree": tree, "story": story, "name": name, "work": work,
+                                                          **({"entry": entry} if entry else {})})
     for n in sorted(needs):
         write_json(state_dir() / "resources" / f"{n}.json",
                    {"session": f"{LAUNCH}{pid}", "name": name, "story": story, "tree": tree, "taken": t, "why": "launch"})
@@ -1107,6 +1112,9 @@ def launched(rows, pid, name=None, t=None):
     row = next((r for r in sorted(rows or [], key=lambda r: r.get("startedAt") or 0, reverse=True)
                 if name and r.get("name") == name and r.get("pid")), None)
     with lock():
+        if not name:
+            with contextlib.suppress(OSError, ValueError):
+                requeue(json.loads((state_dir() / "launching" / f"{pid}.json").read_text()), t)
         held = {n: lease for n, lease in leases().items() if lease["session"] == holder_id}
         for n, lease in sorted(held.items()):
             if row:
@@ -1121,6 +1129,43 @@ def launched(rows, pid, name=None, t=None):
     return 0, (f"{'handed ' + ', '.join(sorted(held)) + ' to ' + name if row else 'released ' + ', '.join(sorted(held))}"
                if held else "held nothing")
 
+
+def requeue(mark, t):
+    """Under the lock: a drained launch whose flowkit-spawn ended with no session (its marker holds
+    the queue entry) goes back in the queue under its id, keeping its place, tried again RETRY on;
+    the first line that try printed is the reason, in the log and, at the first failure, the story
+    file. After RETRY_TRIES failed tries it leaves the queue, the story file says so and the user
+    is told."""
+    e = mark.get("entry")
+    if not isinstance(e, dict) or not isinstance(e.get("id"), int):
+        return
+    why = ""
+    with contextlib.suppress(OSError):
+        with open(state_dir() / "launched" / f"{e['id']}.log", errors="replace") as f:
+            f.seek(e.get("log_at") or 0)
+            why = next((line.strip() for line in f if line.strip()), "")
+    why = why or "no session came up"
+    tries = (e.get("tries") or 0) + 1
+    name, story, when = e.get("name", ""), e.get("story", ""), time.strftime("%Y-%m-%d %H:%M", time.localtime(t))
+    if tries >= RETRY_TRIES:
+        log("give-up", t, id=e["id"], name=name, story=story, why=why, tries=tries)
+        story_note(story, f"> launch failed {name} · {when} · {why} · {tries} tries, not queued again: launch it by hand")
+        tell(f"{name}: its launch failed {tries} times ({why}); not queued again")
+        return
+    entry = {k: v for k, v in e.items() if k not in ("id", "log_at")}
+    write_json(state_dir() / "queue" / f"{e['id']}.json",
+               {**entry, "tries": tries, "retry": t + RETRY, "why": f"launch failed: {why}"})
+    log("requeue", t, id=e["id"], name=name, story=story, why=why, tries=tries, retry=t + RETRY)
+    if tries == 1:
+        story_note(story, f"> launch failed {name} · {when} · {why} · queued again, tried every {RETRY // 60} min")
+
+
+def story_note(story, line):
+    """A line appended to the story's file, as flowkit-spawn's own `> queued` and `> launched`."""
+    if story:
+        with contextlib.suppress(OSError):
+            with open(claude_dir() / "stories" / f"{story}.md", "a") as f:
+                f.write(line + "\n")
 
 def spawn(entry):
     """Launches a queued entry as a detached flowkit-spawn with its argv; its output goes to
@@ -1156,14 +1201,19 @@ def drain(rows, t=None, ending=()):
         held = set(leases())
         slot_wait, wanted = False, set()
         for e in sorted(entries(), key=lambda e: not e.get("watch")):
+            if (e.get("retry") or 0) > t:
+                continue
             needs = set(e.get("needs", []))
             work = e.get("work") or ""
             kind, weight = weigh(cfg, work, needs)
             room = e.get("continuation") or e.get("over_cap") or (
                 found is not None and not slot_wait and full(cfg, found, e["tree"], e.get("story", ""), kind, weight) is None)
             if room and not needs & (held | wanted):
+                out = state_dir() / "launched" / f"{e['id']}.log"
+                at = out.stat().st_size if out.exists() else 0
                 pid = spawn(e)
-                reserve(pid, e["tree"], e.get("story", ""), e.get("name", ""), needs, t, work=work)
+                reserve(pid, e["tree"], e.get("story", ""), e.get("name", ""), needs, t, work=work,
+                        entry={**e, "log_at": at})
                 (state_dir() / "queue" / f"{e['id']}.json").unlink(missing_ok=True)
                 log("dequeue", t, id=e["id"], name=e.get("name", ""), story=e.get("story", ""), pid=pid,
                     waited=round(t - (e.get("queued") or t)), tree=e["tree"], repo=repo_of(e["tree"]),

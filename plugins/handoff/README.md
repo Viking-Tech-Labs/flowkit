@@ -789,6 +789,14 @@ most every `FLOWKIT_CAPACITY_POLL` seconds, 15 by default). An empty queue costs
 read. With the background driver and no tmux there is no tick: the queue drains on those events
 only.
 
+**A queued launch that fails is queued again.** A drained `flowkit-spawn` that ends with no session
+(a refusal such as uncommitted changes in the tree, a tmux window it could not open, a process
+that died) puts its entry back under its id, so it keeps its place: tried again 5 minutes on,
+the first line that try printed as its `why` (`launch failed: …`), logged as `requeue`, and at the
+first failure a `> launch failed <name> · … · queued again` line in the story file. After 6 failed
+tries it leaves the queue (`give-up`), the story file says to launch it by hand and a notification
+tells you.
+
 **Waves.** `waves` and every queued ETA replay the drain's rules forward in time: the running
 chains end after their current slice and the `Left:` count of their latest launch, the queue goes
 first, then the batch in order; a new chain waits for a slot (for room for its weight, each running
@@ -862,9 +870,9 @@ pass it as `--against` to the battle test's report.
 State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/capacity/`: `resources/<name>.json` (the
 leases), `launching/<pid>.json` (an in-flight launch, counted while its pid lives), `queue/<id>.json`
 (a queued launch: its arguments, prompt, story, tree, needs, left, work, by, queued-at), `log.jsonl`
-(one line per take, release, free, reclaim, hold, stop, launch, queue, dequeue, gone, repoint, over-cap,
-test, limit, waves, audit, note and watch; `reclaim` when the holder died; `stop` is one try of a
-`stop` command, with the `resource`, `since` (what its free minutes were counted from), `minutes`,
+(one line per take, release, free, reclaim, hold, stop, launch, queue, dequeue, requeue, give-up, gone,
+repoint, over-cap, test, limit, waves, audit, note and watch; `reclaim` when the holder died; `stop`
+is one try of a `stop` command, with the `resource`, `since` (what its free minutes were counted from), `minutes`,
 `code` (the exit code, or `timeout`), `seconds`, `tries` and, when it failed, its last line of
 `output`; launch, queue and dequeue carry
 the repo, `Left:`, `Kind:` as `work` and, for a gate call, the launcher and its load-hold seconds; dequeue its `gap`;

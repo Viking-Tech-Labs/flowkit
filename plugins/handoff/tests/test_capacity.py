@@ -752,7 +752,7 @@ class Capacity(unittest.TestCase):
             self.assertEqual([e["name"] for e in first], ["sa-s2"])
             self.assertEqual(set(self.held().values()), {f"launch:{first[0]['pid']}"})
             self.assertEqual(capacity.drain(rows), [], "the second waits for both")
-            capacity.launched(rows, first[0]["pid"])  # its launch gave back (or its session closed)
+            capacity.launched(rows, first[0]["pid"], "sa-s2")  # its session came up and closed: not listed now
             self.assertEqual([e["name"] for e in capacity.drain(rows)], ["sb-s2"])
         self.assertEqual(capacity.entries(), [])
 
@@ -775,6 +775,42 @@ class Capacity(unittest.TestCase):
         self.assertLessEqual(self.log_events()[-1]["gap"], self.log_events()[-1]["waited"], "idle-with-queue's bound")
         status = json.loads((self.claude / "capacity" / "status.json").read_text())
         self.assertEqual([q["name"] for q in status["queue"]], ["q2-s1"])
+
+    def test_a_drained_launch_that_ends_with_no_session_is_queued_again(self):
+        app = self.repo("app")
+        self.story("demo", "")
+        self.assertEqual(capacity.gate(None, "4242", app, "demo", "demo-s1", "", ["demo"], {})[0], capacity.QUEUED)
+        out = self.claude / "capacity" / "launched" / "1.log"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("an earlier try's line\n")
+        pid = self.sleeper()
+
+        def window_taken(entry):
+            with open(out, "a") as f:
+                f.write("create window failed: index 37 in use\n")
+            return pid
+        t = float(int(time.time()))
+        with mock.patch.object(capacity, "spawn", side_effect=window_taken):
+            self.assertEqual([e["name"] for e in capacity.drain([], t=t)], ["demo-s1"])
+        capacity.launched([], pid, t=t + 5)  # flowkit-spawn ended before SPAWNED and gave back
+        (entry,) = capacity.entries()
+        self.assertEqual((entry["id"], entry["tries"], entry["retry"], entry["why"], entry["argv"]),
+                         (1, 1, t + 5 + capacity.RETRY, "launch failed: create window failed: index 37 in use", ["demo"]))
+        self.assertEqual((capacity.markers(), self.log_events()[-1]["event"]), ([], "requeue"))
+        self.assertIn("> launch failed demo-s1 · ", (self.claude / "stories" / "demo.md").read_text())
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        with mock.patch.object(capacity, "spawn", side_effect=lambda e: dead.pid):
+            self.assertEqual(capacity.drain([], t=t + 60), [], "not before its retry time")
+            self.assertEqual(len(capacity.drain([], t=t + 5 + capacity.RETRY)), 1)
+        # this flowkit-spawn died before it could give back: the next refresh finds its marker dead
+        with mock.patch.object(capacity, "tell") as told, mock.patch.object(capacity, "RETRY_TRIES", 2):
+            capacity.take([], "nobody", set(), t=t + 400)
+        self.assertEqual((capacity.entries(), capacity.markers()), ([], []))
+        self.assertEqual([e["event"] for e in self.log_events()][-2:], ["reclaim", "give-up"])
+        self.assertEqual(self.log_events()[-1]["why"], "no session came up")
+        self.assertIn("2 tries, not queued again", (self.claude / "stories" / "demo.md").read_text())
+        told.assert_called_once()
 
     def test_spawn_runs_the_entry_detached(self):
         self.assertTrue(capacity.queued() is False)

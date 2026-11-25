@@ -114,6 +114,8 @@ while [ $# -gt 0 ]; do
     *) prompt="$1"; shift ;;
   esac
 done
+# A queued launch gives back on every exit before SPAWNED, a refusal too: its entry is queued again.
+[ -z "$from_queue" ] || trap 'python3 "$me/scripts/capacity.py" launched --pid $$ >/dev/null 2>&1 || true' EXIT
 
 case "$driver" in
   tmux|background) ;;
