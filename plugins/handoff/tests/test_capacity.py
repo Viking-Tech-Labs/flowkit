@@ -989,6 +989,45 @@ class Capacity(unittest.TestCase):
         self.conf.write_text(self.conf.read_text().replace("kind simulator = test\nkind emulator = test\n", ""))
         self.assertEqual([c["state"] for c in capacity.chains(rows, t)], ["running", "running"])
 
+    def logged(self, event):
+        return [e["chains"] for e in self.log_events() if e["event"] == event]
+
+    def test_a_queue_and_an_over_cap_line_name_the_chains_counted_then(self):
+        app, rows, sid = self.full_machine()
+        self.assertEqual(capacity.take(rows, sid, {"emulator"})[0], 0)
+        other = {"name": "other-s1", "state": "busy", "holds": ["emulator"], "kind": "", "weight": 1}
+        pid = str(self.sleeper())
+        self.assertEqual(capacity.gate(rows, pid, app, "demo", "demo-s1", self.prompt("Needs: simulator"), [], {},
+                                       over_cap=True), (0, "new chain"))
+        self.assertEqual(self.logged("over-cap"), [[other]])
+        rows[0]["status"] = "idle"
+        self.assertEqual(capacity.gate(rows, "4243", self.repo("lib"), "side", "side-s1", "", [], {})[0], capacity.QUEUED)
+        self.assertEqual(self.logged("queue"), [[
+            {"name": "demo", "state": "launching", "holds": ["simulator"], "kind": "", "weight": 1},
+            {**other, "state": "idle"}]], "a launch in flight by its story, with what it took")
+        self.assertEqual(capacity.gate(None, "4244", self.repo("x"), "x", "x-s1", "", [], {})[0], capacity.QUEUED)
+        self.assertEqual(self.logged("queue")[1], None, "nothing was counted: claude agents did not answer")
+        capacity.gate(rows, "4245", self.repo("y"), "y", "y-s1", "", [], {}, dry=True)
+        self.assertEqual(len(self.logged("queue")), 2, "a dry run logs nothing")
+
+    def test_the_chains_on_a_queue_line_carry_kind_and_weight(self):
+        self.weighted()
+        t = time.time()
+        rows = []
+        self.launch(rows, "a", "Kind: implementation")
+        self.launch(rows, "b", "Kind: light\nNeeds: simulator")
+        rows[1]["status"] = "idle"
+        self.story("a", "> launched a-s1\n> launched a-review\n")
+        rows.append(self.row("a-review", "9" * 8 + "-4444-4444-4444-" + "4" * 12, self.tmp / "a", "idle", os.getpid()))
+        capacity.hold(rows, {"emulator"}, 30, t=t)
+        code, msg = self.launch(rows, "c", "Kind: implementation")
+        self.assertEqual(code, capacity.QUEUED)
+        self.assertRegex(msg, r"slots 10/8, implementation needs 2$")
+        self.assertEqual(self.logged("queue"), [[
+            {"name": "a-s1, a-review", "state": "busy", "holds": [], "kind": "implementation", "weight": 2},
+            {"name": "b-s1", "state": "idle", "holds": ["simulator"], "kind": "test", "weight": 4},
+            {"name": "yours", "state": "hold", "holds": ["emulator"], "kind": "test", "weight": 4}]])
+
     def test_a_launch_heavier_than_the_budget_starts_on_an_empty_machine(self):
         self.weighted(slots=3)
         rows = []

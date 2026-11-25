@@ -337,6 +337,26 @@ def held_by(chain, held):
         lease["session"] in sids or os.path.realpath(lease.get("tree") or "/") == chain["tree"])}
 
 
+def holders(found, held):
+    """The chains a gate call counted, for its log line (None while liveness is unknown): each
+    one's sessions by name (its story while it launches, `yours` for the user's test hold), `busy`
+    when one of them is and `idle` when none, what it holds, and the kind and weight it counts with."""
+    if found is None:
+        return None
+    out = []
+    for c in found:
+        if c["state"] == "stalled":
+            continue
+        mine = c["state"] == "hold"
+        out.append({"name": ", ".join(s["name"] for s in c["sessions"]) or ("yours" if mine else c["story"]),
+                    "state": c["state"] if c["state"] != "running" else
+                    "busy" if any(s["status"] == "busy" for s in c["sessions"]) else "idle",
+                    "holds": sorted(n for n, lease in held.items() if lease["session"] == ME) if mine
+                    else sorted(held_by(c, held)),
+                    "kind": c["kind"], "weight": c["weight"]})
+    return out
+
+
 def chains(rows, t=None, ending=(), cfg=None):
     """The working trees with a live story session in them, or None when liveness is unknown. A
     reporter or coordinator does not count, nor a session whose close is recorded unless it is busy
@@ -927,7 +947,8 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
     as is one whose needs are not all free, or one that would pass an earlier waiter; a chain's own
     next slice never waits for a slot, and --over-cap skips the slot count. The launch counts as
     its prompt's `Kind:` and what its needs imply (weigh); the kind goes on the log line, the
-    marker and the queue entry as `work`. Resources are taken all or none, for
+    marker and the queue entry as `work`. A `queue` and an `over-cap` log line name the chains
+    counted then (holders). Resources are taken all or none, for
     `launch:<pid>`, before anything waits: a continuation's closer hands over what it holds only
     when every need is free at once; otherwise it gives back all it holds and the launch is queued
     holding nothing, so two closers never wait on each other. A launch that passes leaves the
@@ -961,6 +982,7 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
             refresh(rows, t)
         found = chains(rows, t, cfg=cfg)
         waiting = entries()
+        leased = leases()
         why = None
         if not cont:
             room = "claude agents did not answer" if found is None else full(cfg, found, tree, *weigh(cfg, work, needs))
@@ -968,10 +990,10 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
                 room = "behind the queue"
             if room and over_cap:
                 if not dry:
-                    log("over-cap", t, name=name, story=story, tree=tree, why=room, **({"watch": watch} if watch else {}))
+                    log("over-cap", t, name=name, story=story, tree=tree, why=room, chains=holders(found, leased),
+                        **({"watch": watch} if watch else {}))
             else:
                 why = room
-        leased = leases()
         mine = {n for n, lease in leased.items() if sid and lease["session"] == sid}
         wanted = {n for e in waiting for n in e.get("needs", [])}
         busy = {n: leased[n] for n in needs if n in leased and not (cont and n in mine)}
@@ -1006,7 +1028,7 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
                         "work": work, **({"watch": watch} if watch else {})})
             log("queue", t, id=seq, name=name, story=story, tree=tree, needs=sorted(needs), why=why, by=by,
                 repo=repo_of(tree), left=left, launcher=me.get("name") or "", held=held, eta=start, work=work,
-                **({"watch": watch} if watch else {}))
+                chains=holders(found, leased), **({"watch": watch} if watch else {}))
             write_status(rows, t)
             return QUEUED, f"QUEUED #{position}, ~{clock(start)} · id={seq} · {why}"
         kind = "continuation" if cont else "watch launch" if watch else "new chain"
