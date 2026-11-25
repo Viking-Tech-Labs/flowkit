@@ -380,6 +380,28 @@ class Cache(Labels):
                 self.line()
             self.assertEqual(popen.call_count, 2)
 
+    def test_the_tick_runs_the_minute_pass_while_a_stop_line_exists(self):
+        conf = self.tmp / "capacity.conf"
+        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
+            self.line()
+            conf.write_text("[/Users/me/app]\nresource simulator = a device check\n# stop simulator = no\n")
+            self.ft.CACHE.unlink()
+            self.line()
+            self.assertEqual(popen.call_count, 0, "no stop line costs one file read")
+            conf.write_text("[/Users/me/app]\nresource simulator = a device check\nstop simulator = ./stop-devices\n")
+            self.ft.CACHE.unlink()
+            self.line()
+            self.assertEqual(popen.call_count, 1)
+            self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "capacity.py"), "idle"])
+            self.ft.CACHE.unlink()
+            self.line()
+            self.assertEqual(popen.call_count, 1, "at most once a minute")
+            old = time.time() - 61
+            os.utime(self.tmp / "capacity" / ".idle", (old, old))
+            self.ft.CACHE.unlink()
+            self.line()
+            self.assertEqual(popen.call_count, 2)
+
     def test_the_installed_copy_drains_through_the_installed_plugin(self):
         """The kit's copy in ~/.local/bin is no plugin (the resolver the kit puts in ~/.local/scripts
         notwithstanding): the drain starts the capacity.py of the newest handoff in

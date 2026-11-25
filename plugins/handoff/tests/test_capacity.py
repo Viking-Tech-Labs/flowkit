@@ -294,6 +294,224 @@ class Capacity(unittest.TestCase):
         self.assertEqual(self.cli("hold", "simulator", "--for", "me").returncode, 1)
         self.assertEqual(self.cli("release", "--for", "me").stdout.strip(), "held nothing")
 
+    def stops(self, command, more=""):
+        """Two devices, the simulator with a stop line: (the repo, the file a stub command writes)."""
+        app = self.repo("app")
+        self.conf.write_text(f"{more}[{app}]\nresource simulator = a device check\nresource emulator = a device check\n"
+                             f"stop simulator = {command}\n")
+        return app, self.tmp / "stopped"
+
+    def mark(self, name="simulator"):
+        return capacity.stamps().get(name, {}).get("state")
+
+    def test_a_stop_line_and_its_minutes(self):
+        app = self.repo("app")
+        self.conf.write_text(f"stop_minutes = 5\nstop early = no\n[{app}]\nresource simulator = s\n"
+                             "stop simulator = /Users/me/bin/stop-devices --all\nstop simulator = other\n"
+                             "stop simulator = /Users/me/bin/stop-devices --all\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cfg = capacity.load_config(self.conf)
+        self.assertEqual((cfg["stop_minutes"], cfg["stops"]), (5, {"simulator": "/Users/me/bin/stop-devices --all"}))
+        self.assertEqual([line.split(": ", 1)[1] for line in err.getvalue().splitlines()],
+                         ["a stop line belongs under a [<repo path>] section", "simulator already has another stop line"])
+        self.assertEqual(capacity.load_config(self.tmp / "none")["stop_minutes"], 20)
+
+    def test_a_resource_left_free_is_stopped_once(self):
+        app, out = self.stops(f"echo down >> {self.tmp / 'stopped'}")
+        a = "a" * 8 + "-5555-5555-5555-" + "5" * 12
+        rows = [self.row("demo-s1", a, app)]
+        self.agents(rows)
+        t = int(time.time())
+        self.assertEqual(capacity.idle(rows, t), [], "never leased: no clock")
+        self.assertIsNone(self.mark())
+        self.assertEqual(capacity.take(rows, a, {"simulator", "emulator"}, t=t)[0], 0)
+        capacity.idle(rows, t + 60)
+        self.assertEqual((self.mark(), self.mark("emulator")), ("held", None), "no stop line, no stamp")
+        capacity.release(rows, a, t=t + 120)
+        self.assertEqual(capacity.idle(rows, t + 180), [])
+        self.assertEqual(capacity.stamps()["simulator"], {"state": "free", "since": t + 180, "tries": 0})
+        self.assertEqual(capacity.idle(rows, t + 180 + 19 * 60), [])
+        self.assertFalse(out.exists())
+        said = capacity.idle(rows, t + 180 + 20 * 60)
+        self.assertEqual(out.read_text(), "down\n")
+        self.assertEqual(len(said), 1)
+        self.assertIn("simulator: stopped, free since", said[0])
+        stop = [e for e in self.log_events() if e["event"] == "stop"]
+        self.assertEqual([(e["resource"], e["since"], e["minutes"], e["code"], e["tries"]) for e in stop],
+                         [("simulator", t + 180, 20, 0, 1)])
+        self.assertEqual((self.mark(), self.held()), ("stopped", {}))
+        capacity.idle(rows, t + 3 * 3600)
+        self.assertEqual(out.read_text(), "down\n", "once per free spell")
+        r = self.cli("status")
+        self.assertIn("resource simulator · free · stopped ", r.stdout)
+        self.assertIn("resource emulator · free\n", r.stdout)
+        code, msg = capacity.take(rows, a, {"simulator"}, t=t + 4 * 3600)
+        self.assertEqual(code, 0)
+        self.assertRegex(msg, r"^took simulator; simulator was stopped at \d\d:\d\d, left free: start it first$")
+        capacity.idle(rows, t + 4 * 3600 + 60)
+        capacity.release(rows, a, t=t + 4 * 3600 + 120)
+        capacity.idle(rows, t + 4 * 3600 + 180)
+        capacity.idle(rows, t + 4 * 3600 + 180 + 20 * 60)
+        self.assertEqual(out.read_text(), "down\ndown\n", "the next lease starts the next spell")
+
+    def test_a_lease_a_test_hold_a_launch_or_a_command_keeps_it_up(self):
+        app, out = self.stops(f"echo down >> {self.tmp / 'stopped'}")
+        self.conf.write_text(self.conf.read_text() + "audit simulator = xcrun simctl\n")
+        a, b = ("a" * 8 + "-6666-6666-6666-" + "6" * 12, "b" * 8 + "-6666-6666-6666-" + "6" * 12)
+        rows = [self.row("demo-s1", a, app), self.row("other-s1", b, app)]
+        self.agents(rows)
+        t = int(time.time())
+
+        def spell(start):
+            """Taken, seen held, released, seen free at start + 120."""
+            self.assertEqual(capacity.take(rows, a, {"simulator"}, t=start)[0], 0)
+            capacity.idle(rows, start + 30)
+            capacity.release(rows, a, t=start + 60)
+            capacity.idle(rows, start + 120)
+            self.assertEqual(self.mark(), "free")
+            return start + 120
+
+        free = spell(t)
+        self.assertEqual(capacity.take(rows, b, {"simulator"}, t=free + 10 * 60)[0], 0)  # a session takes it
+        capacity.idle(rows, free + 25 * 60)
+        self.assertEqual((self.mark(), out.exists()), ("held", False))
+        capacity.release(rows, b, t=free + 26 * 60)
+        capacity.idle(rows, free + 27 * 60)
+        self.assertEqual(capacity.stamps()["simulator"]["since"], free + 27 * 60, "the clock starts again")
+        capacity.hold(rows, {"simulator"}, 60, t=free + 30 * 60)  # the user's test hold
+        capacity.idle(rows, free + 60 * 60)
+        self.assertEqual((self.mark(), out.exists()), ("held", False))
+        capacity.idle(rows, free + 91 * 60)  # the hold ran out: free from here
+        self.assertEqual(self.mark(), "free")
+        capacity.reserve(os.getpid(), str(app), "demo", "demo-s2", {"simulator"}, free + 100 * 60)  # a launch in flight
+        capacity.idle(rows, free + 200 * 60)
+        self.assertEqual((self.mark(), self.held(), out.exists()), ("held", {"simulator": f"launch:{os.getpid()}"}, False))
+        (self.claude / "capacity" / "resources" / "simulator.json").unlink()
+        (self.claude / "capacity" / "launching" / f"{os.getpid()}.json").unlink()
+        free = free + 201 * 60
+        capacity.idle(rows, free)
+        capacity.audit({"session_id": b, "cwd": str(app), "tool_input": {"command": "xcrun simctl install booted App.app"}},
+                       t=free + 15 * 60)  # a session's command without the lease
+        self.assertEqual(capacity.idle(rows, free + 20 * 60), [])
+        self.assertEqual(capacity.idle(rows, free + 34 * 60), [])
+        (self.claude / "capacity" / "queue").mkdir(parents=True, exist_ok=True)
+        entry = self.claude / "capacity" / "queue" / "7.json"
+        entry.write_text(json.dumps({"id": 7, "name": "next-s1", "tree": str(app), "needs": ["simulator"], "queued": free}))
+        self.assertEqual(capacity.idle(rows, free + 40 * 60), [], "a queued launch waits for it")
+        entry.unlink()
+        self.assertFalse(out.exists())
+        self.assertEqual(len(capacity.idle(rows, free + 41 * 60)), 1)
+        stop = [e for e in self.log_events() if e["event"] == "stop"]
+        self.assertEqual([(e["since"], e["minutes"]) for e in stop], [(free + 15 * 60, 26)])
+        capacity.audit({"session_id": b, "cwd": str(app), "tool_input": {"command": "xcrun simctl boot X"}},
+                       t=free + 50 * 60)
+        capacity.idle(rows, free + 120 * 60)
+        self.assertEqual((self.mark(), out.read_text()), ("stopped", "down\n"), "a command starts no clock")
+
+    def test_a_failing_stop_is_tried_five_times_then_told(self):
+        app, out = self.stops(f"echo no >> {self.tmp / 'stopped'}; echo still booted; exit 3")
+        told = self.tmp / "told"
+        stub = self.tmp / "bin" / "osascript"
+        stub.write_text(f"#!/bin/sh\nfor a; do last=$a; done\necho \"$last\" >> {told}\n")
+        stub.chmod(0o755)
+        a = "a" * 8 + "-7777-7777-7777-" + "7" * 12
+        rows = [self.row("demo-s1", a, app)]
+        self.agents(rows)
+        t = int(time.time())
+        capacity.take(rows, a, {"simulator"}, t=t)
+        capacity.idle(rows, t + 30)
+        capacity.release(rows, a, t=t + 60)
+        capacity.idle(rows, t + 120)
+        due = t + 120 + 20 * 60
+        for n in range(1, 5):
+            said = capacity.idle(rows, due + (n - 1) * 60)
+            self.assertIn(f"simulator: stop failed (exit 3), try {n} of 5", said[0])
+            self.assertEqual((self.mark(), self.held(), told.exists()), ("free", {}, False))
+        capacity.idle(rows, due + 4 * 60)
+        self.assertEqual(self.mark(), "failed")
+        self.assertEqual(told.read_text(), "simulator: stop failed (exit 3) after 5 tries; it is still up\n")
+        capacity.idle(rows, due + 5 * 60)
+        self.assertEqual(out.read_text(), "no\n" * 5, "the spell is over")
+        stop = [e for e in self.log_events() if e["event"] == "stop"]
+        self.assertEqual([(e["code"], e["tries"], e["output"]) for e in stop], [(3, n, "still booted") for n in range(1, 6)])
+        self.assertIn("resource simulator · free · stop failed (exit 3) ", self.cli("status").stdout)
+
+    def test_a_stop_runs_outside_the_lock_holding_the_resource_and_is_killed_when_slow(self):
+        b = "b" * 8 + "-8888-8888-8888-" + "8" * 12
+        took = self.tmp / "took"
+        app, _ = self.stops(f"python3 {CAPACITY} take simulator --session {b} > {took} 2>&1; echo $? >> {took}")
+        a = "a" * 8 + "-8888-8888-8888-" + "8" * 12
+        rows = [self.row("demo-s1", a, app), self.row("other-s1", b, app)]
+        self.agents(rows)
+        t = int(time.time())
+
+        def spell(start):
+            capacity.take(rows, a, {"simulator"}, t=start)
+            capacity.idle(rows, start + 30)
+            capacity.release(rows, a, t=start + 60)
+            capacity.idle(rows, start + 120)
+
+        spell(t - 3600)  # in the past: the command's own take reads the real clock
+        started = time.monotonic()
+        with mock.patch.dict(os.environ, {"FLOWKIT_CAPACITY_LOCK_WAIT": "5"}):
+            said = capacity.idle(rows, t)
+        self.assertLess(time.monotonic() - started, 4, "the take inside the command never waited for the lock")
+        self.assertIn("simulator: stopped", said[0])
+        answer = took.read_text()
+        self.assertIn("busy: simulator is held by idle stop since ", answer)
+        self.assertTrue(answer.endswith("\n1\n"), answer)
+        self.assertEqual(self.held(), {})
+        # a command that runs on: its whole group is killed, the lease goes only then, and it is a failure
+        mark = self.tmp / "survived"
+        self.conf.write_text(self.conf.read_text().split("stop simulator")[0] +
+                             f"stop simulator = (sleep 2; echo late > {mark}) & sleep 30\n")
+        spell(t + 3600)
+        with mock.patch.dict(os.environ, {"FLOWKIT_CAPACITY_STOP_TIMEOUT": "0.3"}):
+            said = capacity.idle(rows, t + 3 * 3600)
+        self.assertIn("simulator: stop failed (timeout), try 1 of 5", said[0])
+        self.assertEqual((self.mark(), self.held()), ("free", {}))
+        time.sleep(2.2)
+        self.assertFalse(mark.exists(), "the child of the command went with it")
+        # a lock nobody gives back: the pass leaves this minute out
+        fd = os.open(self.claude / "capacity" / ".lock", os.O_RDWR)
+        capacity.fcntl.flock(fd, capacity.fcntl.LOCK_EX)
+        try:
+            other = subprocess.run(["python3", "-c", f"import importlib.util as u, sys, json\n"
+                                    f"s = u.spec_from_file_location('c', {str(CAPACITY)!r}); c = u.module_from_spec(s); "
+                                    f"s.loader.exec_module(c)\nprint(json.dumps(c.idle([], {t + 4 * 3600})))"],
+                                   capture_output=True, text=True, env={**os.environ, "FLOWKIT_CAPACITY_STOP_TIMEOUT": "0.3"})
+        finally:
+            os.close(fd)
+        self.assertEqual((other.stdout.strip(), other.stderr), ("[]", ""))
+
+    def test_no_stop_line_and_nothing_to_watch_cost_no_snapshot(self):
+        app = self.devices()
+        a = "a" * 8 + "-9999-9999-9999-" + "9" * 12
+        rows = [self.row("demo-s1", a, app)]
+        self.agents(rows)
+        t = int(time.time())
+        capacity.take(rows, a, {"simulator"}, t=t)
+        self.agents([], "hang")
+        start = time.monotonic()
+        r = self.cli("idle")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertLess(time.monotonic() - start, 0.9, "no `claude agents` call without a stop line")
+        self.assertFalse((self.claude / "capacity" / "idle").exists())
+        capacity.release(rows, a, t=t + 60)
+        self.conf.write_text(self.conf.read_text() + "stop simulator = exit 0\n")
+        start = time.monotonic()
+        r = self.cli("idle")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertLess(time.monotonic() - start, 0.9, "nothing leased and no clock: no `claude agents` call")
+        self.agents(rows)
+        capacity.take(rows, a, {"simulator"}, t=t + 120)
+        self.assertEqual(self.cli("idle", at=t + 130).returncode, 0)
+        self.assertEqual(self.mark(), "held")
+        self.conf.write_text(self.conf.read_text().replace("stop simulator = exit 0\n", ""))
+        self.assertEqual(self.cli("idle", at=t + 190).returncode, 0)
+        self.assertEqual(capacity.stamps(), {}, "a stamp whose stop line went is removed")
+
     def test_a_busy_lock_is_waited_for_then_gone_on_without(self):
         self.devices()
         (self.claude / "capacity").mkdir(parents=True)

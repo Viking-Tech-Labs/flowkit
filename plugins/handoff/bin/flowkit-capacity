@@ -5,4 +5,5 @@
 #   flowkit-capacity release [<names>] [--session <id> | --for me]
 #   flowkit-capacity hold <names> --for me [--minutes 60]
 #   flowkit-capacity drain                              launch what the queue holds that can start now
+#   flowkit-capacity idle                               stop a resource with a `stop` line left free for its minutes
 exec python3 "$(dirname "$0")/../scripts/capacity.py" "$@"

@@ -538,6 +538,32 @@ def drain():
         pass
 
 
+def idle():
+    """A resource with a `stop` line in capacity.conf is stopped once it sat free for its minutes
+    (the README's "A free resource is stopped"): while the file has such a line, `capacity.py idle`
+    runs detached at most once a minute, and returns at once itself when no such resource is
+    leased or counting. Without one this costs one file read."""
+    try:
+        if not re.search(r"^\s*stop\s+\S+\s*=", (CONFIG / "capacity.conf").read_text(), re.M):
+            return
+    except OSError:
+        return
+    state = CLAUDE / "capacity"
+    try:
+        if time.time() - (state / ".idle").stat().st_mtime < 60:
+            return
+    except OSError:
+        pass
+    try:
+        state.mkdir(parents=True, exist_ok=True)
+        (state / ".idle").touch()
+        subprocess.Popen([sys.executable, str(plugin_root() / "scripts" / "capacity.py"), "idle"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+
+
 def watch():
     """An open watch needs its poller (scripts/watch.py): when its process is gone or its heartbeat,
     poller.pid's mtime, is older than three minutes, `watch.py run` starts detached, at most once a
@@ -741,6 +767,7 @@ def status_line():
         with contextlib.redirect_stdout(out):
             waiting()
         drain()
+        idle()
         watch()
         limits()
         logins()

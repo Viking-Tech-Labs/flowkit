@@ -21,11 +21,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-DEFAULTS = {"slots": 3, "slice_minutes": 50, "coordinator_growth": 300_000}
+DEFAULTS = {"slots": 3, "slice_minutes": 50, "coordinator_growth": 300_000, "stop_minutes": 20}
 STALL = 2 * 3600  # a story session idle this long with no close is shown as stalled and stops counting
 IDLE = 30 * 60  # a holder not busy with its transcript untouched this long gives its resources back
 ME = "me"  # the holder of the user's test hold
 LAUNCH = "launch:"  # holder prefix of what an in-flight flowkit-spawn holds: launch:<its pid>
+STOPPING = "stop"  # why the minute pass holds a resource (as launch:<its pid>) while its stop command runs
+STOP_TIMEOUT = 60  # seconds a stop command gets before its process group is killed
+STOP_TRIES = 5  # failed stops in one free spell, a pass apart, before the user is told
 QUEUED = 11  # the gate's exit code when a launch is queued, which flowkit-spawn exits with
 HOLD_STALE = 2 * 3600  # a load hold this old is ignored, as flowkit-spawn ignores it
 STATUS_VERSION = 3  # status.json's schema; the board reads it, plugins/board/tests/fixtures/capacity-status.ts shows it
@@ -52,6 +55,7 @@ RESOURCE = re.compile(r"^resource\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.*)$")
 SETTING = re.compile(r"^([a-z_]+)\s*=\s*(\S+)$")
 CHECK = re.compile(r"^check\s*=\s*(.+)$")  # a repo's own answer for the watches on its MRs (watch.py)
 AUDIT = re.compile(r"^audit\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.+)$")  # a resource's commands, for the audit hook
+STOP = re.compile(r"^stop\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.+)$")  # the command that stops a resource left free
 WEIGHT = re.compile(r"^weight\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(\S+)$")  # the slots a chain of a kind counts
 UNMARKED = re.compile(r"^unmarked\s*=\s*([A-Za-z0-9][A-Za-z0-9._-]*)$")  # the kind a session with no `Kind:` counts as
 IMPLIES = re.compile(r"^kind\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*([A-Za-z0-9][A-Za-z0-9._-]*)$")  # the kind a resource's holder counts as
@@ -75,10 +79,11 @@ def number(text):
 
 def load_config(path=None):
     """Machine keys, a `weight` per kind of work and the kind an `unmarked` session counts as, and a
-    `[<repo path>]` section per repo with its own `slots`, its resources and the kind each one's
-    holder counts as. A line that does not parse is skipped with one stderr line, so a typo never
+    `[<repo path>]` section per repo with its own `slots`, its resources, the kind each one's
+    holder counts as and the command that stops one left free (`stops`, by name: names are
+    machine-wide). A line that does not parse is skipped with one stderr line, so a typo never
     stops a launch."""
-    cfg = {**DEFAULTS, "weights": {}, "unmarked": "", "repos": {}}
+    cfg = {**DEFAULTS, "weights": {}, "unmarked": "", "repos": {}, "stops": {}}
     try:
         lines = (path or config_path()).read_text().splitlines()
     except OSError:
@@ -106,6 +111,11 @@ def load_config(path=None):
                 print(f"capacity.conf:{n}: an audit line belongs under a [<repo path>] section", file=sys.stderr)
             else:
                 section.setdefault("audit", {})[m.group(1)] = pattern
+        elif m := STOP.match(line):
+            if section is None:
+                print(f"capacity.conf:{n}: a stop line belongs under a [<repo path>] section", file=sys.stderr)
+            elif cfg["stops"].setdefault(m.group(1), m.group(2).strip()) != m.group(2).strip():
+                print(f"capacity.conf:{n}: {m.group(1)} already has another stop line", file=sys.stderr)
         elif m := CHECK.match(line):
             if section is None:
                 print(f"capacity.conf:{n}: a check belongs under a [<repo path>] section", file=sys.stderr)
@@ -431,12 +441,14 @@ def state_dir():
 
 
 @contextlib.contextmanager
-def lock():
+def lock(wait=None):
     """capacity/.lock, tried without blocking for FLOWKIT_CAPACITY_LOCK_WAIT (10 s), then gone on
-    without, with one stderr line: a stuck holder must never stall every launch."""
+    without, with one stderr line: a stuck holder must never stall every launch. Yields whether it
+    was got; with wait (seconds) it says nothing and leaves going on to the caller."""
     state_dir().mkdir(parents=True, exist_ok=True)
     fd = os.open(state_dir() / ".lock", os.O_RDWR | os.O_CREAT, 0o644)
-    deadline = time.monotonic() + float(os.environ.get("FLOWKIT_CAPACITY_LOCK_WAIT") or 10)
+    deadline = time.monotonic() + float(os.environ.get("FLOWKIT_CAPACITY_LOCK_WAIT") or 10 if wait is None else wait)
+    got = True
     try:
         while True:
             try:
@@ -444,10 +456,12 @@ def lock():
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    print("capacity: the lock stayed busy, going on without it", file=sys.stderr)
+                    got = False
+                    if wait is None:
+                        print("capacity: the lock stayed busy, going on without it", file=sys.stderr)
                     break
                 time.sleep(0.1)
-        yield
+        yield got
     finally:
         os.close(fd)
 
@@ -460,7 +474,7 @@ def write_json(path, data):
 
 
 def log(event, t=None, **fields):
-    """One line in capacity/log.jsonl: take, release, free, reclaim, hold."""
+    """One line in capacity/log.jsonl: take, release, free, reclaim, hold, stop."""
     state_dir().mkdir(parents=True, exist_ok=True)
     with open(state_dir() / "log.jsonl", "a") as f:
         f.write(json.dumps({"t": round(now() if t is None else t, 3), "event": event, **fields}) + "\n")
@@ -561,7 +575,9 @@ def take(rows, sid, names, why="take", t=None):
                        {"session": sid, **who, "taken": t, "why": why})
             log("take", t, resource=name, session=sid, holder=who["name"], why=why)
         write_status(rows, t)
-    return 0, f"took {', '.join(sorted(names))}"
+        down = "".join(f"; {n} was stopped at {clock(m['at'])}, left free: start it first"
+                       for n, m in sorted(stamps().items()) if n in names - mine and m.get("state") == "stopped")
+    return 0, f"took {', '.join(sorted(names))}{down}"
 
 
 def release(rows, sid, names=None, t=None):
@@ -672,7 +688,12 @@ def clock(t):
 
 
 def status_lines(data):
-    """One line for the slots, then one per repo limit, chain, resource, queued launch and watch."""
+    """One line for the slots, then one per repo limit, chain, resource, queued launch and watch. A
+    free resource the minute pass stopped, or could not stop, says so (from its stamp: status.json
+    does not carry it)."""
+    left = {n: f" · stopped {clock(m['at'])}" if m.get("state") == "stopped" else
+            f" · stop failed ({code_text(m.get('code'))}) {clock(m['at'])}"
+            for n, m in stamps().items() if m.get("state") in ("stopped", "failed")}
     if data["agents"] == "unknown":
         lines = [f"slots ?/{data['slots']} · claude agents did not answer: nothing is reclaimed, no new chain starts"]
     else:
@@ -688,7 +709,7 @@ def status_lines(data):
                      (f" · {who}" if who else f" · flowkit-spawn pid {c['pid']}") + counts)
     for r in data["resources"]:
         if not r["session"]:
-            lines.append(f"resource {r['name']} · free")
+            lines.append(f"resource {r['name']} · free{left.get(r['name'], '')}")
         elif r["session"] == ME:
             lines.append(f"resource {r['name']} · held for you until {clock(r['until'])} (test hold)")
         else:
@@ -1377,8 +1398,8 @@ def audit(payload, t=None):
     """The PreToolUse audit (decision 7): a Bash command matching a resource's `audit` pattern, from
     a session that does not hold that resource, is logged as `audit`. Patterns are machine-wide, as
     resource names are. Never denies and prints nothing; returns the resources logged."""
-    patterns = {}
-    for section in load_config()["repos"].values():
+    patterns, cfg = {}, load_config()
+    for section in cfg["repos"].values():
         patterns.update(section.get("audit", {}))
     command = (payload.get("tool_input") or {}).get("command") or ""
     hits = [n for n, p in sorted(patterns.items()) if p.search(command)]
@@ -1393,8 +1414,141 @@ def audit(payload, t=None):
             continue
         log("audit", t, resource=name, session=sid, holder=lease and (lease.get("name") or lease["session"]),
             command=command[:200], cwd=payload.get("cwd") or "")
+        if not lease and name in cfg["stops"]:
+            write_json(state_dir() / "idle" / f"{name}.used", now() if t is None else t)
         out.append(name)
     return out
+
+
+def stamps():
+    """capacity/idle/<name>.json, by name: what the minute pass knows of a resource with a `stop`
+    line. `held` while it is leased; `free` with `since` and the `tries` made once its lease ended;
+    `stopped` or `failed` with `at` (and `code`) once the spell is over, until its next lease."""
+    out = {}
+    for path in sorted((state_dir() / "idle").glob("*.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            out[path.stem] = data
+    return out
+
+
+def code_text(code):
+    return code if isinstance(code, str) else f"exit {code}"
+
+
+def run_stop(command):
+    """A stop command through `sh -c`, from the home directory, in a process group of its own and
+    with nothing in its environment that would pass for a Claude session; the whole group is
+    killed past FLOWKIT_CAPACITY_STOP_TIMEOUT (60 s). Returns its exit code (`timeout` then), its
+    seconds and its last line of output."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CLAUDE_PID", "TMUX_PANE") and not k.startswith("CLAUDE_CODE_")}
+    start = time.monotonic()
+    try:
+        proc = subprocess.Popen(["sh", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, cwd=Path.home(), env=env, start_new_session=True)
+    except OSError as e:
+        return 127, 0.0, str(e)
+    try:
+        out, _ = proc.communicate(timeout=float(os.environ.get("FLOWKIT_CAPACITY_STOP_TIMEOUT") or STOP_TIMEOUT))
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        out, _ = proc.communicate()
+        code = "timeout"
+    return code, time.monotonic() - start, (out.strip().splitlines() or [""])[-1][:200]
+
+
+def tell(text):
+    """One macOS notification; where there is no `osascript`, nothing."""
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        subprocess.run(["osascript", "-e", "on run argv", "-e", 'display notification (item 1 of argv) with title "flowkit"',
+                        "-e", "end run", text], capture_output=True, timeout=30)
+
+
+def idle_pending(cfg):
+    """Whether the minute pass has anything to look at: a resource with a `stop` line that is
+    leased, was when the pass last looked, or has its clock running; or a stamp for a name that
+    has no such line any more."""
+    marks = stamps()
+    return bool(set(marks) - set(cfg["stops"])) or any(
+        (state_dir() / "resources" / f"{n}.json").exists() or marks.get(n, {}).get("state") in ("held", "free")
+        for n in cfg["stops"])
+
+
+def idle(rows, t=None):
+    """The minute pass (`flowkit-capacity idle`, the tmux tick's): a resource with a `stop` line
+    whose lease ended and that sat free for `stop_minutes` is stopped, once per free spell. The
+    pass alone keeps the clock: under a lock it really got (else it leaves this minute out) it
+    drops the leases that are over, marks a leased resource `held`, starts the clock of a held one
+    that is free now, and counts it from the last command a session ran on it without a lease
+    since (the audit hook's stamp). A resource nobody ever leased has no clock; one a queued
+    launch waits for is left up. For a clock that ran out it takes the resource as
+    launch:<its own pid>, which every reader keeps while that pid lives, so nothing takes it
+    mid-stop; the command then runs outside the lock. Exit 0 ends the spell as `stopped`; anything
+    else is tried again by the next pass, STOP_TRIES times, then ends it as `failed` with one
+    notification. Every try is logged as `stop`. Returns a line per try."""
+    t = now() if t is None else t
+    cfg = load_config()
+    folder, me, due, said = state_dir() / "idle", f"{LAUNCH}{os.getpid()}", [], []
+    with lock(1) as got:
+        if not got:
+            return []
+        refresh(rows, t)
+        held, marks = leases(), stamps()
+        wanted = {n for e in entries() for n in e.get("needs", [])}
+        for name in set(marks) - set(cfg["stops"]):
+            (folder / f"{name}.json").unlink(missing_ok=True)
+            (folder / f"{name}.used").unlink(missing_ok=True)
+        for name, command in sorted(cfg["stops"].items()):
+            mark, lease = marks.get(name) or {}, held.get(name)
+            if lease:
+                if lease.get("why") != STOPPING and mark.get("state") != "held":
+                    write_json(folder / f"{name}.json", {"state": "held"})
+                continue
+            if mark.get("state") == "held":
+                mark = {"state": "free", "since": t, "tries": 0}
+                write_json(folder / f"{name}.json", mark)
+            if mark.get("state") != "free":
+                continue
+            try:
+                since = max(mark["since"], float((folder / f"{name}.used").read_text()))
+            except (OSError, ValueError):
+                since = mark["since"]
+            if name not in wanted and t - since >= cfg["stop_minutes"] * 60:
+                write_json(state_dir() / "resources" / f"{name}.json",
+                           {"session": me, "name": "idle stop", "story": "", "tree": "", "taken": t,
+                            "why": STOPPING, "until": t + STOP_TIMEOUT})
+                due.append((name, command, mark, since))
+        if rows is not None:
+            write_status(rows, t)
+    for name, command, mark, since in due:
+        code, seconds, last = run_stop(command)
+        tries = mark.get("tries", 0) + 1
+        with lock():
+            if leases().get(name, {}).get("session") == me:
+                (state_dir() / "resources" / f"{name}.json").unlink(missing_ok=True)
+            if code == 0:
+                mark = {"state": "stopped", "at": t, "since": since}
+            elif tries >= STOP_TRIES:
+                mark = {"state": "failed", "at": t, "since": since, "code": code}
+            else:
+                mark = {**mark, "tries": tries}
+            write_json(folder / f"{name}.json", mark)
+            log("stop", t, resource=name, since=since, minutes=round((t - since) / 60), code=code,
+                seconds=round(seconds, 1), tries=tries, **({"output": last} if code != 0 and last else {}))
+            if rows is not None:
+                write_status(rows, t)
+        if mark["state"] == "failed":
+            tell(f"{name}: stop failed ({code_text(code)}) after {tries} tries; it is still up")
+        said.append(f"{name}: " + ("stopped" if code == 0 else
+                                   f"stop failed ({code_text(code)}), try {tries} of {STOP_TRIES}")
+                    + f", free since {clock(since)}")
+    return said
 
 
 def drain_gap(t):
@@ -1798,6 +1952,7 @@ def main(argv=None):
     p.add_argument("kind", choices=["collision"])
     p.add_argument("text")
     sub.add_parser("audit", help="the PreToolUse hook: log a resource command from a session without the lease")
+    sub.add_parser("idle", help="the minute pass: stop a resource with a `stop` line that sat free for its minutes")
     args = parser.parse_args(argv)
 
     if args.cmd == "audit":
@@ -1846,7 +2001,13 @@ def main(argv=None):
 
     if args.cmd == "drain" and not queued():
         return 0  # an empty queue costs one directory read: no snapshot, no lock
+    if args.cmd == "idle" and not idle_pending(load_config()):
+        return 0  # no `stop` line, or nothing leased and no clock running: no snapshot, no lock
     rows = snapshot()  # before the lock, never under it
+    if args.cmd == "idle":
+        for line in idle(rows):
+            print(line)
+        return 0
     if args.cmd == "drain":
         for e in drain(rows, ending=set(args.closed)):
             print(f"launched #{e['id']} {e.get('name', '')} (flowkit-spawn pid {e['pid']})")
