@@ -39,6 +39,7 @@ ON_GREEN = re.compile(r"merges on green", re.I)  # how a gate starts that waits 
 DEVICE = re.compile(r"device", re.I)  # anywhere in a gate: a device test
 NEEDS = re.compile(r"(?:^|\s{2,})Needs:\s*(.*?)\s*(?=\s{2,}\S+:|$)", re.M)  # a prompt header's resources
 LEFT = re.compile(r"(?:^|\s{2,})Left:\s*(\d+)", re.M)  # a prompt header's slices left after this one
+KIND = re.compile(r"(?:^|\s{2,})Kind:\s*([A-Za-z0-9][A-Za-z0-9._-]*)", re.M)  # a prompt header's kind of work
 SESSION_LINE = re.compile(r"^Session: ([0-9a-f-]{36})\b", re.M)  # a recorded close names its session
 HEADING = re.compile(r"^## (.+?) · \d{4}-\d\d-\d\d", re.M)  # a close section, or the reporter's final report
 PROMISED = re.compile(r"^Next: (?:spawned|started|watching) (.*)$", re.M)  # the sessions a close launched, the watches it registered
@@ -50,6 +51,9 @@ RESOURCE = re.compile(r"^resource\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.*)$")
 SETTING = re.compile(r"^([a-z_]+)\s*=\s*(\S+)$")
 CHECK = re.compile(r"^check\s*=\s*(.+)$")  # a repo's own answer for the watches on its MRs (watch.py)
 AUDIT = re.compile(r"^audit\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.+)$")  # a resource's commands, for the audit hook
+WEIGHT = re.compile(r"^weight\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(\S+)$")  # the slots a chain of a kind counts
+UNMARKED = re.compile(r"^unmarked\s*=\s*([A-Za-z0-9][A-Za-z0-9._-]*)$")  # the kind a session with no `Kind:` counts as
+IMPLIES = re.compile(r"^kind\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*([A-Za-z0-9][A-Za-z0-9._-]*)$")  # the kind a resource's holder counts as
 SINCE = re.compile(r"^(\d+(?:\.\d+)?)([dhm])$")  # report --since 7d, 36h, 90m
 DAY = 24 * 3600
 NIGHT_FROM, NIGHT_TO = 22, 8  # the report's night, local hours
@@ -69,14 +73,16 @@ def number(text):
 
 
 def load_config(path=None):
-    """Machine keys, and a `[<repo path>]` section per repo with its own `slots` and its resources.
-    A line that does not parse is skipped with one stderr line, so a typo never stops a launch."""
-    cfg = {**DEFAULTS, "repos": {}}
+    """Machine keys, a `weight` per kind of work and the kind an `unmarked` session counts as, and a
+    `[<repo path>]` section per repo with its own `slots`, its resources and the kind each one's
+    holder counts as. A line that does not parse is skipped with one stderr line, so a typo never
+    stops a launch."""
+    cfg = {**DEFAULTS, "weights": {}, "unmarked": "", "repos": {}}
     try:
         lines = (path or config_path()).read_text().splitlines()
     except OSError:
         return cfg
-    section = None
+    section, unmarked = None, None
     for n, raw in enumerate(lines, 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -104,6 +110,30 @@ def load_config(path=None):
                 print(f"capacity.conf:{n}: a check belongs under a [<repo path>] section", file=sys.stderr)
             else:
                 section["check"] = m.group(1).strip()
+        elif m := WEIGHT.match(line):
+            if section is not None:
+                print(f"capacity.conf:{n}: a weight belongs above the first [<repo path>] section", file=sys.stderr)
+                continue
+            try:
+                weight = number(m.group(2))
+            except ValueError:
+                weight = -1
+            if weight < 0:
+                print(f"capacity.conf:{n}: not a weight: {m.group(2)}", file=sys.stderr)
+            else:
+                cfg["weights"][m.group(1).lower()] = weight
+        elif m := UNMARKED.match(line):
+            if section is not None:
+                print(f"capacity.conf:{n}: unmarked belongs above the first [<repo path>] section", file=sys.stderr)
+            else:
+                unmarked = n, m.group(1).lower()
+        elif m := IMPLIES.match(line):
+            if section is None:
+                print(f"capacity.conf:{n}: a kind line belongs under a [<repo path>] section", file=sys.stderr)
+            elif m.group(2).lower() not in cfg["weights"]:
+                print(f"capacity.conf:{n}: no weight line for kind {m.group(2)}", file=sys.stderr)
+            else:
+                section.setdefault("kinds", {})[m.group(1)] = m.group(2).lower()
         elif (m := SETTING.match(line)) and (m.group(1) in DEFAULTS if section is None else m.group(1) in ("slots", "checkouts")):
             try:
                 (cfg if section is None else section)[m.group(1)] = number(m.group(2))
@@ -111,6 +141,10 @@ def load_config(path=None):
                 print(f"capacity.conf:{n}: not a number: {m.group(2)}", file=sys.stderr)
         else:
             print(f"capacity.conf:{n}: not understood: {line}", file=sys.stderr)
+    if unmarked and unmarked[1] in cfg["weights"]:
+        cfg["unmarked"] = unmarked[1]
+    elif unmarked:
+        print(f"capacity.conf:{unmarked[0]}: no weight line for kind {unmarked[1]}", file=sys.stderr)
     for repo, section in cfg["repos"].items():
         if section.get("checkouts") == 1:
             section["checkout"] = re.sub(r"[^A-Za-z0-9._-]", "-", os.path.basename(repo)).lstrip("-._") + "-checkout"
@@ -146,6 +180,21 @@ def checkout(cfg, tree):
 def declared(cfg):
     """Every resource name any repo declares: names are machine-wide."""
     return {name for section in cfg["repos"].values() for name in section["resources"]}
+
+
+def implied(cfg, names):
+    """The kinds the resources in names make their holder count as (`kind <resource> = <kind>`;
+    names are machine-wide)."""
+    return sorted({k for section in cfg["repos"].values() for n, k in section.get("kinds", {}).items() if n in names})
+
+
+def weigh(cfg, kind="", names=()):
+    """What a chain counts toward the slots, as (kind, weight): the heavier of its own kind (one
+    with no `weight` line, or none, is the `unmarked` line's; without that line it counts 1) and
+    the kinds the resources in names imply. With no `weight` line every chain counts 1."""
+    weights = cfg.get("weights") or {}
+    kinds = [kind if kind in weights else cfg.get("unmarked") or "", *implied(cfg, names)]
+    return max(((k, weights.get(k, 1)) for k in kinds), key=lambda kw: kw[1])
 
 
 def claude_dir():
@@ -597,23 +646,34 @@ def status(rows, t=None):
     return status_data(rows, t)
 
 
-def prompt_header(path):
-    """The resources a prompt's `Needs:` line names (`none` is none) and the slices its `Left:`
-    line says are left after this one (None without one), read from the header only: the lines
-    before the prompt's first blank one."""
+def prompt_head(path):
+    """A prompt's header: the lines before its first blank one; "" when it cannot be read."""
     try:
         text = Path(path).read_text(errors="replace")
     except OSError:
-        return set(), None
+        return ""
     head = []
     for line in text.splitlines():
         if not line.strip():
             break
         head.append(line)
-    head = "\n".join(head)
+    return "\n".join(head)
+
+
+def prompt_header(path):
+    """The resources a prompt's `Needs:` line names (`none` is none) and the slices its `Left:`
+    line says are left after this one (None without one), read from the header only."""
+    head = prompt_head(path)
     needs = NEEDS.search(head)
     left = LEFT.search(head)
     return (names_arg([needs.group(1)]) - {"none", "-"} if needs else set()), (int(left.group(1)) if left else None)
+
+
+def prompt_kind(path):
+    """The kind of work a prompt's `Kind:` line names, in lower case ("" without one), read from
+    the header only."""
+    kind = KIND.search(prompt_head(path))
+    return kind.group(1).lower() if kind else ""
 
 
 def entries():

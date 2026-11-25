@@ -1,7 +1,9 @@
 """Run with `python3 -m unittest discover plugins/handoff/tests`. Each test gets its own config dir,
 claude dir and temp git repos, and a stub `claude` whose `agents` answer the test sets (a list, a
 failure or a hang), so nothing reaches a real session or the user's files."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -834,6 +836,54 @@ class Capacity(unittest.TestCase):
         self.cli("limit", str(lib), "0", at=t)
         self.assertEqual(capacity.load_config()["repos"][str(lib)]["slots"], 1)
         self.assertEqual([(e["event"], e["delta"]) for e in self.log_events()], [("limit", -1), ("limit", -1), ("limit", 0)])
+
+    def weighted(self, slots=8):
+        """Slots counted by weight: light 1, implementation 2, test 4, an unmarked session an
+        implementation; app declares the devices, and holding one makes a chain a test."""
+        app = self.repo("app")
+        self.conf.write_text(f"slots = {slots}\nweight light = 1\nweight implementation = 2\nweight test = 4\n"
+                             f"unmarked = implementation\n[{app}]\nresource simulator = a device check\n"
+                             "resource emulator = a device check\nkind simulator = test\nkind emulator = test\n")
+        return app
+
+    def test_weight_lines_the_unmarked_kind_and_what_a_resource_implies(self):
+        app = self.weighted()
+        cfg = capacity.load_config(self.conf)
+        self.assertEqual((cfg["slots"], cfg["weights"], cfg["unmarked"]),
+                         (8, {"light": 1, "implementation": 2, "test": 4}, "implementation"))
+        self.assertEqual(capacity.repo_section(cfg, app)["kinds"], {"simulator": "test", "emulator": "test"})
+        self.assertEqual(capacity.implied(cfg, {"simulator", "backend"}), ["test"])
+        self.assertEqual([capacity.weigh(cfg, *a) for a in (("light",), ("implementation",), ("",), ("typo",),
+                                                            ("light", {"simulator"}), ("test", {"emulator"}))],
+                         [("light", 1), ("implementation", 2), ("implementation", 2), ("implementation", 2),
+                          ("test", 4), ("test", 4)])
+        # no weight line: as before, every chain counts 1 whatever its kind and whatever it holds
+        self.conf.write_text(f"slots = 5\n[{app}]\nresource simulator = s\n")
+        cfg = capacity.load_config(self.conf)
+        self.assertEqual((cfg["slots"], cfg["weights"], cfg["unmarked"]), (5, {}, ""))
+        self.assertEqual([capacity.weigh(cfg, k, n) for k, n in (("", ()), ("test", {"simulator"}))], [("", 1), ("", 1)])
+        # a bad line is skipped with one stderr line each, and the rest of the file stands
+        self.conf.write_text("weight Light = 1\nweight heavy = lots\nweight odd = -1\nkind simulator = light\n"
+                             f"unmarked = review\n[{app}]\nweight test = 4\nunmarked = light\nkind simulator = test\n"
+                             "kind emulator = LIGHT\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cfg = capacity.load_config(self.conf)
+        self.assertEqual((cfg["weights"], cfg["unmarked"], cfg["repos"][str(app)]["kinds"]),
+                         ({"light": 1}, "", {"emulator": "light"}))
+        self.assertEqual(len(err.getvalue().splitlines()), 7, err.getvalue())
+        self.assertEqual([capacity.weigh(cfg, k) for k in ("", "typo")], [("", 1), ("", 1)],
+                         "with no unmarked line an unmarked session counts 1")
+
+    def test_the_prompt_headers_kind(self):
+        self.assertEqual(capacity.prompt_kind(self.prompt("Repo: /r   Session: s2\nKind: Implementation\nLeft: 2")),
+                         "implementation")
+        self.assertEqual(capacity.prompt_kind(self.prompt("Repo: /r\nModel: opus   Kind: test   Left: 0")), "test")
+        self.assertEqual(capacity.prompt_kind(self.prompt("Repo: /r\nNeeds: none")), "")
+        body = self.tmp / "body.md"
+        body.write_text("Repo: /r\n\nKind: test\n")
+        self.assertEqual(capacity.prompt_kind(body), "", "the body is not the header")
+        self.assertEqual(capacity.prompt_kind(self.tmp / "missing.md"), "")
 
     def write_log(self, *events):
         path = self.claude / "capacity" / "log.jsonl"
