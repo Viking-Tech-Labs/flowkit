@@ -32,7 +32,8 @@ STATUS_VERSION = 3  # status.json's schema; the board reads it, plugins/board/te
 SPAN_MAX = 12 * 3600  # a slice span longer than this is a parked chain, not a slice: left out of the medians
 MIN_SPANS = 3  # a repo with fewer slice spans in the log than this is planned at slice_minutes
 OVERDUE = 10 * 60  # a running slice already past its median is given this long yet
-ITEM = re.compile(r"^(?P<name>[^=\s]+)=(?P<tree>.+?)(?::(?P<slices>\d+)(?::(?P<needs>[A-Za-z0-9._+,-]*))?)?$")
+ITEM = re.compile(r"^(?P<name>[^=\s]+)=(?P<tree>.+?)(?::(?P<slices>\d+)(?::(?P<needs>[A-Za-z0-9._+,-]*)"
+                  r"(?::(?P<kind>[A-Za-z0-9][A-Za-z0-9._-]*))?)?)?$")
 TO_TEST = re.compile(r"\bto test\b", re.I)  # a test-queue state that waits on the user's testing
 GATE = re.compile(r"^gate:\s*", re.I)  # how a test-queue line's gate field starts: what the item waits for before it merges
 ON_GREEN = re.compile(r"merges on green", re.I)  # how a gate starts that waits on nobody; any other, or none, waits on the user
@@ -197,6 +198,12 @@ def weigh(cfg, kind="", names=()):
     return max(((k, weights.get(k, 1)) for k in kinds), key=lambda kw: kw[1])
 
 
+def within(used, weight, allowed):
+    """Whether weight more fits into allowed with used counted: within it, or alone, so a launch
+    heavier than the whole budget still starts once nothing else counts."""
+    return used + weight <= allowed or not used and allowed > 0
+
+
 def claude_dir():
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 
@@ -323,15 +330,27 @@ def markers():
     return out
 
 
-def chains(rows, t=None, ending=()):
+def held_by(chain, held):
+    """The resources a chain holds: a lease of one of its sessions, or one taken in its tree."""
+    sids = {s["session"] for s in chain.get("sessions", [])}
+    return {n for n, lease in held.items() if lease["session"] != ME and (
+        lease["session"] in sids or os.path.realpath(lease.get("tree") or "/") == chain["tree"])}
+
+
+def chains(rows, t=None, ending=(), cfg=None):
     """The working trees with a live story session in them, or None when liveness is unknown. A
     reporter or coordinator does not count, nor a session whose close is recorded unless it is busy
     again (a hand resume), nor one in ending (a close being recorded right now: still busy); a tree whose sessions all sat 2 h with no close is `stalled` and does not
     count. A live launching/ marker holds its tree as `launching`. Sessions sharing a tree (a review
-    beside the next slice) share its slot."""
+    beside the next slice) share its slot. Each chain carries the `kind` and `weight` it counts
+    with (weigh): the heaviest of its sessions' kinds (a session's latest start in the log, a
+    marker's own; unmarked in neither) and of what the resources it holds imply. The user's test
+    hold on a resource that implies a kind is one more entry, `hold`, with no tree: it counts
+    that weight once, until the hold runs out."""
     if rows is None:
         return None
     t = now() if t is None else t
+    cfg = load_config() if cfg is None else cfg
     members, closed = stories()
     coords = coordinators()
     trees = {}
@@ -352,23 +371,39 @@ def chains(rows, t=None, ending=()):
                                   "stalled": not busy and touched is not None and t - touched > STALL})
     for chain in trees.values():
         chain["state"] = "stalled" if all(s["stalled"] for s in chain["sessions"]) else "running"
+    launching = {}
     for mark in markers():
         tree = mark.get("tree")
         if mark["alive"] and tree and os.path.realpath(tree) not in trees:
             tree = os.path.realpath(tree)
             trees[tree] = {"tree": tree, "repo": main_checkout(tree), "story": mark.get("story") or "",
                            "sessions": [], "state": "launching", "pid": mark["pid"]}
-    return sorted(trees.values(), key=lambda c: c["tree"])
+            launching[tree] = mark.get("work") or ""
+    held = leases()
+    works = {s["name"]: s["work"] for s in starts(events())} if cfg["weights"] else {}
+    for chain in trees.values():
+        own = [works.get(s["name"], "") for s in chain["sessions"]] or [launching[chain["tree"]]]
+        chain["kind"], chain["weight"] = max((weigh(cfg, work, held_by(chain, held)) for work in own),
+                                             key=lambda kw: kw[1])
+    found = sorted(trees.values(), key=lambda c: c["tree"])
+    mine = {n: lease.get("until") or 0 for n, lease in held.items()
+            if lease["session"] == ME and (lease.get("until") or 0) > t and implied(cfg, [n])}
+    if mine:
+        kind = max(implied(cfg, mine), key=cfg["weights"].get)
+        found.append({"tree": "", "repo": "", "story": "", "sessions": [], "pid": None, "state": "hold",
+                      "kind": kind, "weight": cfg["weights"][kind], "until": max(mine.values())})
+    return found
 
 
 def slots(cfg, found):
-    """Slots used and allowed, for the machine and per configured repo; None when unknown."""
+    """Slots used (the chains' weights, summed) and allowed, for the machine and per configured
+    repo; None when unknown."""
     if found is None:
         return None
     counted = [c for c in found if c["state"] != "stalled"]
-    repos = {path: {"slots": section["slots"], "used": sum(c["repo"] == path for c in counted)}
+    repos = {path: {"slots": section["slots"], "used": sum(c["weight"] for c in counted if c["repo"] == path)}
              for path, section in cfg["repos"].items() if "slots" in section}
-    return {"slots": cfg["slots"], "used": len(counted), "repos": repos}
+    return {"slots": cfg["slots"], "used": sum(c["weight"] for c in counted), "repos": repos}
 
 
 def state_dir():
@@ -556,7 +591,7 @@ def status_data(rows, t):
     """The snapshot status.json holds: slots, chains, resources, the queue, oldest first, and the
     open watches."""
     cfg = load_config()
-    found = chains(rows, t)
+    found = chains(rows, t, cfg=cfg)
     used = slots(cfg, found)
     held = leases()
     resources = []
@@ -612,9 +647,13 @@ def status_lines(data):
         lines = [f"slots {data['used']}/{data['slots']}"]
     lines += [f"repo {r['path']} · {r['used']}/{r['slots']}" for r in data["repos"]]
     for c in data["chains"]:
+        counts = f" · {c['kind']} {c['weight']}" if c["kind"] else ""
+        if c["state"] == "hold":
+            lines.append(f"chain yours · test hold until {clock(c['until'])}{counts}")
+            continue
         who = ", ".join(f"{s['name']} ({'stalled' if s['stalled'] else s['status']})" for s in c["sessions"])
         lines.append(f"chain {c['story'] or '-'} · {c['state']} · {c['tree']}" +
-                     (f" · {who}" if who else f" · flowkit-spawn pid {c['pid']}"))
+                     (f" · {who}" if who else f" · flowkit-spawn pid {c['pid']}") + counts)
     for r in data["resources"]:
         if not r["session"]:
             lines.append(f"resource {r['name']} · free")
@@ -715,19 +754,23 @@ def load_held():
     return time.time() - at < HOLD_STALE
 
 
-def full(cfg, found, tree):
-    """Why a new chain in tree has no slot, or None: the machine's slots, or its repo's, are all
-    used. A tree that already holds a counted chain (a review beside a slice) needs no slot."""
+def full(cfg, found, tree, kind="", weight=1):
+    """Why a new chain in tree, counting weight as kind (weigh), has no room, or None: the weights
+    counted on the machine, or in its repo, leave less of the slots than it needs, unless nothing
+    else is counted there (within). A tree that already holds a counted chain (a review beside a
+    slice) needs no slot."""
     counted = [c for c in found if c["state"] != "stalled"]
     if any(c["tree"] == tree for c in counted):
         return None
-    if len(counted) >= cfg["slots"]:
-        return f"slots {len(counted)}/{cfg['slots']}"
+    needs = f", {kind} needs {weight}" if kind else ""
+    used = sum(c["weight"] for c in counted)
+    if not within(used, weight, cfg["slots"]):
+        return f"slots {used}/{cfg['slots']}{needs}"
     repo = main_checkout(tree)
     section = cfg["repos"].get(repo) or {}
-    used = sum(c["repo"] == repo for c in counted)
-    if "slots" in section and used >= section["slots"]:
-        return f"repo slots {used}/{section['slots']}"
+    used = sum(c["weight"] for c in counted if c["repo"] == repo)
+    if "slots" in section and not within(used, weight, section["slots"]):
+        return f"repo slots {used}/{section['slots']}{needs}"
     return None
 
 
@@ -760,7 +803,7 @@ def repo_of(tree):
 
 def starts(log_events):
     """Every slice start in the log, oldest first: a launch through the gate or a drained one, with
-    its name, story, tree, repo, `Left:` and the launcher that called the gate."""
+    its name, story, tree, repo, `Left:`, `Kind:` (logged as `work`) and the launcher that called the gate."""
     queues = {ev.get("id"): ev for ev in log_events if ev["event"] == "queue"}
     out = []
     for ev in log_events:
@@ -770,7 +813,8 @@ def starts(log_events):
         tree = ev.get("tree") or q.get("tree") or ""
         out.append({"t": ev["t"], "name": ev.get("name") or "", "story": ev.get("story") or "", "tree": tree,
                     "repo": ev.get("repo") or q.get("repo") or (repo_of(tree) if tree else ""),
-                    "left": ev["left"] if "left" in ev else q.get("left")})
+                    "left": ev["left"] if "left" in ev else q.get("left"),
+                    "work": ev.get("work") or q.get("work") or ""})
     return out
 
 
@@ -794,11 +838,12 @@ def medians(log_events):
 
 def forecast(cfg, found, waiting, items, t, log_events=None):
     """When each queued launch, then each planned item, would start and be ready to test: drain's
-    rules replayed (oldest first; a new chain needs a machine and a repo slot, a tree already
-    running needs none, nor does a continuation; every need free at once; nobody passes an earlier
-    one that waits for a slot or wants the same resource) over the running chains' remaining
-    slices (`Left:` of their latest start) at per-repo medians. Items are {name, tree, slices,
-    needs}. Returns {("queue", id) or ("item", n): {start, ready, wave}}; wave 1 starts at t, and
+    rules replayed (oldest first; a new chain needs room for its weight on the machine and in its
+    repo, a tree already running needs none, nor does a continuation; every need free at once;
+    nobody passes an earlier one that waits for a slot or wants the same resource) over the running
+    chains' remaining slices (`Left:` of their latest start) at per-repo medians, each at the
+    weight it counts now. Items are {name, tree, slices, needs} and, optionally, kind. Returns
+    {("queue", id) or ("item", n): {start, ready, wave}}; wave 1 starts at t, and
     a start of None could not be placed."""
     log_events = events() if log_events is None else log_events
     med = medians(log_events)
@@ -812,26 +857,27 @@ def forecast(cfg, found, waiting, items, t, log_events=None):
         if c["state"] == "stalled":
             continue
         s, m = latest.get(c["tree"]), per(c["repo"])
-        end = max((s["t"] if s else t) + m, t + min(OVERDUE, m)) + ((s or {}).get("left") or 0) * m
-        sids = {x["session"] for x in c.get("sessions", [])}
-        needs = {n for n, lease in held.items() if lease["session"] != ME and (
-            lease["session"] in sids or os.path.realpath(lease.get("tree") or "/") == c["tree"])}
+        end = c["until"] if c["state"] == "hold" else \
+            max((s["t"] if s else t) + m, t + min(OVERDUE, m)) + ((s or {}).get("left") or 0) * m
+        needs = held_by(c, held)
         claimed |= needs
-        running.append({"end": end, "tree": c["tree"], "repo": c["repo"], "needs": needs})
+        running.append({"end": end, "tree": c["tree"], "repo": c["repo"], "needs": needs, "weight": c.get("weight", 1)})
     others = [(n, lease.get("until") or t + cfg["slice_minutes"] * 60) for n, lease in held.items() if n not in claimed]
     pending = [{"key": ("queue", e["id"]), "tree": e.get("tree") or "", "needs": set(e.get("needs", [])),
-                "slices": (e.get("left") or 0) + 1, "free": bool(e.get("continuation") or e.get("over_cap"))}
-               for e in waiting]
+                "slices": (e.get("left") or 0) + 1, "free": bool(e.get("continuation") or e.get("over_cap")),
+                "work": e.get("work") or ""} for e in waiting]
     pending += [{"key": ("item", n), "tree": i["tree"], "needs": set(i["needs"]), "slices": max(i["slices"], 1),
-                 "free": False} for n, i in enumerate(items)]
+                 "free": False, "work": i.get("kind") or ""} for n, i in enumerate(items)]
     for p in pending:
         p["repo"] = repo_of(p["tree"])
+        p["weight"] = weigh(cfg, p["work"], p["needs"])[1]
 
     def room(p):
         if p["free"] or any(r["tree"] == p["tree"] for r in running):
             return True
         limit = (cfg["repos"].get(p["repo"]) or {}).get("slots")
-        return len(running) < cfg["slots"] and (limit is None or sum(r["repo"] == p["repo"] for r in running) < limit)
+        return within(sum(r["weight"] for r in running), p["weight"], cfg["slots"]) and (
+            limit is None or within(sum(r["weight"] for r in running if r["repo"] == p["repo"]), p["weight"], limit))
     out, at, waves = {}, t, [t]
     while pending:
         running = [r for r in running if r["end"] > at]
@@ -841,7 +887,8 @@ def forecast(cfg, found, waiting, items, t, log_events=None):
             fits = p["free"] or not slot_wait and room(p)
             if fits and not p["needs"] & (busy | wanted):
                 ready = at + p["slices"] * per(p["repo"])
-                running.append({"end": ready, "tree": p["tree"], "repo": p["repo"], "needs": p["needs"]})
+                running.append({"end": ready, "tree": p["tree"], "repo": p["repo"], "needs": p["needs"],
+                                "weight": p["weight"]})
                 busy |= p["needs"]
                 if at not in waves:
                     waves.append(at)
@@ -876,9 +923,11 @@ def continues(me, story, tree):
 
 def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=False, t=None, held=0, watch=""):
     """flowkit-spawn's gate, before it types anything: (exit code, message). A launch that opens a
-    new chain on a full machine (or while liveness is unknown) is queued, as is one whose needs
-    are not all free, or one that would pass an earlier waiter; a chain's own next slice never
-    waits for a slot, and --over-cap skips the slot count. Resources are taken all or none, for
+    new chain on a machine with no room for its weight (or while liveness is unknown) is queued,
+    as is one whose needs are not all free, or one that would pass an earlier waiter; a chain's own
+    next slice never waits for a slot, and --over-cap skips the slot count. The launch counts as
+    its prompt's `Kind:` and what its needs imply (weigh); the kind goes on the log line, the
+    marker and the queue entry as `work`. Resources are taken all or none, for
     `launch:<pid>`, before anything waits: a continuation's closer hands over what it holds only
     when every need is free at once; otherwise it gives back all it holds and the launch is queued
     holding nothing, so two closers never wait on each other. A launch that passes leaves the
@@ -899,6 +948,9 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
     one = checkout(cfg, tree)
     if one:
         needs.add(one)
+    work = prompt_kind(prompt) if prompt else ""
+    if work and cfg["weights"] and work not in cfg["weights"]:
+        print(f"capacity: Kind: {work} has no weight line in {config_path()}: counted as unmarked", file=sys.stderr)
     sid = me.get("sessionId")
     cont = continues(me, story, tree)
     by = "watch" if watch else "chain" if cont else "coordinator" if me.get("name") and (
@@ -907,11 +959,11 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
     with lock():
         if not dry:
             refresh(rows, t)
-        found = chains(rows, t)
+        found = chains(rows, t, cfg=cfg)
         waiting = entries()
         why = None
         if not cont:
-            room = "claude agents did not answer" if found is None else full(cfg, found, tree)
+            room = "claude agents did not answer" if found is None else full(cfg, found, tree, *weigh(cfg, work, needs))
             if room is None and any(not e.get("continuation") for e in waiting):
                 room = "behind the queue"
             if room and over_cap:
@@ -933,7 +985,7 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
         if why:
             position = len(waiting) + 1
             start = eta(cfg, found, waiting, {"tree": tree, "needs": needs, "left": left, "continuation": cont,
-                                              "over_cap": over_cap}, t)
+                                              "over_cap": over_cap, "work": work}, t)
             if dry:
                 return 0, f"QUEUED #{position}, ~{clock(start)} · {why} (dry run: nothing queued)"
             if cont and mine:
@@ -951,27 +1003,27 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
                        {"name": name, "story": story, "tree": tree, "prompt": prompt, "argv": argv,
                         "needs": sorted(needs), "left": left, "continuation": cont, "queued": t, "by": by,
                         "over_cap": over_cap, "launcher": me.get("name") or "", "why": why, "eta": start,
-                        **({"watch": watch} if watch else {})})
+                        "work": work, **({"watch": watch} if watch else {})})
             log("queue", t, id=seq, name=name, story=story, tree=tree, needs=sorted(needs), why=why, by=by,
-                repo=repo_of(tree), left=left, launcher=me.get("name") or "", held=held, eta=start,
+                repo=repo_of(tree), left=left, launcher=me.get("name") or "", held=held, eta=start, work=work,
                 **({"watch": watch} if watch else {}))
             write_status(rows, t)
             return QUEUED, f"QUEUED #{position}, ~{clock(start)} · id={seq} · {why}"
         kind = "continuation" if cont else "watch launch" if watch else "new chain"
         if dry:
             return 0, f"{kind}{', takes ' + ', '.join(sorted(needs)) if needs else ''}"
-        reserve(pid, tree, story, name, needs, t, sid if cont else None)
+        reserve(pid, tree, story, name, needs, t, sid if cont else None, work)
         log("launch", t, name=name, story=story, tree=tree, needs=sorted(needs), kind=kind, by=by,
-            repo=repo_of(tree), left=left, launcher=me.get("name") or "", held=held,
+            repo=repo_of(tree), left=left, launcher=me.get("name") or "", held=held, work=work,
             **({"watch": watch} if watch else {}))
         write_status(rows, t)
     return 0, kind
 
 
-def reserve(pid, tree, story, name, needs, t, closer=None):
-    """Under the lock: the launching/<pid>.json marker, and needs leased to launch:<pid> (the
-    closer's own leases among them handed over)."""
-    write_json(state_dir() / "launching" / f"{pid}.json", {"tree": tree, "story": story, "name": name})
+def reserve(pid, tree, story, name, needs, t, closer=None, work=""):
+    """Under the lock: the launching/<pid>.json marker (with the launch's kind of work), and needs
+    leased to launch:<pid> (the closer's own leases among them handed over)."""
+    write_json(state_dir() / "launching" / f"{pid}.json", {"tree": tree, "story": story, "name": name, "work": work})
     for n in sorted(needs):
         write_json(state_dir() / "resources" / f"{n}.json",
                    {"session": f"{LAUNCH}{pid}", "name": name, "story": story, "tree": tree, "taken": t, "why": "launch"})
@@ -1033,20 +1085,23 @@ def drain(rows, t=None, ending=()):
     started = []
     with lock():
         refresh(rows, t)
-        found = chains(rows, t, ending)
+        found = chains(rows, t, ending, cfg)
         held = set(leases())
         slot_wait, wanted = False, set()
         for e in sorted(entries(), key=lambda e: not e.get("watch")):
             needs = set(e.get("needs", []))
-            room = e.get("continuation") or e.get("over_cap") or (found is not None and not slot_wait and full(cfg, found, e["tree"]) is None)
+            work = e.get("work") or ""
+            kind, weight = weigh(cfg, work, needs)
+            room = e.get("continuation") or e.get("over_cap") or (
+                found is not None and not slot_wait and full(cfg, found, e["tree"], kind, weight) is None)
             if room and not needs & (held | wanted):
                 pid = spawn(e)
-                reserve(pid, e["tree"], e.get("story", ""), e.get("name", ""), needs, t)
+                reserve(pid, e["tree"], e.get("story", ""), e.get("name", ""), needs, t, work=work)
                 (state_dir() / "queue" / f"{e['id']}.json").unlink(missing_ok=True)
                 log("dequeue", t, id=e["id"], name=e.get("name", ""), story=e.get("story", ""), pid=pid,
                     waited=round(t - (e.get("queued") or t)), tree=e["tree"], repo=repo_of(e["tree"]),
                     left=e.get("left"), gap=None if gap is None else round(min(gap, t - (e.get("queued") or t))),
-                    **({"watch": e["watch"]} if e.get("watch") else {}))
+                    work=work, **({"watch": e["watch"]} if e.get("watch") else {}))
                 tie = ties().get(e.get("name"))
                 if tie:
                     m = medians(events()).get(repo_of(e["tree"]), cfg["slice_minutes"] * 60)
@@ -1054,7 +1109,8 @@ def drain(rows, t=None, ending=()):
                     tie_launch(e["name"], None)
                 held |= needs
                 if found is not None:
-                    found.append({"tree": e["tree"], "repo": main_checkout(e["tree"]), "state": "launching"})
+                    found.append({"tree": e["tree"], "repo": main_checkout(e["tree"]), "state": "launching",
+                                  "weight": weight})
                 started.append({**e, "pid": pid})
             else:
                 slot_wait = slot_wait or not room
@@ -1211,7 +1267,8 @@ def limit(repo, delta, hours, t):
 def waves(rows, specs, story="", write=False, t=None):
     """A batch's plan: one line per item (wave, start, ready, slices, needs; an item that needs no
     resource is shed to a chain of its own) and the coordinator's plan line. specs are
-    `NAME=TREE[:SLICES[:NEEDS]]`, NEEDS joined by `+` or `,`, in launch order. With story, the
+    `NAME=TREE[:SLICES[:NEEDS[:KIND]]]`, NEEDS joined by `+` or `,`, in launch order; KIND is the
+    kind of work the item counts as (unmarked without one). With story, the
     plan line counts that story's test-queue lines waiting on the user's testing; with write,
     every item that does not start now gets its line there (`queued, wave N`), moved on drain."""
     t = now() if t is None else t
@@ -1220,15 +1277,19 @@ def waves(rows, specs, story="", write=False, t=None):
     for spec in specs:
         m = ITEM.match(spec)
         if not m:
-            raise ValueError(f"not NAME=TREE[:SLICES[:NEEDS]]: {spec}")
+            raise ValueError(f"not NAME=TREE[:SLICES[:NEEDS[:KIND]]]: {spec}")
         needs = names_arg([m["needs"].replace("+", ",")]) if m["needs"] else set()
         stray = needs - declared(cfg)
         if stray:
             print(f"capacity: {m['name']} needs {', '.join(sorted(stray))}, not declared in {config_path()}: ignored",
                   file=sys.stderr)
+        kind = (m["kind"] or "").lower()
+        if kind and cfg["weights"] and kind not in cfg["weights"]:
+            print(f"capacity: {m['name']} is of kind {kind}, with no weight line in {config_path()}: counted as unmarked",
+                  file=sys.stderr)
         items.append({"name": m["name"], "tree": toplevel(os.path.expanduser(m["tree"])),
-                      "slices": int(m["slices"] or 1), "needs": needs - stray})
-    found = chains(rows, t)
+                      "slices": int(m["slices"] or 1), "needs": needs - stray, "kind": kind})
+    found = chains(rows, t, cfg=cfg)
     waiting = entries()
     plan = forecast(cfg, found, waiting, items, t)
     if write and story:
@@ -1251,9 +1312,11 @@ def waves(rows, specs, story="", write=False, t=None):
                 testq_set(story, item["name"], t, eta=p["ready"], state=f"queued, wave {p['wave']}" + (
                     f", needs {', '.join(sorted(item['needs']))}" if item["needs"] else ""))
                 tie_launch(item["name"], {"story": story, "item": item["name"]})
-    counted = [c for c in found or [] if c["state"] != "stalled"]
-    trees = {c["tree"] for c in counted} | {e["tree"] for e in waiting if plan[("queue", e["id"])]["start"] == t} | {
-        i["tree"] for n, i in enumerate(items) if plan[("item", n)]["start"] == t}
+    used = {c["tree"]: c["weight"] for c in found or [] if c["state"] != "stalled"}
+    for tree, work, names in [(e["tree"], e.get("work") or "", e.get("needs", [])) for e in waiting
+                              if plan[("queue", e["id"])]["start"] == t] + [
+            (i["tree"], i["kind"], i["needs"]) for n, i in enumerate(items) if plan[("item", n)]["start"] == t]:
+        used[tree] = max(used.get(tree, 0), weigh(cfg, work, names)[1])
     parts = [f"Plan: {len(now_)} of {len(items)} now ({', '.join(now_) or '-'})"]
     if later:
         parts.append(f"{len(later)} queued ({', '.join(later)})")
@@ -1261,7 +1324,7 @@ def waves(rows, specs, story="", write=False, t=None):
         parts.append(f"{len(shed)} shed ({', '.join(shed)})")
     if lost:
         parts.append(f"{len(lost)} not placed ({', '.join(lost)})")
-    parts.append(f"slots {'?' if found is None else len(trees)}/{cfg['slots']}")
+    parts.append(f"slots {'?' if found is None else sum(used.values())}/{cfg['slots']}")
     if story:
         parts.append(f"{sum(bool(TO_TEST.search(x[3])) and not ON_GREEN.match(gate_of(x)) for x in read_tests(story)[1])}"
                      " wait on your testing")
@@ -1667,7 +1730,7 @@ def main(argv=None):
     p = sub.add_parser("drain", help="launch every queued launch that can start now")
     p.add_argument("--closed", action="append", default=[], help="a session whose close is being recorded")
     p = sub.add_parser("waves", help="plan a batch: each item's wave, start and ready times, and the plan line")
-    p.add_argument("items", nargs="+", metavar="NAME=TREE[:SLICES[:NEEDS]]")
+    p.add_argument("items", nargs="+", metavar="NAME=TREE[:SLICES[:NEEDS[:KIND]]]")
     p.add_argument("--story", default="", help="the story whose test queue the plan line counts (and --write fills)")
     p.add_argument("--write", action="store_true", help="put every item that waits into the story's test queue")
     p = sub.add_parser("testq", help="a story's test queue, <story>.tests.md: list, set or drop a line")

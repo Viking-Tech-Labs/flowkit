@@ -33,7 +33,9 @@ export default {
         }
       ],
       "pid": null,
-      "state": "running"
+      "state": "running",
+      "kind": "",
+      "weight": 1
     },
     {
       "tree": "/Users/me/lib",
@@ -41,7 +43,9 @@ export default {
       "story": "side",
       "sessions": [],
       "state": "launching",
-      "pid": "4242"
+      "pid": "4242",
+      "kind": "",
+      "weight": 1
     }
   ],
   "resources": [

@@ -846,6 +846,22 @@ class Capacity(unittest.TestCase):
                              "resource emulator = a device check\nkind simulator = test\nkind emulator = test\n")
         return app
 
+    def launch(self, rows, story, header="", tree=None):
+        """A new chain `<story>-s1` through the gate and, when it passes, on to its live session
+        (a row added to rows): the gate's answer."""
+        tree = tree or self.repo(story)
+        name, pid = f"{story}-s1", str(self.sleeper())
+        answer = capacity.gate(rows, pid, tree, story, name, self.prompt(header) if header else "", [story], {})
+        if answer[0] == 0:
+            self.story(story, f"> launched {name}\n")
+            rows.append(self.row(name, f"{len(rows):08x}-3333-3333-3333-333333333333", tree, pid=os.getpid()))
+            self.agents(rows)
+            capacity.launched(rows, pid, name)
+        return answer
+
+    def used(self, rows):
+        return capacity.slots(capacity.load_config(), capacity.chains(rows))["used"]
+
     def test_weight_lines_the_unmarked_kind_and_what_a_resource_implies(self):
         app = self.weighted()
         cfg = capacity.load_config(self.conf)
@@ -884,6 +900,162 @@ class Capacity(unittest.TestCase):
         body.write_text("Repo: /r\n\nKind: test\n")
         self.assertEqual(capacity.prompt_kind(body), "", "the body is not the header")
         self.assertEqual(capacity.prompt_kind(self.tmp / "missing.md"), "")
+
+    def test_the_gate_sums_the_chains_weights(self):
+        self.weighted()
+        rows = []
+        for story, header in (("a", "Kind: implementation"), ("b", "Kind: implementation\nLeft: 1"), ("c", "Kind: light"),
+                              ("d", "")):  # d is unmarked: an implementation
+            self.assertEqual(self.launch(rows, story, header), (0, "new chain"), story)
+        self.assertEqual([(c["story"], c["kind"], c["weight"]) for c in capacity.chains(rows)],
+                         [("a", "implementation", 2), ("b", "implementation", 2), ("c", "light", 1),
+                          ("d", "implementation", 2)])
+        data = capacity.status(rows)
+        self.assertEqual((data["used"], data["slots"], [c["weight"] for c in data["chains"]]), (7, 8, [2, 2, 1, 2]))
+        lines = capacity.status_lines(data)
+        self.assertEqual(lines[0], "slots 7/8")
+        self.assertTrue(lines[1].endswith(" · a-s1 (busy) · implementation 2"), lines[1])
+        code, msg = self.launch(rows, "e", "Kind: implementation")
+        self.assertEqual(code, capacity.QUEUED)
+        self.assertRegex(msg, r" · id=1 · slots 7/8, implementation needs 2$")
+        code, msg = self.launch(rows, "f", "Kind: light")
+        self.assertEqual((code, self.queue()[1]), (capacity.QUEUED, ("f-s1", "behind the queue")),
+                         "it would fit, and never passes an earlier one waiting for room")
+        self.assertEqual([e["work"] for e in capacity.entries()], ["implementation", "light"])
+        self.assertEqual([(e["name"], e["work"]) for e in self.log_events() if e["event"] in ("launch", "queue")],
+                         [("a-s1", "implementation"), ("b-s1", "implementation"), ("c-s1", "light"), ("d-s1", ""),
+                          ("e-s1", "implementation"), ("f-s1", "light")])
+        self.assertEqual(self.log_events()[0]["kind"], "new chain", "the launch line's own `kind` is what it was")
+        # a kind with no weight line counts as unmarked, with one stderr line
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, msg = capacity.gate(rows, "4242", self.repo("g"), "g", "g-s1", self.prompt("Kind: reveiw"), [], {}, dry=True)
+        self.assertIn(" · slots 7/8, implementation needs 2 (dry run", msg)
+        self.assertEqual(len(err.getvalue().splitlines()), 1, err.getvalue())
+        self.assertIn("Kind: reveiw has no weight line", err.getvalue())
+
+    def test_sessions_sharing_a_tree_count_once_at_the_largest_weight(self):
+        self.weighted()
+        rows = []
+        self.launch(rows, "a", "Kind: light")
+        tree, pid = rows[0]["cwd"], str(self.sleeper())
+        self.assertEqual(capacity.gate(rows, pid, tree, "a", "a-review", self.prompt("Kind: implementation"), [], {}),
+                         (0, "new chain"))
+        self.assertEqual(self.used(rows), 1, "a marker in a tree that is counted adds nothing")
+        self.story("a", "> launched a-s1\n> launched a-review\n")
+        rows.append(self.row("a-review", "f" * 8 + "-3333-3333-3333-" + "3" * 12, tree, pid=os.getpid()))
+        self.agents(rows)
+        capacity.launched(rows, pid, "a-review")
+        (chain,) = capacity.chains(rows)
+        self.assertEqual((len(chain["sessions"]), chain["kind"], chain["weight"]), (2, "implementation", 2))
+
+    def test_holding_a_device_counts_as_the_kind_it_implies(self):
+        self.weighted()
+        rows = []
+        self.launch(rows, "a", "Kind: light")
+        self.assertEqual(self.used(rows), 1)
+        self.assertEqual(capacity.take(rows, rows[0]["sessionId"], {"simulator"})[0], 0)
+        (chain,) = capacity.chains(rows)
+        self.assertEqual((chain["kind"], chain["weight"]), ("test", 4), "whatever its Kind: line says")
+        # a launch that needs a device counts as a test at the gate, before it holds it
+        self.assertEqual(self.launch(rows, "b", "Kind: light\nNeeds: emulator"), (0, "new chain"))
+        self.assertEqual((self.held()["emulator"], self.used(rows)), (rows[1]["sessionId"], 8))
+        code, msg = capacity.gate(rows, "4242", self.repo("c"), "c", "c-s1", self.prompt("Kind: light"), [], {}, dry=True)
+        self.assertIn(" · slots 8/8, light needs 1 (dry run", msg)
+        code, msg = capacity.gate(rows, "4242", self.repo("d"), "d", "d-s1", self.prompt("Kind: light\nNeeds: simulator"),
+                                  [], {}, dry=True)
+        self.assertIn(" · slots 8/8, test needs 4 (dry run", msg)
+        capacity.release(rows, rows[0]["sessionId"])
+        self.assertEqual(self.used(rows), 5, "the device given back, the chain is light again")
+
+    def test_the_users_hold_on_a_device_counts_its_weight_once(self):
+        self.weighted()
+        t = time.time()
+        capacity.hold([], {"simulator", "emulator"}, 30, t=t)
+        found = capacity.chains([], t)
+        self.assertEqual([(c["state"], c["kind"], c["weight"], c["until"], c["sessions"]) for c in found],
+                         [("hold", "test", 4, t + 1800, [])])
+        self.assertEqual(capacity.status_lines(capacity.status([], t))[:2], [
+            "slots 4/8", f"chain yours · test hold until {time.strftime('%H:%M', time.localtime(t + 1800))} · test 4"])
+        rows = []
+        self.assertEqual(self.launch(rows, "a", "Kind: implementation"), (0, "new chain"))
+        self.assertEqual(self.launch(rows, "b", "Kind: implementation"), (0, "new chain"))
+        code, msg = self.launch(rows, "c", "Kind: implementation")
+        self.assertEqual(code, capacity.QUEUED)
+        self.assertRegex(msg, r"slots 8/8, implementation needs 2$")
+        self.assertEqual(capacity.entries()[0]["eta"], t + 1800, "the forecast gives the weight back when the hold runs out")
+        self.assertEqual([c["state"] for c in capacity.chains(rows, t + 1801)], ["running", "running"])
+        # a hold on a resource that implies no kind counts nothing, as before
+        self.conf.write_text(self.conf.read_text().replace("kind simulator = test\nkind emulator = test\n", ""))
+        self.assertEqual([c["state"] for c in capacity.chains(rows, t)], ["running", "running"])
+
+    def test_a_launch_heavier_than_the_budget_starts_on_an_empty_machine(self):
+        self.weighted(slots=3)
+        rows = []
+        self.assertEqual(self.launch(rows, "l", "Kind: light"), (0, "new chain"))
+        code, msg = self.launch(rows, "t", "Kind: test")
+        self.assertEqual(code, capacity.QUEUED)
+        self.assertRegex(msg, r"slots 1/3, test needs 4$")
+        with mock.patch.object(capacity, "spawn", side_effect=lambda e: self.sleeper()):
+            self.assertEqual(capacity.drain(rows), [], "one light chain is counted: the test waits")
+            started = capacity.drain(rows, ending={rows[0]["sessionId"]})  # l-s1's close is being recorded
+        self.assertEqual([e["name"] for e in started], ["t-s1"], "nothing else is counted: it starts, over the budget")
+        self.assertEqual((capacity.markers()[0]["work"], self.log_events()[-1]["event"], self.log_events()[-1]["work"]),
+                         ("test", "dequeue", "test"))
+        self.assertEqual([(c["state"], c["kind"], c["weight"]) for c in capacity.chains(rows)],
+                         [("running", "light", 1), ("launching", "test", 4)])
+        # a chain's own next slice never waits for the budget, whatever it weighs
+        me = {"sessionId": rows[0]["sessionId"], "name": "l-s1", "cwd": rows[0]["cwd"]}
+        self.assertEqual(capacity.gate(rows, str(self.sleeper()), rows[0]["cwd"], "l", "l-s2", self.prompt("Kind: test"),
+                                       [], me), (0, "continuation"))
+        self.assertEqual(capacity.gate(rows, "4242", self.repo("n"), "n", "n-s1", self.prompt("Kind: light"), [], {},
+                                       dry=True)[1].split(" · ")[1], "slots 5/3, light needs 1 (dry run: nothing queued)")
+
+    def test_a_repos_slots_are_summed_by_weight(self):
+        app = self.weighted()
+        self.conf.write_text(self.conf.read_text() + "slots = 2\n")
+        tree = self.tmp / "app-wt"
+        git("-C", str(app), "worktree", "add", "-q", str(tree), "-b", "s2")
+        rows = []
+        self.assertEqual(self.launch(rows, "a", "Kind: test", tree=app), (0, "new chain"),
+                         "heavier than the repo's slots, with nothing else counted in it")
+        self.assertEqual(self.launch(rows, "c", "Kind: light"), (0, "new chain"), "another repo")
+        used = capacity.slots(capacity.load_config(), capacity.chains(rows))
+        self.assertEqual((used["used"], used["repos"]), (5, {str(app): {"slots": 2, "used": 4}}))
+        code, msg = self.launch(rows, "b", "Kind: light", tree=tree)
+        self.assertEqual(code, capacity.QUEUED)
+        self.assertRegex(msg, r"repo slots 4/2, light needs 1$")
+        capacity.limit(str(app), -1, 2, time.time())
+        self.assertIn("repo slots 4/1, light needs 1", capacity.gate(rows, "4242", tree, "b", "b-s2", self.prompt(
+            "Kind: light"), [], {}, dry=True)[1])
+
+    def test_waves_by_weight(self):
+        f1, a, b, c, d = (self.repo(n) for n in ("f1", "a", "b", "c", "d"))
+        cfg = {**capacity.DEFAULTS, "slots": 4, "weights": {"light": 1, "implementation": 2, "test": 4},
+               "unmarked": "implementation", "repos": {}}
+        log = [{"t": self.T - 10 * self.M, "event": "launch", "name": "f1-s1", "story": "f1", "tree": str(f1), "left": 0}]
+        items = [{**self.item(a), "kind": "light"}, {**self.item(b), "kind": "test"}, {**self.item(c), "kind": "light"},
+                 self.item(d)]
+        out = capacity.forecast(cfg, [{**self.running(f1), "weight": 2}], [], items, self.T, log)
+        self.assertEqual([(round((p["start"] - self.T) / self.M), round((p["ready"] - self.T) / self.M), p["wave"])
+                          for _, p in sorted(out.items(), key=lambda kv: kv[0][1])], [
+            (0, 50, 1),      # a: light beside f1's implementation, 3 of 4
+            (50, 100, 2),    # b: a test is heavier than what f1's end leaves beside a; it starts alone once a ends
+            (100, 150, 3),   # c: light, and it never passes b, which waits for room
+            (100, 150, 3)])  # d: unmarked, an implementation, beside c
+        # a queued launch counts as its kind and what its needs imply; a spec may name the kind
+        self.weighted(slots=4)
+        queued = [{"id": 4, "tree": str(d), "needs": [], "left": 0, "continuation": False, "work": "test"}]
+        plan = capacity.forecast(capacity.load_config(), [], queued, [{**self.item(a), "kind": "light"}], self.T, [])
+        self.assertEqual([(p["start"] - self.T) / self.M for _, p in sorted(plan.items())], [50, 0],
+                         "the item waits for the queued test to end")
+        lines = capacity.waves([], [f"a={a}:1::light", f"b={b}:1:simulator:light", f"c={c}"], t=self.T)
+        hm = lambda m: time.strftime("%H:%M", time.localtime(self.T + m * self.M))  # noqa: E731
+        self.assertEqual(lines, [
+            f"a · wave 1 · now · ready ~{hm(50)} · 1 slice · shed",
+            f"b · wave 2 · start ~{hm(50)} · ready ~{hm(100)} · 1 slice · needs simulator",
+            f"c · wave 3 · start ~{hm(100)} · ready ~{hm(150)} · 1 slice · shed",
+            f"Plan: 0 of 3 now (-) · 1 queued (b ~{hm(50)}) · 2 shed (a, c ~{hm(100)}) · slots 1/4"])
 
     def write_log(self, *events):
         path = self.claude / "capacity" / "log.jsonl"
