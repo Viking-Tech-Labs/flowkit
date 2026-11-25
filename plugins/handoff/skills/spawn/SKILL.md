@@ -32,7 +32,9 @@ file:
    prints the saved path. A story session starts cold and has only its prompt: never launch one on
    a one-line prompt. Draft it from the repo's pick-up block with the close's
    `prompt-template.md` (in `${CLAUDE_PLUGIN_ROOT}/skills/close/`) when the text is only a slice
-   name. With a report (the `report_to` option above), save with `save-prompt <name> --report-to
+   name. A story prompt written any other way still says its `Kind:` in its header (the lines
+   before its first blank one; the template says what the word is): without it the gate counts
+   the chain as unmarked. With a report (the `report_to` option above), save with `save-prompt <name> --report-to
    <session>`, a file too (the file on stdin; one from the store under that name is rewritten in
    place): it puts `Report-to: <session>` into the prompt's header, on the `Repo:` line of a
    brief or as a first line of its own, and leaves a prompt whose header already names a

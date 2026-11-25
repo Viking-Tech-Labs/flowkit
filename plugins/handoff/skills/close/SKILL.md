@@ -103,12 +103,13 @@ other session still uses them, and ends with what is ready for the user to try i
    session); with `report-to: off`, neither.
 6. **The ladder step**, only when `state` printed `ladder: <path>`. Read that file and follow it:
    its "Rung" section says how to choose Model, Effort and the Why line for the next session
-   from its kind (planning, investigation, implementation, review, docs or config); its
-   "Close step" section is what to do at every close, before step 10 (log a row, grade the
-   previous session, launch a review it owes). It may name its own scripts; run them as it says.
-   With `ladder: none`, skip this step and leave the Model, Effort and Why lines out of the
-   prompt: the next session runs at the user's defaults. A model or effort the user named in
-   this session wins over the ladder; say so in the Why line.
+   from its kind (planning, investigation, implementation, review, docs or config), the word
+   the prompt's `Kind:` line carries; its "Close step" section is what to do at every close,
+   before step 10 (log a row, grade the previous session, launch a review it owes). It may name
+   its own scripts; run them as it says. With `ladder: none`, skip this step and leave the
+   Model, Effort and Why lines out of the prompt: the next session runs at the user's defaults.
+   Its `Kind:` line stays, since the gate counts the chain by it. A model or effort the user
+   named in this session wins over the ladder; say so in the Why line.
 7. **Close** with these four blocks, each line short and plain:
    - `DONE`: one line per item. Per repo touched: branch, committed yes/no, pushed yes/no, and
      where they apply: how it was verified, the pipeline result, links to the change request

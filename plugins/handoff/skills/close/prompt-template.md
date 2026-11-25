@@ -5,7 +5,11 @@ Chain end line is the story's own (`handoff.py chain-end <slug>`), repeated by e
 `Report-to:` names the session a helper beside the chain sends its verdict to (step 5), never a
 chain successor. `Needs:` names the resources of `capacity.conf` the slice will use (a simulator,
 a local backend), which `flowkit-spawn` takes for it before the launch; `Left:` is how many slices
-of the plan remain after this one. Both stay in the header, before its first blank line.
+of the plan remain after this one. `Kind:` is one word for the slice's kind of work, which
+`capacity.conf` may give a weight (`weight implementation = 2`), so the gate knows what the chain
+counts: with a ladder plugged in, the ladder's kind for the slice (step 6); a word of that file's
+own where one fits the slice better (`test` for a slice that is a device test). All three stay
+in the header, before its first blank line.
 
 ```
 Repo: <absolute path>   Session: <next session's name>[   Story: <slug>][   Report-to: <session>]
@@ -13,6 +17,7 @@ Repo: <absolute path>   Session: <next session's name>[   Story: <slug>][   Repo
 [Why this model: <the reason the ladder gave>]
 [Needs: <resource>, <resource>]
 [Left: <slices after this one>]
+Kind: <the slice's kind of work, one word>
 
 Read first, ONLY these sections: <doc → section>, <doc → section>. Don't read the
 whole files; don't re-derive what the docs already carry.
