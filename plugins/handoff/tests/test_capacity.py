@@ -1161,8 +1161,8 @@ class Capacity(unittest.TestCase):
         self.write_transcript("d" * 8, "app-s1", [(T + 15 * M, typed("a worker's prompt")), (T + 40 * M, usage(10))])
         data = capacity.report(T, T + capacity.DAY)
         self.assertEqual(data["launch_holds"], {"count": 1, "minutes": 2})
-        self.assertEqual(data["queued"], {"count": 2, "minutes": 130, "launch_eta_error": 20, "ready_eta_error": 20,
-                                          "ready_items": 1})
+        self.assertEqual(data["queued"], {"count": 2, "minutes": 130, "gone": 0, "launch_eta_error": 20,
+                                          "ready_eta_error": 20, "ready_items": 1})
         self.assertEqual(data["resource_waits"], {"simulator": {"count": 1, "minutes": 40}})
         self.assertEqual((data["reclaims"], data["over_cap"], data["batches"]), (1, 1, 3))
         self.assertEqual(data["idle_with_queue"], {"day": 15 + 30, "nights": {"2026-11-10": 60}})
@@ -1184,6 +1184,52 @@ class Capacity(unittest.TestCase):
         r = self.cli("report", "--since", "2026-11-10", "--until", "2026-11-12", "--json")
         self.assertEqual((r.returncode, json.loads(r.stdout)["over_cap"]), (0, 1), r.stderr)
         self.assertEqual(self.cli("report", "--since", "last week").returncode, 2)
+
+    def test_a_wait_counts_when_it_ended_or_is_still_queued(self):
+        T = datetime(2026, 11, 10, 12, 0).timestamp()
+        M = 60
+        why = "busy: simulator is held by a-s1 since 12:00 (take)"
+        self.write_log(
+            {"t": T, "event": "queue", "id": 1, "name": "b-s1", "needs": ["simulator"], "why": why},
+            {"t": T + 10 * M, "event": "dequeue", "id": 1, "name": "b-s1", "waited": 600},
+            {"t": T + 20 * M, "event": "queue", "id": 2, "name": "c-s1", "needs": ["simulator"], "why": why},
+            {"t": T + 30 * M, "event": "queue", "id": 3, "name": "d-s1", "needs": ["simulator"], "why": why},
+        )
+        queue = self.claude / "capacity" / "queue"
+        queue.mkdir()
+        (queue / "3.json").write_text(json.dumps({"name": "d-s1", "story": "d", "tree": str(self.tmp), "queued": T + 30 * M}))
+        data = capacity.report(T, T + 60 * M)
+        self.assertEqual({k: data["queued"][k] for k in ("count", "minutes", "gone")}, {"count": 2, "minutes": 10 + 30, "gone": 1},
+                         "the ended wait, and the one still queued to the window's end; c-s1 left by hand")
+        self.assertEqual(data["resource_waits"], {"simulator": {"count": 2, "minutes": 40}})
+        self.assertIn("queued          2 launches, 40 min queued, 1 more left the queue by hand · launch ETA",
+                      "\n".join(capacity.report_lines(data)))
+        (queue / "3.json").unlink()
+        self.assertEqual({k: capacity.report(T, T + 60 * M)["queued"][k] for k in ("count", "minutes", "gone")},
+                         {"count": 1, "minutes": 10, "gone": 2})
+
+    def test_an_entry_that_left_the_queue_by_hand_is_logged_once(self):
+        _, rows, sid = self.full_machine()
+        for n in (1, 2, 3):
+            capacity.gate(rows, str(4300 + n), self.repo(f"r{n}"), f"q{n}", f"q{n}-s1", "", [f"q{n}"], {})
+        gone = lambda: [(e["id"], e["name"], e["story"]) for e in self.log_events() if e["event"] == "gone"]  # noqa: E731
+        with mock.patch.object(capacity, "spawn", side_effect=lambda e: self.sleeper()):
+            self.assertEqual([e["name"] for e in capacity.drain(rows, ending={sid})], ["q1-s1"])
+        capacity.status(rows)
+        self.assertEqual(gone(), [], "a drained entry left by its dequeue")
+        (self.claude / "capacity" / "queue" / "2.json").unlink()
+        t = time.time()
+        capacity.status(rows, t)
+        capacity.status(rows, t + 60)
+        self.assertEqual(gone(), [(2, "q2-s1", "q2")])
+        self.assertEqual(self.log_events()[-1]["t"], round(t, 3), "when it was noticed, once")
+        self.assertEqual([name for name, _ in self.queue()], ["q3-s1"])
+        # a status.json that still lists a drained entry (a drain that died before it wrote it)
+        path = self.claude / "capacity" / "status.json"
+        data = json.loads(path.read_text())
+        path.write_text(json.dumps({**data, "queue": [{"id": 1, "name": "q1-s1", "story": "q1"}, *data["queue"]]}))
+        capacity.status(rows)
+        self.assertEqual(gone(), [(2, "q2-s1", "q2")])
 
     def test_the_audit_hook_logs_a_match_and_never_denies(self):
         app = self.repo("app")

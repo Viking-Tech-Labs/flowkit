@@ -501,7 +501,9 @@ def why_free(lease, rows, closed, t):
 
 def refresh(rows, t):
     """Under the lock: drop the leases that are over and the markers whose flowkit-spawn is gone. A
-    dead holder's lease and a dead marker are logged as `reclaim`, the rest as `free`."""
+    dead holder's lease and a dead marker are logged as `reclaim`, the rest as `free`. A queued
+    launch that status.json lists and the queue no longer holds, with no `dequeue` in the log, left
+    the queue by hand: logged as `gone`, once (the log is read only when one is missing)."""
     _, closed = stories()
     for name, lease in leases().items():
         reason = why_free(lease, rows, closed, t)
@@ -513,6 +515,16 @@ def refresh(rows, t):
         if not mark["alive"]:
             mark["path"].unlink(missing_ok=True)
             log("reclaim", t, launching=mark["pid"], tree=mark.get("tree", ""), story=mark.get("story", ""))
+    try:
+        listed = json.loads((state_dir() / "status.json").read_text())["queue"]
+    except (OSError, ValueError, KeyError, TypeError):
+        listed = []
+    here = {e["id"] for e in entries()}
+    missing = [q for q in listed if isinstance(q, dict) and q.get("id") not in here]
+    over = {e.get("id") for e in events() if e["event"] in ("dequeue", "gone")} if missing else set()
+    for q in missing:
+        if q.get("id") not in over:
+            log("gone", t, id=q.get("id"), name=q.get("name", ""), story=q.get("story", ""), queued=q.get("queued"))
 
 
 def holder(rows, sid):
@@ -1552,7 +1564,9 @@ def report(start, end, baseline=False):
     """`capacity report` (§6 of the plan): what the log says about the window, and what the
     transcripts say. baseline: the transcripts only, for the week before the log existed. A watch's
     own lines (`watch`, and the gate's for a launch a watch made) stay out of every count but
-    `watched`: the minutes its ended watches were open."""
+    `watched`: the minutes its ended watches were open. A queued launch's wait counts when it ended
+    (its `dequeue`) or while its entry is still in the queue (to the window's end); one that left
+    the queue by hand counts nothing and is told apart as `gone`."""
     cfg = load_config()
     out = {"start": start, "end": end, "slots": cfg["slots"], "coordinator_growth": cfg["coordinator_growth"],
            **sessions_report(start, end, cfg)}
@@ -1567,7 +1581,9 @@ def report(start, end, baseline=False):
     held = [e["held"] for e in evs if e["event"] in ("launch", "queue") and isinstance(e.get("held"), (int, float))
             and e["held"] > 0]
     queues = [e for e in evs if e["event"] == "queue"]
-    waited = {q.get("id"): (dequeued[q["id"]]["t"] if q.get("id") in dequeued else end) - q["t"] for q in queues}
+    still = {e["id"] for e in entries()}
+    waited = {q.get("id"): (dequeued[q["id"]]["t"] if q.get("id") in dequeued else end) - q["t"] for q in queues
+              if q.get("id") in dequeued or q.get("id") in still}
     launch_err = [(d["t"] - queued_at[d["id"]]["eta"]) / 60 for d in evs if d["event"] == "dequeue"
                   and isinstance(queued_at.get(d.get("id"), {}).get("eta"), (int, float))]
     planned, ready = {}, {}
@@ -1583,7 +1599,7 @@ def report(start, end, baseline=False):
     waits = {}
     for q in queues:
         for name in q.get("needs") or []:
-            if name in (q.get("why") or ""):
+            if name in (q.get("why") or "") and q.get("id") in waited:
                 w = waits.setdefault(name, {"count": 0, "minutes": 0})
                 w["count"] += 1
                 w["minutes"] += round(waited[q.get("id")] / 60)
@@ -1600,7 +1616,8 @@ def report(start, end, baseline=False):
                   for e in evs if e["event"] == "audit" or (e["event"] == "note" and e.get("kind") == "collision")]
     out.update({
         "launch_holds": {"count": len(held), "minutes": round(sum(held) / 60)},
-        "queued": {"count": len(queues), "minutes": round(sum(waited.values()) / 60),
+        "queued": {"count": sum(q.get("id") in waited for q in queues), "minutes": round(sum(waited.values()) / 60),
+                   "gone": sum(q.get("id") not in waited for q in queues),
                    "launch_eta_error": launch_err and round(statistics.median(abs(x) for x in launch_err)),
                    "ready_eta_error": ready_err and round(statistics.median(abs(x) for x in ready_err)),
                    "ready_items": len(ready_err)},
@@ -1653,7 +1670,8 @@ def report_lines(data, against=None):
     worst_night = max(idle["nights"].items(), key=lambda kv: kv[1], default=None)
     lines += [
         f"launch holds    {data['launch_holds']['count']}, {data['launch_holds']['minutes']} min",
-        f"queued          {q['count']} launches, {q['minutes']} min queued · launch ETA error median "
+        f"queued          {q['count']} launches, {q['minutes']} min queued"
+        f"{', ' + str(q['gone']) + ' more left the queue by hand' if q['gone'] else ''} · launch ETA error median "
         f"{'-' if q['launch_eta_error'] == [] else str(q['launch_eta_error']) + ' min'} · ready ETA error median "
         f"{'-' if q['ready_eta_error'] == [] else str(q['ready_eta_error']) + ' min'} over {q['ready_items']} items",
         "resource waits  " + (" · ".join(f"{n} {w['count']} ({w['minutes']} min)" for n, w in sorted(data["resource_waits"].items()))
