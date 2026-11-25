@@ -600,6 +600,11 @@ Android emulator, a local backend, a dev-server port. `flowkit-capacity` (`bin/`
 `scripts/capacity.py`) counts the first and leases the second, and `flowkit-spawn` is the gate that
 holds every story launch to both.
 
+New in 0.11.0: slots counted by weight, a prompt's `Kind:` saying what a launch counts as ("Slots
+by weight"); a free resource with a `stop` line stopped once it sat free ("A free resource is
+stopped"); a chain is a story in a working tree, so other stories in the same checkout count as
+chains of their own; a queued launch that ends with no session is queued again instead of lost.
+
 The numbers live in `${XDG_CONFIG_HOME:-~/.config}/flowkit/capacity.conf`; with no file a machine
 runs 3 chains and declares no resources:
 
