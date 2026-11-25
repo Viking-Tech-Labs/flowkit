@@ -607,6 +607,7 @@ runs 3 chains and declares no resources:
 slots = 3                   # chains at once on this machine
 slice_minutes = 50          # ETA fallback until the log has history
 coordinator_growth = 300k   # context tokens a coordinator may add per day
+stop_minutes = 20           # how long a resource with a `stop` line sits free before it is stopped
 
 [/Users/me/app]             # a repo's main checkout; its worktrees inherit the section
 slots = 2                   # optional: at most 2 of the machine's slots for this repo
@@ -615,10 +616,12 @@ check = ./ci-status         # optional: what a watch asks for this repo's merge 
 resource simulator = install a build, run a device check, hand over a test
 resource backend   = start the local stack; release once it is stopped
 audit simulator    = xcrun simctl (install|launch)|maestro test   # optional: the audit hook's pattern
+stop simulator     = /Users/me/bin/stop-simulators                # optional: what stops it once it sat free
 ```
 
 Resource names are machine-wide: two repos that both declare `simulator` share one lease. So are
-`audit` patterns (Python regular expressions, searched in a Bash command).
+`audit` patterns (Python regular expressions, searched in a Bash command) and `stop` commands (a
+second, different one for the same name is refused with one stderr line).
 
 `checkouts = 1` is for a repository whose sessions all work in its main checkout and switch
 branches there, so one works in it at a time: the checkout becomes a resource of its own,
@@ -702,6 +705,7 @@ read high until the chains started that way reach their next slice.
 | `flowkit-capacity release [names]` | Gives back what this session holds, all of it without names. |
 | `flowkit-capacity hold simulator --for me --minutes 60` | Your test hold: no slice takes it until the minutes run out or `release --for me`; run it again to renew. |
 | `flowkit-capacity drain` | Launches what the queue holds that can start now (it also runs on its own, see below). |
+| `flowkit-capacity idle` | The minute pass: stops a resource with a `stop` line that sat free for its minutes (the tmux tick runs it, see "A free resource is stopped"). |
 | `flowkit-capacity waves a=/Users/me/app:2:simulator b=/Users/me/lib [--story s --write]` | Plans a batch (`NAME=TREE[:SLICES[:NEEDS[:KIND]]]`, needs joined by `+`, in launch order; `b=/Users/me/lib:1::review` names a kind and no need): each item's wave, start and ready times, and one plan line. See "Waves" below. |
 | `flowkit-capacity testq <story> [set\|drop <item>] [--state …] [--eta HH:MM] [--mr …] [--device …] [--gate …] [--launch name]` | The story's test queue, `<story>.tests.md`, one line at a time under the lock, each change logged as `test`. The file goes once its last line does. `--gate` sets what the item waits for before it merges ("The test queue's fields" below). `--launch` ties a line to a queued launch: its drain sets it `running` with its ready time. |
 | `flowkit-capacity limit /Users/me/app -1 [--hours 12]` | The repo runs one slot fewer (never under one) for the hours given; `0` ends it. Logged as `limit`. |
@@ -711,6 +715,36 @@ read high until the chains started that way reach their next slice.
 A lease goes free on its own when the holder's close is recorded, when the holder has no pid, or
 when it has been not busy with its transcript untouched for 30 minutes; never while `claude agents`
 is unknown (a test hold still runs out on the clock).
+
+**A free resource is stopped.** A simulator left booted after its last user holds memory for
+nothing. Give the resource a `stop <resource> = <command>` line and it is stopped once it sat free
+for `stop_minutes` (20):
+
+- The clock starts when a lease on the resource ends, and a pass of its own keeps it:
+  `flowkit-capacity idle`, which the tmux status tick starts detached at most once a minute while
+  the file has a `stop` line (without tmux, run it from cron). It costs one file read with no such
+  line, and no `claude agents` call while no such resource is leased or counting. A lease shorter
+  than a minute between two passes is not seen. A resource nobody leased has no clock: one you
+  started by hand, and one that was stopped and that you start again, is left alone until a
+  session next takes it and gives it back.
+- A lease ends the spell: a session's, a launch's, your test hold. A command a session runs on the
+  resource without the lease (an `audit` match) counts the minutes from that command again; it
+  never starts a clock. A resource a queued launch waits for is left up. Nothing watches your own
+  hands: say that you are testing, and the session you tell runs
+  `flowkit-capacity hold <resource> --for me`, after starting the resource when `take` or `status`
+  says it was stopped.
+- When the minutes are over the pass takes the resource itself for as long as the command runs
+  (`held by idle stop`), so nobody takes it mid-stop, and runs the command outside the lock:
+  through `sh -c`, from your home directory, with the tick's environment (give absolute paths),
+  killed with everything it started after 60 seconds. A pass that does not get the lock within a
+  second leaves that minute out.
+- Exit 0 ends the spell: the command runs once per free spell. Any other exit, or the timeout, is
+  tried again by the next pass, five times in all; then the spell ends as failed, with one macOS
+  notification. So let the command prove its own result: stop, then look, and exit 0 only when
+  nothing is left running. Every try is a `stop` line in the log. `flowkit-capacity status` shows
+  `free · stopped 14:20` or `free · stop failed (exit 1) 14:25` until the resource's next lease,
+  and the `take` that follows a stop says `simulator was stopped at 14:20, left free: start it
+  first`.
 
 **The gate.** Every story launch through `flowkit-spawn` (`--single` excepted) asks it first,
 after the refusals and before anything is typed:
@@ -785,7 +819,9 @@ plugin, `/coordinate:start`).
 
 **The audit hook.** A `PreToolUse` hook on Bash (`capacity.py audit`) logs `audit` when a command
 matches a resource's `audit` pattern and the session running it does not hold that resource: the
-resource, the session, who holds it (or nobody) and the command's first 200 characters. It never
+resource, the session, who holds it (or nobody) and the command's first 200 characters. When
+nobody holds a resource that has a `stop` line, the match also counts its free minutes from that
+command again. It never
 denies and prints nothing; with no `capacity.conf`, or no `audit` line, it costs one file check.
 
 **Report.** `flowkit-capacity report --since 7d` reads the log and the transcripts for a window:
@@ -824,8 +860,11 @@ pass it as `--against` to the battle test's report.
 State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/capacity/`: `resources/<name>.json` (the
 leases), `launching/<pid>.json` (an in-flight launch, counted while its pid lives), `queue/<id>.json`
 (a queued launch: its arguments, prompt, story, tree, needs, left, work, by, queued-at), `log.jsonl`
-(one line per take, release, free, reclaim, hold, launch, queue, dequeue, gone, repoint, over-cap,
-test, limit, waves, audit, note and watch; `reclaim` when the holder died; launch, queue and dequeue carry
+(one line per take, release, free, reclaim, hold, stop, launch, queue, dequeue, gone, repoint, over-cap,
+test, limit, waves, audit, note and watch; `reclaim` when the holder died; `stop` is one try of a
+`stop` command, with the `resource`, `since` (what its free minutes were counted from), `minutes`,
+`code` (the exit code, or `timeout`), `seconds`, `tries` and, when it failed, its last line of
+`output`; launch, queue and dequeue carry
 the repo, `Left:`, `Kind:` as `work` and, for a gate call, the launcher and its load-hold seconds; dequeue its `gap`;
 queue and over-cap carry `chains`, the chains counted then: each one's `name` (its sessions; its
 story while it launches; `yours` for your test hold), `state` (`busy` when one of its sessions is,
@@ -834,7 +873,9 @@ story while it launches; `yours` for your test hold), `state` (`busy` when one o
 file removed by hand, logged once by the next gate call, drain, take, release, hold or status;
 the gate's lines for a watch's launch carry `watch`),
 `drained` (the last drain of a non-empty queue), `limits.json`, `testq.json` (test-queue lines tied
-to queued launches) and
+to queued launches), `idle/<name>.json` (the minute pass's stamp for a resource with a `stop` line:
+`held`, `free` with `since` and `tries`, `stopped` or `failed` with `at`; beside it `<name>.used`,
+the time of the last command a session ran on it without the lease) and
 `status.json`, rewritten on every change with a `version` field (3 since it lists the open
 watches as `watches`; a chain's `kind` and `weight` came later without a new version;
 `../board/tests/fixtures/capacity-status.ts` shows its shape). Every change runs under one lock that is
