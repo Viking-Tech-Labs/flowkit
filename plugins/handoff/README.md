@@ -676,6 +676,23 @@ A launch says its kind in its prompt's header, `Kind: implementation`, and the g
 
 With no `weight` line every chain counts 1, whatever its `Kind:` says and whatever it holds.
 
+Choosing the numbers: `slots` is the budget in units of the lightest kind, and a weight says how
+many of those one chain of a kind stands for, by what it takes of the machine next to the others
+and how fast it spends usage. Start from the most the machine has carried without trouble (the
+report's peak of sessions at once and its minutes over the slots), then read the numbers back as
+mixes: `slots` divided by a weight is how many chains of that kind run at once on their own (8
+with implementation 2: four), and what is left beside one of the heaviest is what runs during it
+(8 with a test at 4: two implementations, or four reviews). The file is read at every gate call,
+so a number can move at any time.
+
+The weights count only what the prompts say. Every word a `Kind:` line may carry needs a `weight`
+line spelled the same, since a word with none counts as unmarked. The close writes the line from
+its prompt template (with a ladder, the ladder's kind for the slice: planning, investigation,
+implementation, review, docs or config), the `coordinate` plugin's briefs carry it, and a `waves`
+item names it as its fourth field. A prompt typed by hand, or drafted before the prompts carried
+the line, has no kind: set `unmarked` to what such a session most likely is, and expect the sum to
+read high until the chains started that way reach their next slice.
+
 **Resources are leased to a session id**, all of a set or none:
 
 | Command | What it does |
@@ -776,7 +793,10 @@ denies and prints nothing; with no `capacity.conf`, or no `audit` line, it costs
 - launch holds (launches that sat in a load hold first) and their minutes;
 - queued launches, the minutes they waited, the median launch ETA error (the queued line's time
   against the drain) and the median ready ETA error (a test-queue line's first ETA against the
-  moment its state first says `to test`);
+  moment its state first says `to test`). A wait counts when it ended (its `dequeue`) or while
+  its entry is still in the queue, to the window's end; a launch that left the queue by hand
+  (its `queue/<id>.json` removed) counts nothing and is told beside them, `1 more left the queue
+  by hand`;
 - resource waits per resource (queued launches whose reason names it) and their minutes;
 - reclaims and over-cap launches;
 - idle with a queue: a drain that launched an entry logs `gap`, the time since the drain before it
@@ -804,9 +824,14 @@ pass it as `--against` to the battle test's report.
 State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/capacity/`: `resources/<name>.json` (the
 leases), `launching/<pid>.json` (an in-flight launch, counted while its pid lives), `queue/<id>.json`
 (a queued launch: its arguments, prompt, story, tree, needs, left, work, by, queued-at), `log.jsonl`
-(one line per take, release, free, reclaim, hold, launch, queue, dequeue, repoint, over-cap, test,
-limit, waves, audit, note and watch; `reclaim` when the holder died; launch, queue and dequeue carry
+(one line per take, release, free, reclaim, hold, launch, queue, dequeue, gone, repoint, over-cap,
+test, limit, waves, audit, note and watch; `reclaim` when the holder died; launch, queue and dequeue carry
 the repo, `Left:`, `Kind:` as `work` and, for a gate call, the launcher and its load-hold seconds; dequeue its `gap`;
+queue and over-cap carry `chains`, the chains counted then: each one's `name` (its sessions; its
+story while it launches; `yours` for your test hold), `state` (`busy` when one of its sessions is,
+`idle`, `launching` or `hold`), `holds` (its resources), `kind` and `weight`, or `null` when
+`claude agents` did not answer; `gone` is a queued launch that left the queue with no drain, its
+file removed by hand, logged once by the next gate call, drain, take, release, hold or status;
 the gate's lines for a watch's launch carry `watch`),
 `drained` (the last drain of a non-empty queue), `limits.json`, `testq.json` (test-queue lines tied
 to queued launches) and
