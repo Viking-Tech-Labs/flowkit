@@ -630,13 +630,14 @@ naming it in `Needs:`. A slice there may still take a device. `check = <command>
 watch runs for a merge request of this repository in place of asking GitLab (exit 0 green, 1 red,
 2 still running; see "Watches").
 
-**Slots are counted, never leased.** A slot is a working tree with a live story session in it, read
+**Slots are counted, never leased.** A slot is a story with a live session in a working tree, read
 from `claude agents --json --all` and the story files each time it is asked, so a crashed or resumed
 session cannot leak one. A session belongs to a story when the story file names it (a close
 heading, a `Next:` line, a `> launched <name>` line). Reporters (`<story>-report`) and coordinators
 do not count, nor a session whose close is recorded (by its `Session:` id) unless it is busy again;
-a review in the same tree as the next slice shares its slot; a tree whose sessions sat 2 hours with
-no close shows as `stalled` and stops counting. When `claude agents` fails, hangs or answers in a
+a review in the same tree as the next slice shares its slot, while sessions of other stories in that
+tree (a main checkout several stories read in) count as chains of their own; a chain whose sessions
+sat 2 hours with no close shows as `stalled` and stops counting. When `claude agents` fails, hangs or answers in a
 shape it does not know, the count is unknown, never zero: nothing is reclaimed.
 
 **Slots by weight.** A chain counts one slot unless the file gives kinds of work a weight:
@@ -660,8 +661,8 @@ A launch says its kind in its prompt's header, `Kind: implementation`, and the g
 `work` on the log line, the `launching/` marker and the queue entry.
 
 - A chain counts the largest of: its sessions' kinds (each session's latest start in the log, a
-  marker's own) and the kinds that the resources it holds imply. Sessions sharing a tree count
-  once, at the largest.
+  marker's own) and the kinds that the resources it holds imply. Sessions of one story sharing
+  a tree count once, at the largest.
 - A session in neither the log nor a marker is unmarked, and so is a kind with no `weight` line
   (one stderr line at the gate). Unmarked counts as the `unmarked` line's kind, or 1 without that
   line.
@@ -755,9 +756,10 @@ after the refusals and before anything is typed:
   file and exits 11. The time is the waves forecast's (below). `--over-cap` launches it anyway,
   logged as `over-cap`.
 - A chain's **own next slice** never waits for a slot: the launching session belongs to the same
-  story (or runs in the tree the launch goes to, a first slice started by hand). A coordinator's or
-  a reporter's launch is always a new chain. A launch into a tree that already holds a counted
-  chain (a review beside the next slice) needs no slot either.
+  story (or, named in no story file, runs in the tree the launch goes to: a first slice started by
+  hand). A coordinator's or a reporter's launch is always a new chain, as is a launch of another
+  story. A launch into a tree that already holds a counted chain of its story (a review beside the
+  next slice) needs no slot either.
 - The prompt's header (the lines before its first blank one) may carry `Needs: simulator, backend`,
   `Left: 2` (slices left after this one, for ETAs) and `Kind: implementation` (what the chain
   counts, "Slots by weight" above). What `Needs:` names is taken all or none

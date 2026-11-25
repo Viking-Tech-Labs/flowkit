@@ -341,10 +341,12 @@ def markers():
 
 
 def held_by(chain, held):
-    """The resources a chain holds: a lease of one of its sessions, or one taken in its tree."""
+    """The resources a chain holds: a lease of one of its sessions, or one taken in its tree for
+    its story (or for none)."""
     sids = {s["session"] for s in chain.get("sessions", [])}
     return {n for n, lease in held.items() if lease["session"] != ME and (
-        lease["session"] in sids or os.path.realpath(lease.get("tree") or "/") == chain["tree"])}
+        lease["session"] in sids or os.path.realpath(lease.get("tree") or "/") == chain["tree"]
+        and (lease.get("story") or chain.get("story")) == chain.get("story"))}
 
 
 def holders(found, held):
@@ -368,12 +370,14 @@ def holders(found, held):
 
 
 def chains(rows, t=None, ending=(), cfg=None):
-    """The working trees with a live story session in them, or None when liveness is unknown. A
+    """The stories with a live session in a working tree, one chain per tree and story, or None
+    when liveness is unknown. A
     reporter or coordinator does not count, nor a session whose close is recorded unless it is busy
     again (a hand resume), nor one in ending (a close being recorded right now: still busy); a tree whose sessions all sat 2 h with no close is `stalled` and does not
-    count. A live launching/ marker holds its tree as `launching`. Sessions sharing a tree (a review
-    beside the next slice) share its slot. Each chain carries the `kind` and `weight` it counts
-    with (weigh): the heaviest of its sessions' kinds (a session's latest start in the log, a
+    count. A live launching/ marker holds its tree and story as `launching`. Sessions of one story
+    sharing a tree (a review beside the next slice) share its slot; sessions of other stories in the
+    same tree (a main checkout several stories read in) are chains of their own. Each chain
+    carries the `kind` and `weight` it counts with (weigh): the heaviest of its sessions' kinds (a session's latest start in the log, a
     marker's own; unmarked in neither) and of what the resources it holds imply. The user's test
     hold on a resource that implies a kind is one more entry, `hold`, with no tree: it counts
     that weight once, until the hold runs out."""
@@ -395,8 +399,8 @@ def chains(rows, t=None, ending=(), cfg=None):
             continue
         touched = last_touch(row)
         tree = toplevel(row["cwd"])
-        chain = trees.setdefault(tree, {"tree": tree, "repo": main_checkout(tree), "story": members[name],
-                                        "sessions": [], "pid": None})
+        chain = trees.setdefault((tree, members[name]), {"tree": tree, "repo": main_checkout(tree),
+                                                         "story": members[name], "sessions": [], "pid": None})
         chain["sessions"].append({"name": name, "session": sid, "status": row.get("status") or "",
                                   "stalled": not busy and touched is not None and t - touched > STALL})
     for chain in trees.values():
@@ -404,18 +408,19 @@ def chains(rows, t=None, ending=(), cfg=None):
     launching = {}
     for mark in markers():
         tree = mark.get("tree")
-        if mark["alive"] and tree and os.path.realpath(tree) not in trees:
-            tree = os.path.realpath(tree)
-            trees[tree] = {"tree": tree, "repo": main_checkout(tree), "story": mark.get("story") or "",
-                           "sessions": [], "state": "launching", "pid": mark["pid"]}
-            launching[tree] = mark.get("work") or ""
+        key = (os.path.realpath(tree or "/"), mark.get("story") or "")
+        if mark["alive"] and tree and key not in trees:
+            tree = key[0]
+            trees[key] = {"tree": tree, "repo": main_checkout(tree), "story": key[1],
+                          "sessions": [], "state": "launching", "pid": mark["pid"]}
+            launching[key] = mark.get("work") or ""
     held = leases()
     works = {s["name"]: s["work"] for s in starts(events())} if cfg["weights"] else {}
     for chain in trees.values():
-        own = [works.get(s["name"], "") for s in chain["sessions"]] or [launching[chain["tree"]]]
+        own = [works.get(s["name"], "") for s in chain["sessions"]] or [launching[(chain["tree"], chain["story"])]]
         chain["kind"], chain["weight"] = max((weigh(cfg, work, held_by(chain, held)) for work in own),
                                              key=lambda kw: kw[1])
-    found = sorted(trees.values(), key=lambda c: c["tree"])
+    found = sorted(trees.values(), key=lambda c: (c["tree"], c["story"]))
     mine = {n: lease.get("until") or 0 for n, lease in held.items()
             if lease["session"] == ME and (lease.get("until") or 0) > t and implied(cfg, [n])}
     if mine:
@@ -807,13 +812,13 @@ def load_held():
     return time.time() - at < HOLD_STALE
 
 
-def full(cfg, found, tree, kind="", weight=1):
-    """Why a new chain in tree, counting weight as kind (weigh), has no room, or None: the weights
-    counted on the machine, or in its repo, leave less of the slots than it needs, unless nothing
-    else is counted there (within). A tree that already holds a counted chain (a review beside a
-    slice) needs no slot."""
+def full(cfg, found, tree, story, kind="", weight=1):
+    """Why a new chain of story in tree, counting weight as kind (weigh), has no room, or None: the
+    weights counted on the machine, or in its repo, leave less of the slots than it needs, unless
+    nothing else is counted there (within). A tree that already holds a counted chain of that story
+    (a review beside a slice) needs no slot."""
     counted = [c for c in found if c["state"] != "stalled"]
-    if any(c["tree"] == tree for c in counted):
+    if any(c["tree"] == tree and c["story"] == story for c in counted):
         return None
     needs = f", {kind} needs {weight}" if kind else ""
     used = sum(c["weight"] for c in counted)
@@ -903,30 +908,33 @@ def forecast(cfg, found, waiting, items, t, log_events=None):
 
     def per(repo):
         return med.get(repo, cfg["slice_minutes"] * 60)
-    latest = {os.path.realpath(s["tree"]): s for s in starts(log_events) if s["tree"]}
+    latest = {(os.path.realpath(s["tree"]), s["story"]): s for s in starts(log_events) if s["tree"]}
     held = leases()
     running, claimed = [], set()
     for c in found or []:
         if c["state"] == "stalled":
             continue
-        s, m = latest.get(c["tree"]), per(c["repo"])
+        s, m = latest.get((c["tree"], c.get("story", ""))), per(c["repo"])
         end = c["until"] if c["state"] == "hold" else \
             max((s["t"] if s else t) + m, t + min(OVERDUE, m)) + ((s or {}).get("left") or 0) * m
         needs = held_by(c, held)
         claimed |= needs
-        running.append({"end": end, "tree": c["tree"], "repo": c["repo"], "needs": needs, "weight": c.get("weight", 1)})
+        running.append({"end": end, "tree": c["tree"], "story": c.get("story", ""), "repo": c["repo"], "needs": needs,
+                        "weight": c.get("weight", 1)})
     others = [(n, lease.get("until") or t + cfg["slice_minutes"] * 60) for n, lease in held.items() if n not in claimed]
-    pending = [{"key": ("queue", e["id"]), "tree": e.get("tree") or "", "needs": set(e.get("needs", [])),
+    pending = [{"key": ("queue", e["id"]), "tree": e.get("tree") or "", "story": e.get("story") or "",
+                "needs": set(e.get("needs", [])),
                 "slices": (e.get("left") or 0) + 1, "free": bool(e.get("continuation") or e.get("over_cap")),
                 "work": e.get("work") or ""} for e in waiting]
-    pending += [{"key": ("item", n), "tree": i["tree"], "needs": set(i["needs"]), "slices": max(i["slices"], 1),
+    pending += [{"key": ("item", n), "tree": i["tree"], "story": i.get("story") or "", "needs": set(i["needs"]),
+                 "slices": max(i["slices"], 1),
                  "free": False, "work": i.get("kind") or ""} for n, i in enumerate(items)]
     for p in pending:
         p["repo"] = repo_of(p["tree"])
         p["weight"] = weigh(cfg, p["work"], p["needs"])[1]
 
     def room(p):
-        if p["free"] or any(r["tree"] == p["tree"] for r in running):
+        if p["free"] or any((r["tree"], r["story"]) == (p["tree"], p["story"]) for r in running):
             return True
         limit = (cfg["repos"].get(p["repo"]) or {}).get("slots")
         return within(sum(r["weight"] for r in running), p["weight"], cfg["slots"]) and (
@@ -940,7 +948,7 @@ def forecast(cfg, found, waiting, items, t, log_events=None):
             fits = p["free"] or not slot_wait and room(p)
             if fits and not p["needs"] & (busy | wanted):
                 ready = at + p["slices"] * per(p["repo"])
-                running.append({"end": ready, "tree": p["tree"], "repo": p["repo"], "needs": p["needs"],
+                running.append({"end": ready, "tree": p["tree"], "story": p["story"], "repo": p["repo"], "needs": p["needs"],
                                 "weight": p["weight"]})
                 busy |= p["needs"]
                 if at not in waves:
@@ -965,13 +973,17 @@ def eta(cfg, found, waiting, entry, t):
 
 
 def continues(me, story, tree):
-    """Whether a launch by session me continues its own chain: me is a session of that story, or
-    runs in the tree the launch goes to (a first slice started by hand that no story file names
-    yet). A coordinator or a reporter never continues: what it launches is a chain of its own."""
+    """Whether a launch by session me continues its own chain: me is a session of that story, or,
+    named in no story file (a first slice started by hand), runs in the tree the launch goes to. A
+    coordinator or a reporter never continues: what it launches is a chain of its own, as is what a
+    session of another story launches."""
     name = me.get("name") or ""
     if not name or name.endswith("-report") or COORD_NAME.search(name) or name in coordinators():
         return False
-    return stories()[0].get(name) == story or bool(me.get("cwd")) and toplevel(me["cwd"]) == tree
+    members = stories()[0]
+    if name in members:
+        return members[name] == story
+    return bool(me.get("cwd")) and toplevel(me["cwd"]) == tree
 
 
 def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=False, t=None, held=0, watch=""):
@@ -1018,7 +1030,7 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
         leased = leases()
         why = None
         if not cont:
-            room = "claude agents did not answer" if found is None else full(cfg, found, tree, *weigh(cfg, work, needs))
+            room = "claude agents did not answer" if found is None else full(cfg, found, tree, story, *weigh(cfg, work, needs))
             if room is None and any(not e.get("continuation") for e in waiting):
                 room = "behind the queue"
             if room and over_cap:
@@ -1039,7 +1051,7 @@ def gate(rows, pid, tree, story, name, prompt, argv, me, over_cap=False, dry=Fal
                                           first and f"{', '.join(first)} goes to a watch's launch first"]))
         if why:
             position = len(waiting) + 1
-            start = eta(cfg, found, waiting, {"tree": tree, "needs": needs, "left": left, "continuation": cont,
+            start = eta(cfg, found, waiting, {"tree": tree, "story": story, "needs": needs, "left": left, "continuation": cont,
                                               "over_cap": over_cap, "work": work}, t)
             if dry:
                 return 0, f"QUEUED #{position}, ~{clock(start)} · {why} (dry run: nothing queued)"
@@ -1148,7 +1160,7 @@ def drain(rows, t=None, ending=()):
             work = e.get("work") or ""
             kind, weight = weigh(cfg, work, needs)
             room = e.get("continuation") or e.get("over_cap") or (
-                found is not None and not slot_wait and full(cfg, found, e["tree"], kind, weight) is None)
+                found is not None and not slot_wait and full(cfg, found, e["tree"], e.get("story", ""), kind, weight) is None)
             if room and not needs & (held | wanted):
                 pid = spawn(e)
                 reserve(pid, e["tree"], e.get("story", ""), e.get("name", ""), needs, t, work=work)
@@ -1164,8 +1176,8 @@ def drain(rows, t=None, ending=()):
                     tie_launch(e["name"], None)
                 held |= needs
                 if found is not None:
-                    found.append({"tree": e["tree"], "repo": main_checkout(e["tree"]), "state": "launching",
-                                  "weight": weight})
+                    found.append({"tree": e["tree"], "repo": main_checkout(e["tree"]), "story": e.get("story", ""),
+                                  "state": "launching", "weight": weight})
                 started.append({**e, "pid": pid})
             else:
                 slot_wait = slot_wait or not room
@@ -1321,7 +1333,8 @@ def limit(repo, delta, hours, t):
 
 def waves(rows, specs, story="", write=False, t=None):
     """A batch's plan: one line per item (wave, start, ready, slices, needs; an item that needs no
-    resource is shed to a chain of its own) and the coordinator's plan line. specs are
+    resource is shed to a chain of its own; every item counts as a chain of its own, also beside
+    another in its tree) and the coordinator's plan line. specs are
     `NAME=TREE[:SLICES[:NEEDS[:KIND]]]`, NEEDS joined by `+` or `,`, in launch order; KIND is the
     kind of work the item counts as (unmarked without one). With story, the
     plan line counts that story's test-queue lines waiting on the user's testing; with write,
@@ -1343,7 +1356,7 @@ def waves(rows, specs, story="", write=False, t=None):
             print(f"capacity: {m['name']} is of kind {kind}, with no weight line in {config_path()}: counted as unmarked",
                   file=sys.stderr)
         items.append({"name": m["name"], "tree": toplevel(os.path.expanduser(m["tree"])),
-                      "slices": int(m["slices"] or 1), "needs": needs - stray, "kind": kind})
+                      "slices": int(m["slices"] or 1), "needs": needs - stray, "kind": kind, "story": m["name"]})
     found = chains(rows, t, cfg=cfg)
     waiting = entries()
     plan = forecast(cfg, found, waiting, items, t)
@@ -1367,11 +1380,11 @@ def waves(rows, specs, story="", write=False, t=None):
                 testq_set(story, item["name"], t, eta=p["ready"], state=f"queued, wave {p['wave']}" + (
                     f", needs {', '.join(sorted(item['needs']))}" if item["needs"] else ""))
                 tie_launch(item["name"], {"story": story, "item": item["name"]})
-    used = {c["tree"]: c["weight"] for c in found or [] if c["state"] != "stalled"}
-    for tree, work, names in [(e["tree"], e.get("work") or "", e.get("needs", [])) for e in waiting
-                              if plan[("queue", e["id"])]["start"] == t] + [
-            (i["tree"], i["kind"], i["needs"]) for n, i in enumerate(items) if plan[("item", n)]["start"] == t]:
-        used[tree] = max(used.get(tree, 0), weigh(cfg, work, names)[1])
+    used = {(c["tree"], c["story"]): c["weight"] for c in found or [] if c["state"] != "stalled"}
+    for key, work, names in [((e["tree"], e.get("story") or ""), e.get("work") or "", e.get("needs", [])) for e in waiting
+                             if plan[("queue", e["id"])]["start"] == t] + [
+            ((i["tree"], i["story"]), i["kind"], i["needs"]) for n, i in enumerate(items) if plan[("item", n)]["start"] == t]:
+        used[key] = max(used.get(key, 0), weigh(cfg, work, names)[1])
     parts = [f"Plan: {len(now_)} of {len(items)} now ({', '.join(now_) or '-'})"]
     if later:
         parts.append(f"{len(later)} queued ({', '.join(later)})")

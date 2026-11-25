@@ -204,6 +204,24 @@ class Capacity(unittest.TestCase):
         self.assertEqual((used["slots"], used["used"]), (3, 2))
         self.assertEqual(used["repos"], {str(app): {"slots": 1, "used": 2}})
 
+    def test_stories_sharing_a_tree_are_chains_of_their_own(self):
+        app = self.repo("app")
+        self.conf.write_text("slots = 2\n")
+        sa, sb = "a" * 8 + "-1111-1111-1111-" + "1" * 12, "b" * 8 + "-1111-1111-1111-" + "1" * 12
+        self.story("sa", "> launched sa-s1\n")
+        self.story("sb", "> launched sb-s1\n")
+        rows = [self.row("sa-s1", sa, app), self.row("sb-s1", sb, app)]
+        self.agents(rows)
+        found = capacity.chains(rows)
+        self.assertEqual([(c["tree"], c["story"]) for c in found], [(str(app), "sa"), (str(app), "sb")])
+        self.assertEqual(capacity.slots(capacity.load_config(), found)["used"], 2)
+        code, msg = capacity.gate(rows, "4242", app, "sc", "sc-s1", "", [], {}, dry=True)
+        self.assertIn(" · slots 2/2 (dry run", msg, "a third story in the same checkout needs a slot")
+        self.assertEqual(capacity.gate(rows, "4242", app, "sa", "sa-review", "", [], {}, dry=True), (0, "new chain"),
+                         "a review beside its own story's slice shares that slot")
+        me = {"sessionId": sa, "name": "sa-s1", "cwd": str(app)}
+        self.assertEqual((capacity.continues(me, "sa", str(app)), capacity.continues(me, "sc", str(app))), (True, False))
+
     def test_a_launching_marker_holds_its_tree_while_its_pid_lives(self):
         app = self.repo("app")
         launching = self.claude / "capacity" / "launching"
@@ -865,7 +883,8 @@ class Capacity(unittest.TestCase):
     M = 60
 
     def running(self, tree, sid="0" * 8 + "-2222-2222-2222-" + "2" * 12):
-        return {"tree": str(tree), "repo": str(tree), "state": "running", "sessions": [{"session": sid, "name": "x"}]}
+        return {"tree": str(tree), "repo": str(tree), "story": Path(tree).name, "state": "running",
+                "sessions": [{"session": sid, "name": "x"}]}
 
     def plan(self, found, items, log, slots=3, waiting=()):
         cfg = {**capacity.DEFAULTS, "slots": slots, "repos": {}}
