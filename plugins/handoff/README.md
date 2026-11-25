@@ -636,6 +636,46 @@ a review in the same tree as the next slice shares its slot; a tree whose sessio
 no close shows as `stalled` and stops counting. When `claude agents` fails, hangs or answers in a
 shape it does not know, the count is unknown, never zero: nothing is reclaimed.
 
+**Slots by weight.** A chain counts one slot unless the file gives kinds of work a weight:
+
+```
+slots = 8
+weight review = 1           # what a chain of this kind counts toward the slots
+weight implementation = 2
+weight test = 4
+unmarked = implementation   # the kind a session with no Kind: line counts as
+
+[/Users/me/app]
+resource simulator = install a build, run a device check, hand over a test
+kind simulator = test       # a chain holding the simulator counts as a test
+```
+
+A kind is a word of your own (letters, digits, `.`, `_`, `-`; case does not matter). `weight` and
+`unmarked` are machine lines, above the first section; `kind <resource> = <kind>` belongs to a
+section, holds machine-wide like the resource's name, and names a kind that has a `weight` line.
+A launch says its kind in its prompt's header, `Kind: implementation`, and the gate keeps it as
+`work` on the log line, the `launching/` marker and the queue entry.
+
+- A chain counts the largest of: its sessions' kinds (each session's latest start in the log, a
+  marker's own) and the kinds that the resources it holds imply. Sessions sharing a tree count
+  once, at the largest.
+- A session in neither the log nor a marker is unmarked, and so is a kind with no `weight` line
+  (one stderr line at the gate). Unmarked counts as the `unmarked` line's kind, or 1 without that
+  line.
+- Your own test hold on a resource that implies a kind counts that kind's weight once, however
+  many such resources it holds, until it runs out.
+- `used` is the sum, for the machine and for a repo with its own `slots` (a `limit` moves that
+  number as before). A new chain counts as its `Kind:` or as what its `Needs:` imply, whichever
+  is more, and starts when the sum plus that is within `slots`, or when nothing else is counted:
+  a launch heavier than the whole budget still starts on an empty machine. Otherwise it is queued
+  with both numbers, `slots 7/8, implementation needs 2`.
+- A chain's own next slice and a watch's launch never wait, as before, so the sum may run over
+  `slots`; new chains then wait until it is back under.
+- `status` ends each chain's line with its kind and weight (`· implementation 2`) and lists a
+  counted test hold as `chain yours · test hold until 12:30 · test 4`.
+
+With no `weight` line every chain counts 1, whatever its `Kind:` says and whatever it holds.
+
 **Resources are leased to a session id**, all of a set or none:
 
 | Command | What it does |
@@ -645,7 +685,7 @@ shape it does not know, the count is unknown, never zero: nothing is reclaimed.
 | `flowkit-capacity release [names]` | Gives back what this session holds, all of it without names. |
 | `flowkit-capacity hold simulator --for me --minutes 60` | Your test hold: no slice takes it until the minutes run out or `release --for me`; run it again to renew. |
 | `flowkit-capacity drain` | Launches what the queue holds that can start now (it also runs on its own, see below). |
-| `flowkit-capacity waves a=/Users/me/app:2:simulator b=/Users/me/lib [--story s --write]` | Plans a batch (`NAME=TREE[:SLICES[:NEEDS]]`, needs joined by `+`, in launch order): each item's wave, start and ready times, and one plan line. See "Waves" below. |
+| `flowkit-capacity waves a=/Users/me/app:2:simulator b=/Users/me/lib [--story s --write]` | Plans a batch (`NAME=TREE[:SLICES[:NEEDS[:KIND]]]`, needs joined by `+`, in launch order; `b=/Users/me/lib:1::review` names a kind and no need): each item's wave, start and ready times, and one plan line. See "Waves" below. |
 | `flowkit-capacity testq <story> [set\|drop <item>] [--state …] [--eta HH:MM] [--mr …] [--device …] [--gate …] [--launch name]` | The story's test queue, `<story>.tests.md`, one line at a time under the lock, each change logged as `test`. The file goes once its last line does. `--gate` sets what the item waits for before it merges ("The test queue's fields" below). `--launch` ties a line to a queued launch: its drain sets it `running` with its ready time. |
 | `flowkit-capacity limit /Users/me/app -1 [--hours 12]` | The repo runs one slot fewer (never under one) for the hours given; `0` ends it. Logged as `limit`. |
 | `flowkit-capacity report [--since 7d] [--until …] [--baseline] [--against base.json] [--json]` | The numbers of a week under the gate: see "Report" below. |
@@ -667,8 +707,9 @@ after the refusals and before anything is typed:
   story (or runs in the tree the launch goes to, a first slice started by hand). A coordinator's or
   a reporter's launch is always a new chain. A launch into a tree that already holds a counted
   chain (a review beside the next slice) needs no slot either.
-- The prompt's header (the lines before its first blank one) may carry `Needs: simulator, backend`
-  and `Left: 2` (slices left after this one, for ETAs). What `Needs:` names is taken all or none
+- The prompt's header (the lines before its first blank one) may carry `Needs: simulator, backend`,
+  `Left: 2` (slices left after this one, for ETAs) and `Kind: implementation` (what the chain
+  counts, "Slots by weight" above). What `Needs:` names is taken all or none
   for the launch, before anything waits; a name no section declares is ignored with one stderr
   line. A continuation's closer hands over what it holds only when every need is free at once;
   otherwise it gives back everything it holds and the launch is queued holding nothing, so two
@@ -697,7 +738,8 @@ only.
 
 **Waves.** `waves` and every queued ETA replay the drain's rules forward in time: the running
 chains end after their current slice and the `Left:` count of their latest launch, the queue goes
-first, then the batch in order; a new chain waits for a slot, every item for all its needs at once,
+first, then the batch in order; a new chain waits for a slot (for room for its weight, each running
+chain at the weight it counts now), every item for all its needs at once,
 and nobody passes an earlier one waiting for a slot or the same resource. A slice lasts its repo's
 median from the log (from a slice's launch to its own gate call for the next one, the minutes that
 call sat in a load hold taken off, spans over 12 hours left out), or `slice_minutes` until a repo
@@ -761,15 +803,16 @@ pass it as `--against` to the battle test's report.
 
 State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/capacity/`: `resources/<name>.json` (the
 leases), `launching/<pid>.json` (an in-flight launch, counted while its pid lives), `queue/<id>.json`
-(a queued launch: its arguments, prompt, story, tree, needs, left, by, queued-at), `log.jsonl`
+(a queued launch: its arguments, prompt, story, tree, needs, left, work, by, queued-at), `log.jsonl`
 (one line per take, release, free, reclaim, hold, launch, queue, dequeue, repoint, over-cap, test,
 limit, waves, audit, note and watch; `reclaim` when the holder died; launch, queue and dequeue carry
-the repo, `Left:` and, for a gate call, the launcher and its load-hold seconds; dequeue its `gap`;
+the repo, `Left:`, `Kind:` as `work` and, for a gate call, the launcher and its load-hold seconds; dequeue its `gap`;
 the gate's lines for a watch's launch carry `watch`),
 `drained` (the last drain of a non-empty queue), `limits.json`, `testq.json` (test-queue lines tied
 to queued launches) and
 `status.json`, rewritten on every change with a `version` field (3 since it lists the open
-watches as `watches`; `../board/tests/fixtures/capacity-status.ts` shows its shape). Every change runs under one lock that is
+watches as `watches`; a chain's `kind` and `weight` came later without a new version;
+`../board/tests/fixtures/capacity-status.ts` shows its shape). Every change runs under one lock that is
 tried for 10 seconds and then gone on without, with one stderr line, so a stuck holder never
 stalls the machine.
 
