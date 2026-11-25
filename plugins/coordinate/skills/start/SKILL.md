@@ -120,8 +120,10 @@ to the spawner): what the story's last session leaves behind, which every worker
 serves and which says whether a worker pushes. `none` means the story has no line yet: write
 `none` and no worker pushes.
 
-Every brief's header carries the worker's resources and the slices left after its first one,
-which the gate reads: `Needs: simulator, backend   Left: 2` (`Needs: none` for none).
+Every brief's header carries the worker's resources, the slices left after its first one and its
+kind of work, which the gate reads: `Needs: simulator, backend   Left: 2   Kind: implementation`
+(`Needs: none` for none; the kind is one word, the ladder's for the worker when there is a
+ladder, and what the worker's chain counts toward the slots).
 
 Start each worker, in plan order, all of them: the gate decides what starts now.
 

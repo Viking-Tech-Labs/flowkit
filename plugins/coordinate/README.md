@@ -81,7 +81,10 @@ its own, and launches everything in order: the gate starts what fits and queues 
 Plan: 3 of 7 now (A, B, C) · 2 queued (D ~16:40, E ~18:10) · 2 shed (F, G) · slots 3/3 · 4 wait on your testing
 ```
 
-- Briefs carry `Needs:` and `Left:` in their header, which the gate reads.
+- Briefs carry `Needs:`, `Left:` and `Kind:` in their header, which the gate reads: the resources
+  a worker uses, its slices left, and its kind of work in one word (`Kind: review`), which is
+  what its chain counts toward the slots when `capacity.conf` gives kinds a weight. A `waves`
+  item names the same word as its fourth field (`b=/Users/me/lib:1::review`).
 - A worker's DONE while anything is queued gets told to close at once: an idle worker holds its
   slot.
 - The test queue (`<story>.tests.md`) is written only through `capacity.py testq`, locked and

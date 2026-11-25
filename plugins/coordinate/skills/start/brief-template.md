@@ -2,6 +2,7 @@ Repo: <path>   Session: <worker>   Story: <slug>
 [Model: <model>   Effort: <effort>]
 [Why this model: <the reason the ladder gave>]
 [Needs: <the resources any of its slices needs, or none>   Left: <slices left after this one>]
+Kind: <its kind of work, one word: implementation, investigation, review …>
 
 You are the worker for <workstream> of <slug>, coordinated by the session "<coordinator>".
 Branch or worktree: <branch>.

@@ -22,7 +22,9 @@ the recommended option at every fork and mark it "(auto)".
 ## 1. Plan the batch
 
 For each item: the repo or worktree it runs in, how many slices it takes, and which resources any
-of its slices needs (the names `<cap> status` lists under `resource`). An item that needs none is
+of its slices needs (the names `<cap> status` lists under `resource`), and its kind of work, one
+word (`review`, `implementation`: with a ladder, the ladder's kind for the worker; where
+`capacity.conf` has `weight` lines, one of their words). An item that needs none is
 **shed**: it gets a chain of its own (its own story slug, its own reporter and board card, no
 `Report-to` back here) and leaves this board once handed over, so this coordinator stops paying
 for it.
@@ -30,10 +32,12 @@ for it.
 Then, in the order the items should start:
 
 ```sh
-<cap> waves <name>=<tree>:<slices>:<need+need> <name>=<tree>:<slices> ... --story <slug> --write
+<cap> waves <name>=<tree>:<slices>:<need+need>:<kind> <name>=<tree>:<slices>::<kind> ... --story <slug> --write
 ```
 
-It prints one line per item (wave, `now` or `start ~HH:MM`, `ready ~HH:MM`, slices, needs or
+The kind is the fourth field, after an empty third when the item needs nothing
+(`b=/Users/me/lib:1::review`); an item without one counts as unmarked, which may be more than it
+is. It prints one line per item (wave, `now` or `start ~HH:MM`, `ready ~HH:MM`, slices, needs or
 `shed`) and the plan line. The times replay the gate's own rules over the running chains (theirs
 and every other story's, with the `Left:` of their latest launch), the queue and the batch, at
 each repo's median slice time from the log (`slice_minutes` until a repo has history). `--write`
@@ -44,15 +48,16 @@ item's `<name>` as its launch name (`--name`).
 ## 2. Hand it to the gate
 
 Launch every item through `<spawn>`, in plan order, shed items under their own `--story`. Every
-brief's header (the lines before its first blank line) carries the item's resources and the
-slices left after this one, which the gate reads:
+brief's header (the lines before its first blank line) carries the item's resources, the slices
+left after this one and its kind of work, which the gate reads:
 
 ```
 Repo: <path>   Session: <name>   Story: <slug>
-Needs: simulator, emulator   Left: 2
+Needs: simulator, emulator   Left: 2   Kind: implementation
 ```
 
-`Needs: none` (or no line) needs nothing. Exit 0 with `SPAWNED`: started. **Exit 11 with
+`Needs: none` (or no line) needs nothing; `Kind:` is the word the item had in `waves`, and what
+its chain counts toward the slots. Exit 0 with `SPAWNED`: started. **Exit 11 with
 `QUEUED #<n>, ~<HH:MM> · id=<id> · <why>` is not a failure**: the launch waits in the machine's
 queue and starts by itself when its slot and resources free up; put `queued ~HH:MM` on the board
 and go on with the next item. Never retry a queued launch, never wait for it, and pass
