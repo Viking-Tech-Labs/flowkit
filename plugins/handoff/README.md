@@ -208,6 +208,19 @@ still read from there until it is resumed. A tmux.conf the kit wrote before 0.14
 `flowkit-tmux waiting` in its status bar, which hands over to `flowkit-tick bar`: its line and its
 tick go on, and it needs no change.
 
+New in 0.15.0: what flowkit knows of a session is in one file, `~/.claude/flowkit/sessions.json`,
+whatever the session runs in. A session registers itself there at its start (the SessionStart
+hook, at a resume too): the tmux pane it runs in and the story that pane's tab was opened for. The
+tick adds when it last rang a story's reporter and, by pane, when it first saw a start-up prompt.
+The tab words, `autoclose` and the story a session's lines are filed under are read from that
+file, not from tmux. What tmux still holds is what it shows (the word and the count on a tab, the
+state in a pane's border), your own switch (`@flowkit_hold`), and what `flowkit-spawn` marks as it
+launches: the tab's story, read once by the session as it registers and for a pane with no
+session in it, and the stamp of a launch just typed. A session that started before 0.15.0
+registered nothing: it is read from its tab as before until it starts again, and what an older
+tick kept in a pane is still honoured; both stop with 0.16.0. The file is flowkit's own: read it
+if you like, write it through nothing but a session's start.
+
 `~/.local/bin/flowkit-tick` is a copy with no version in its path, like `flowkit-tmux`,
 `flowkit-away` and `flowkit-usage` beside it: moved forward at every session start once the timer
 or the kit is installed, and finding the plugin's scripts through the newest handoff in
