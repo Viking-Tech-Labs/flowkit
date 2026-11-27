@@ -1519,7 +1519,7 @@ esac
 
     def retry_setup(self, autoretry="on", away=True, status="idle", story="", screen="│ > \n", in_mode="0"):
         """A live fake session (a sleep) in pane %7 with its sessions file and transcript; the tmux stub
-        answers show-options with the story, capture-pane with the screen, and records the rest."""
+        answers display-message with the story, capture-pane with the screen, and records the rest."""
         if getattr(self, "proc", None):  # the previous case's session ends, and its waiter with it
             self.proc.kill()
             self.proc.wait()
@@ -1540,7 +1540,7 @@ esac
         (self.tmp / "screen").write_text(screen)
         stub = self.tmp / "bin" / "tmux"
         stub.write_text(f"#!/bin/sh\ncase \"$1\" in list-panes) echo '{self.pid} %7 {in_mode}';;\n"
-                        f"show-options) cat {self.tmp / 'story'};; capture-pane) cat {self.tmp / 'screen'};;\n"
+                        f"display-message) cat {self.tmp / 'story'};; capture-pane) cat {self.tmp / 'screen'};;\n"
                         f"*) echo tmux \"$@\" >> {self.calls};; esac\n")
         stub.chmod(0o755)
         self.env.update(CLAUDE_PID=str(self.pid), TMUX_PANE="%7", XDG_CONFIG_HOME=str(self.tmp),

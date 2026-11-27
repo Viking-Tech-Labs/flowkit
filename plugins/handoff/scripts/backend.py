@@ -21,6 +21,10 @@ asks one of the two backends here, TMUX and BACKGROUND, which answer the same re
   escape(place)               Escape alone: it closes a dialog a typed command left open
   story(place)                the story the session was started for, "" when none is known
   last_input()                when the user last used a terminal of this backend, as a time
+  places()                    every place it has, a session in it or not, each as a dict
+  label(states, groups)       the word the user sees beside each place and each group of places
+  close(place)                the place goes, with what runs in it
+  pick(place, client)         the user's terminal turns to it
 
 A request a backend has no answer to gets the empty one (no screen, no story, nothing parked), so
 a caller asks without knowing which it holds. A program that is missing or hangs raises OSError
@@ -30,15 +34,21 @@ bare pane id for TMUX, known some other way than through locate.
 The same for both, read from Claude Code's own list: agents() and mode(row), which says busy,
 waiting or idle.
 
+What flowkit knows of a session and no backend has to keep for it is in one file, STATE: kept()
+reads it, keep(change) changes it under its lock, register() writes a session's own entry at its
+start, note() adds to one, registered() finds the entry of a place.
+
 This file imports nothing of the plugin, so a command copied out of it loads it by path.
 """
 import collections
+import fcntl
 import json
 import os
 import re
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 Place = collections.namedtuple("Place", "id copy row")
 
@@ -57,6 +67,10 @@ BOTTOM = 8
 STOPPING = 10  # seconds a stopped background session's process may take to go
 GRACE = 3  # seconds from the process going to the resume after ESCAPE: measured on Claude Code 2.1.302, a resume
 #            within a second of the stop starts a copy under a new id, one after 2 s continues
+
+SEP = "\x1f"
+STATE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "flowkit" / "sessions.json"
+GONE = 86400  # seconds an entry outlives its session's process: a stopped session that starts again registers again
 
 PROMPT_LINE = re.compile(r"^[│|\s]*[>❯]\s?(.*?)[\s│|]*$")
 # what `capture-pane -e` adds to a row: a change of attributes (its codes are group 1), a link, any other sequence
@@ -117,6 +131,90 @@ def drafted(row):
     return row[1][m.start(1):m.end(1)].strip()
 
 
+class Typed(str):
+    """type()'s answer: "" once typed, else why not. `said` is what the backend's program printed
+    while it typed, for a caller that shows it."""
+    said = ""
+
+
+def kept():
+    """What the file holds: {"sessions": {session id: entry}, "places": {"<backend> <place id>":
+    entry}}, both empty without a file. A session's entry: `backend` and `place` (where it runs),
+    `story` (the one it was started for), `adhoc` (a one-off outside any story), `pid`, `at` (its
+    last write), and what was noted for it. A place's entry is what is known of a place that has
+    no session yet."""
+    try:
+        doc = json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        doc = {}
+    found = {}
+    for part in ("sessions", "places"):
+        entries = doc.get(part) if isinstance(doc, dict) else None
+        found[part] = {k: v for k, v in entries.items() if isinstance(v, dict)} if isinstance(entries, dict) else {}
+    return found
+
+
+def keep(change):
+    """Changes the file: `change` gets what is kept and edits it in place. One writer at a time (a
+    lock beside the file) and the file replaced whole, so a reader never sees half of it and two
+    writers never lose each other's entry. Returns what is kept now."""
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    with open(STATE.with_suffix(".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        doc = kept()
+        change(doc)
+        fresh = STATE.with_suffix(".tmp")
+        fresh.write_text(json.dumps(doc))
+        os.replace(fresh, STATE)
+    return doc
+
+
+def alive(pid):
+    try:
+        os.kill(int(pid), 0)
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError, OverflowError):
+        return False
+    return True
+
+
+def register(sid, backend, place, story="", adhoc=False, pid=None, inside=()):
+    """A session's own entry, written at its start (a resume is one), or None: the place is the
+    session's whose process is one of `inside`, the processes this one was started from (a
+    `claude -p` a session runs), and it registers nothing. What was noted for the session stays.
+    Another session's entry at the same place goes, since that session has left it, and so does
+    any entry whose process went more than a day ago."""
+    now = time.time()
+
+    def change(doc):
+        entries = doc["sessions"]
+        for other, entry in list(entries.items()):
+            if other == sid:
+                continue
+            if (entry.get("backend"), entry.get("place")) == (backend, place):
+                if entry.get("pid") in inside:
+                    return
+                del entries[other]
+            elif now - (entry.get("at") or 0) > GONE and not alive(entry.get("pid")):
+                del entries[other]
+        entries[sid] = {**entries.get(sid, {}), "backend": backend, "place": place, "story": story, "adhoc": adhoc,
+                        "pid": pid, "at": int(now)}
+    return keep(change)["sessions"].get(sid)
+
+
+def note(sid, **fields):
+    """Adds to a session's entry, registered or not."""
+    def change(doc):
+        doc["sessions"][sid] = {**doc["sessions"].get(sid, {}), **fields, "at": int(time.time())}
+    keep(change)
+
+
+def registered(backend, place):
+    """The entry of the session registered at a place, None without one."""
+    return next((e for e in kept()["sessions"].values() if (e.get("backend"), e.get("place")) == (backend, place)), None)
+
+
 class Backend:
     """The requests, each with the answer of a backend that has none."""
     name = program = ""
@@ -149,10 +247,23 @@ class Backend:
         return False
 
     def story(self, place):
-        return ""
+        entry = registered(self.name, place.id if isinstance(place, Place) else place)
+        return entry.get("story") or "" if entry else ""
 
     def last_input(self):
         return None
+
+    def places(self):
+        return []
+
+    def label(self, states, groups):
+        return None
+
+    def close(self, place):
+        return False
+
+    def pick(self, place, client=""):
+        return False
 
 
 class Tmux(Backend):
@@ -243,11 +354,67 @@ class Tmux(Backend):
         return tmux("send-keys", "-t", self.pane(place), "Escape").returncode == 0
 
     def story(self, place):
-        return tmux("show-options", "-wqv", "-t", self.pane(place), "@flowkit_story").stdout.strip()
+        entry = registered(self.name, self.pane(place))
+        return entry.get("story") or "" if entry else self.marked(place)[0]
 
     def last_input(self):
         seen = [int(x) for x in tmux("list-clients", "-F", "#{client_activity}").stdout.split() if x.isdigit()]
         return max(seen) if seen else None
+
+    def marked(self, place):
+        """What the tab a pane sits in was opened for, as the launch marked it: (story, adhoc). A
+        session reads it once, as it registers. One that started before 0.15.0 registered nothing
+        and is read from here until it starts again; that reading goes with 0.16.0."""
+        story, _, adhoc = tmux("display-message", "-p", "-t", self.pane(place),
+                               f"#{{@flowkit_story}}{SEP}#{{@flowkit_adhoc}}").stdout.strip("\n").partition(SEP)
+        return story, bool(adhoc)
+
+    def places(self):
+        """Every pane as a dict. `id`; `pid`, its shell's; where it is: `sess`, its tab's `wid`,
+        `widx` and `wname`, its `pidx` in the tab; `cmd`, what runs in it (a shell's name, Claude
+        Code's version). And what tmux keeps for it: `story` and `slug`, what its tab was opened
+        for (`slug` is empty in the tab of the one-offs); `hold`, the user's own switch that keeps
+        the tab; `born`, when a launch was last typed into it or its tab was opened; `rung` and
+        `parked`, which a tick before 0.15.0 kept here, read where STATE has none until 0.16.0."""
+        fmt = SEP.join(["#{pane_pid}", "#{pane_id}", "#{session_name}", "#{window_id}", "#{window_index}",
+                        "#{window_name}", "#{pane_index}", "#{pane_current_command}",
+                        "#{@flowkit_story}#{@flowkit_adhoc}", "#{@flowkit_story}", "#{@flowkit_hold}#{@cc_hold}",
+                        "#{@flowkit_born}", "#{@flowkit_rung}", "#{@flowkit_parked}"])
+        keys = ("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "story", "slug", "hold", "born", "rung",
+                "parked")
+        return [dict(zip(keys, line.split(SEP))) for line in tmux("list-panes", "-a", "-F", fmt).stdout.splitlines() if line]
+
+    def label(self, states, groups):
+        """`states`: {pane: its word} for each pane that shows one in its border; `groups`: {tab:
+        (how many of its sessions wait on the user, the tab's word)}. What is not named loses its
+        label. Only what differs from what is shown is written, in one call."""
+        def write(scope, at, option, value):
+            return [";", "set-option", scope, *(() if value else ("-u",)), "-t", at, option, *((value,) if value else ())]
+        shown = tmux("list-panes", "-a", "-F", f"p{SEP}#{{pane_id}}{SEP}#{{@flowkit_state}}", ";", "list-windows", "-a",
+                     "-F", f"w{SEP}#{{window_id}}{SEP}#{{@flowkit_wait}}{SEP}#{{@flowkit_tab}}").stdout
+        cmds = []
+        for line in shown.splitlines():
+            kind, at, state, word = (line.split(SEP) + ["", "", ""])[:4]
+            if kind == "p" and states.get(at, "") != state:
+                cmds += write("-p", at, "@flowkit_state", states.get(at, ""))
+            elif kind == "w":
+                n, want = groups.get(at, (0, ""))
+                if (str(n) if n else "") != state:
+                    cmds += write("-w", at, "@flowkit_wait", str(n) if n else "")
+                if want != word:
+                    cmds += write("-w", at, "@flowkit_tab", want)
+        if cmds:
+            tmux(*cmds[1:])
+
+    def close(self, place):
+        return tmux("kill-pane", "-t", self.pane(place)).returncode == 0
+
+    def pick(self, place, client=""):
+        return tmux("switch-client", *(["-c", client] if client else []), "-t", self.pane(place)).returncode == 0
+
+    def session(self):
+        """The tmux session the terminal this runs in is attached to."""
+        return tmux("display-message", "-p", "#{session_name}").stdout.strip()
 
 
 class Background(Backend):
@@ -288,7 +455,9 @@ class Background(Backend):
                 time.sleep(GRACE)
         sent = subprocess.run(["claude", "--bg", "--resume", row["sessionId"], text], cwd=row.get("cwd") or None,
                               capture_output=True, text=True, timeout=60)
-        return "" if sent.returncode == 0 else "not typed"
+        answer = Typed("" if sent.returncode == 0 else "not typed")
+        answer.said = (sent.stdout or "") + (sent.stderr or "")
+        return answer
 
 
 TMUX, BACKGROUND = Tmux(), Background()

@@ -8,7 +8,10 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -17,6 +20,7 @@ PLUGIN = Path(__file__).resolve().parent.parent
 BACKEND = PLUGIN / "scripts" / "backend.py"
 PANES = "tmux list-panes -a -F #{pane_pid} #{pane_id} #{pane_in_mode}"
 RULE = "─" * 20
+SEP = "\x1f"
 SID = "0a1b2c3d-0000-4000-8000-000000000001"
 
 
@@ -33,7 +37,7 @@ class Case(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         (d / "bin").mkdir()
         self.stub("tmux", f'echo "tmux $*" >> {d}/calls\n[ "$1" = -L ] && shift 2\ncase "$1" in\n'
-                          f"list-panes) cat {d}/panes;;\ncapture-pane) cat {d}/screen;;\nshow-options) cat {d}/story;;\n"
+                          f"list-panes) cat {d}/panes;;\ncapture-pane) cat {d}/screen;;\ndisplay-message) cat {d}/story;;\n"
                           f"list-clients) cat {d}/clients;;\nsend-keys) [ -f {d}/refuse ] && exit 1;;\nesac\nexit 0\n")
         self.stub("ps", f"cat {d}/ps\n")
         self.stub("claude", f'case "$1" in\nagents) echo "claude $*" >> {d}/calls; cat {d}/agents.json;;\n'
@@ -48,7 +52,8 @@ class Case(unittest.TestCase):
         self.addCleanup(patch.stop)
         self.slept = []
         self.b = load()
-        self.b.time = mock.Mock(sleep=self.slept.append)  # its own pauses alone: subprocess sleeps while it waits, too
+        self.b.time = mock.Mock(sleep=self.slept.append, time=time.time)  # its own pauses alone: subprocess sleeps while it waits, too
+        self.b.STATE = d / "claude" / "flowkit" / "sessions.json"
 
     def stub(self, name, body):
         path = self.tmp / "bin" / name
@@ -202,14 +207,49 @@ class TmuxBackend(Case):
         self.assertEqual(self.calls(), ["tmux send-keys -t %7 Escape"])
         (self.tmp / "refuse").write_text("")
         self.assertFalse(self.t.escape(self.pane))
-        (self.tmp / "story").write_text("my-story\n")
-        self.assertEqual(self.t.story(self.pane), "my-story")
-        self.assertEqual(self.calls()[-1], "tmux show-options -wqv -t %7 @flowkit_story")
-        (self.tmp / "story").write_text("")
-        self.assertEqual(self.t.story("%7"), "")
+        (self.tmp / "story").write_text(f"my-story{SEP}\n")
+        self.assertEqual(self.t.story(self.pane), "my-story", "a session that registered nothing: what its tab is marked with")
+        self.assertEqual(self.calls()[-1], f"tmux display-message -p -t %7 #{{@flowkit_story}}{SEP}#{{@flowkit_adhoc}}")
+        self.assertEqual(self.t.marked("%7"), ("my-story", False))
+        (self.tmp / "story").write_text(f"{SEP}adhoc\n")
+        self.assertEqual((self.t.story("%7"), self.t.marked("%7")), ("", ("", True)))
+        self.calls()
+        self.b.register(SID, "tmux", "%7", "its-story")
+        self.assertEqual((self.t.story(self.pane), self.t.story("%7"), self.calls()), ("its-story", "its-story", []),
+                         "registered: the file answers and tmux is not asked")
+        (self.tmp / "story").write_text("work\n")
+        self.assertEqual(self.t.session(), "work")
+        self.calls()
         self.assertIsNone(self.t.last_input(), "no client attached")
         (self.tmp / "clients").write_text("1700000000\n1700000300\n\n")
         self.assertEqual(self.t.last_input(), 1700000300)
+
+
+    def test_places_lists_every_pane_with_what_tmux_keeps_for_it(self):
+        row = ["900", "%1", "work", "@1", "1", "my-story", "2", "2.1.328", "my-story", "my-story", "1", "1700000000", "", ""]
+        (self.tmp / "panes").write_text(SEP.join(row) + "\n\n")
+        keys = ("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "story", "slug", "hold", "born", "rung", "parked")
+        self.assertEqual(self.t.places(), [dict(zip(keys, row))])
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_label_writes_what_differs_from_what_is_shown_in_one_call(self):
+        shown = [("p", "%1", "idle"), ("p", "%2", "waiting"), ("p", "%3", ""), ("p", "%4", "idle"),
+                 ("w", "@1", "1", "running"), ("w", "@2", "", "done"), ("w", "@3", "", ""), ("w", "@4", "2", "error")]
+        (self.tmp / "panes").write_text("".join(SEP.join(row) + "\n" for row in shown))
+        self.t.label({"%1": "working", "%3": "idle", "%4": "idle"}, {"@1": (1, "needs you"), "@3": (2, ""), "@4": (2, "error")})
+        self.assertEqual(self.calls()[1:], [
+            "tmux set-option -p -t %1 @flowkit_state working ; set-option -p -u -t %2 @flowkit_state ; "
+            "set-option -p -t %3 @flowkit_state idle ; set-option -w -t @1 @flowkit_tab needs you ; "
+            "set-option -w -u -t @2 @flowkit_tab ; set-option -w -t @3 @flowkit_wait 2"])
+        self.t.label({"%1": "idle", "%2": "waiting", "%4": "idle"}, {"@1": (1, "running"), "@2": (0, "done"), "@4": (2, "error")})
+        self.assertEqual(len(self.calls()), 1, "nothing differs: the reading alone")
+
+    def test_close_and_pick(self):
+        self.assertTrue(self.t.close(self.pane))
+        self.assertTrue(self.t.pick("%7", "/dev/ttys001"))
+        self.assertTrue(self.t.pick(self.pane))
+        self.assertEqual(self.calls(), ["tmux kill-pane -t %7", "tmux switch-client -c /dev/ttys001 -t %7",
+                                        "tmux switch-client -t %7"])
 
 
 class BackgroundBackend(Case):
@@ -261,9 +301,12 @@ class BackgroundBackend(Case):
     def test_it_has_no_screen_no_story_and_no_terminal(self):
         place = self.place(status="idle", pid=4242)
         self.assertEqual((self.g.here(), self.g.screen(place), self.g.bottom(place), self.g.parked(place), self.g.draft(place),
-                          self.g.escape(place), self.g.story(place), self.g.last_input()),
-                         (None, [], [], "", False, False, "", None))
+                          self.g.escape(place), self.g.story(place), self.g.last_input(), self.g.places(),
+                          self.g.label({}, {}), self.g.close(place), self.g.pick(place)),
+                         (None, [], [], "", False, False, "", None, [], None, False, False))
         self.assertEqual(self.calls(), [])
+        self.b.register(SID, "background", SID, "night-story")
+        self.assertEqual(self.g.story(place), "night-story", "once something registered it: the file is the same for both")
 
     def test_a_line_resumes_a_stopped_session_under_its_own_id(self):
         place = self.place()
@@ -273,6 +316,12 @@ class BackgroundBackend(Case):
         self.assertEqual(self.slept, [])
         (self.tmp / "refuse").write_text("")
         self.assertEqual(self.g.type(place, "closed s1"), "not typed")
+
+    def test_what_claude_said_to_a_resume_comes_with_the_answer(self):
+        self.stub("claude", "echo 'resumed as a copy under a new id'; echo 'and a warning' >&2\n")
+        typed = self.g.type(self.b.Place(SID, False, self.row()), "closed s1")
+        self.assertEqual((typed, typed.said.splitlines()), ("", ["resumed as a copy under a new id", "and a warning"]))
+        self.assertEqual(getattr(self.b.TMUX.type("%7", "a line"), "said", ""), "", "tmux says nothing")
 
     def test_a_live_session_is_stopped_first_and_resumed_once_its_process_is_gone(self):
         place = self.place(pid=4242, status="idle")
@@ -325,8 +374,8 @@ class Both(Case):
 
     def test_the_two_backends_answer_the_same_requests(self):
         requests = sorted(name for name, value in vars(self.b.Backend).items() if inspect.isfunction(value))
-        self.assertEqual(requests, ["available", "bottom", "draft", "escape", "here", "last_input", "locate", "parked",
-                                    "screen", "story", "type"])
+        self.assertEqual(requests, ["available", "bottom", "close", "draft", "escape", "here", "label", "last_input",
+                                    "locate", "parked", "pick", "places", "screen", "story", "type"])
         for backend in (self.b.TMUX, self.b.BACKGROUND):
             for name in requests:
                 self.assertEqual(inspect.signature(getattr(backend, name)), inspect.signature(getattr(self.b.Backend(), name)),
@@ -341,12 +390,78 @@ class Both(Case):
         for name, value in vars(self.b.Backend).items():
             if inspect.isfunction(value):
                 self.assertFalse([p for p in inspect.signature(value).parameters if "option" in p], name)
+        for backend in (self.b.Backend, self.b.Tmux):
+            self.assertNotIn("@", inspect.getsource(backend.story), "a session's story is what it registered")
 
-    def test_handoff_py_reaches_a_session_only_through_this_file(self):
-        source = (PLUGIN / "scripts" / "handoff.py").read_text()
-        found = re.findall(r'\[\s*"(?:tmux|claude)"|(?<![.\w])tmux\(|send-keys|capture-pane|list-panes|list-clients|'
-                           r'show-options|@flowkit_|"--bg"|"--resume"', source)
-        self.assertEqual(found, [])
+    def test_handoff_py_and_the_commands_reach_a_session_only_through_this_file(self):
+        for path in ("scripts/handoff.py",):
+            found = re.findall(r'\[\s*"(?:tmux|claude)"|(?<![.\w])tmux\(|send-keys|capture-pane|list-panes|list-clients|'
+                               r'show-options|@flowkit_|@cc_hold|"--bg"|"--resume"', (PLUGIN / path).read_text())
+            self.assertEqual(found, [], path)
+
+
+class State(Case):
+    """The file that keeps what flowkit knows of a session and no backend has to keep for it."""
+
+    def sessions(self):
+        return self.b.kept()["sessions"]
+
+    def gone(self):
+        """The pid of a process that has ended."""
+        done = subprocess.Popen([sys.executable, "-c", "pass"])
+        done.wait()
+        return done.pid
+
+    def test_a_session_registers_and_its_entry_is_read(self):
+        self.assertEqual(self.b.kept(), {"sessions": {}, "places": {}}, "no file")
+        entry = self.b.register(SID, "tmux", "%7", "my-story", pid=os.getpid())
+        self.assertEqual(entry, {"backend": "tmux", "place": "%7", "story": "my-story", "adhoc": False, "pid": os.getpid(),
+                                 "at": entry["at"]})
+        self.assertAlmostEqual(entry["at"], time.time(), delta=5)
+        self.assertEqual((self.b.registered("tmux", "%7"), self.b.registered("tmux", "%8"), self.b.registered("background", "%7")),
+                         (entry, None, None))
+        self.b.note(SID, rung=1700000000)
+        again = self.b.register(SID, "tmux", "%9", "my-story", pid=os.getpid())
+        self.assertEqual((again["place"], again["rung"]), ("%9", 1700000000), "a resume in another pane keeps what was noted")
+        self.b.note("never-registered", rung=1700000300)
+        self.assertEqual(self.sessions()["never-registered"]["rung"], 1700000300)
+        self.b.keep(lambda doc: doc["places"].update({"tmux %3": {"parked": 1700000000}}))
+        self.assertEqual(json.loads(self.b.STATE.read_text())["places"], {"tmux %3": {"parked": 1700000000}})
+        self.assertEqual(sorted(p.name for p in self.b.STATE.parent.iterdir()), ["sessions.json", "sessions.lock"])
+
+    def test_a_file_that_says_nothing_reads_as_empty(self):
+        self.b.STATE.parent.mkdir(parents=True)
+        for content in ("", "{", "[1]", '{"sessions": [], "places": {"tmux %1": 5}}'):
+            self.b.STATE.write_text(content)
+            self.assertEqual(self.b.kept(), {"sessions": {}, "places": {}}, content)
+        self.assertEqual(self.b.Backend().story("%1"), "")
+
+    def test_a_session_that_is_gone_leaves_its_place_then_the_file(self):
+        now, gone = time.time(), self.gone()
+        self.b.register("was-here", "tmux", "%7", "st", pid=gone)
+        self.b.register("is-here", "tmux", "%7", "other", pid=os.getpid())
+        self.assertEqual((list(self.sessions()), self.b.TMUX.story("%7")), (["is-here"], "other"))
+        self.assertIsNone(self.b.register("run-from-inside-it", "tmux", "%7", "other", pid=gone, inside=[1, os.getpid()]),
+                          "the pane is the session's that started this one: nothing is taken from it")
+        self.b.register("cleared", "tmux", "%7", "other", pid=os.getpid())
+        self.assertEqual(list(self.sessions()), ["cleared"], "a new id in the same process")
+        self.b.register("is-here", "tmux", "%7", "other", pid=os.getpid())
+        self.b.keep(lambda doc: doc["sessions"].update({
+            "ended-long-ago": {"backend": "tmux", "place": "%1", "pid": gone, "at": now - 2 * self.b.GONE},
+            "ended-today": {"backend": "tmux", "place": "%2", "pid": gone, "at": now - 3600},
+            "still-running": {"backend": "tmux", "place": "%3", "pid": os.getpid(), "at": now - 2 * self.b.GONE},
+            "noted-long-ago": {"rung": 5, "at": now - 2 * self.b.GONE}}))
+        self.b.register("next", "tmux", "%4")
+        self.assertEqual(sorted(self.sessions()), ["ended-today", "is-here", "next", "still-running"])
+
+    def test_two_writers_at_once_lose_nothing(self):
+        code = ("import importlib.util as u, sys\nfrom pathlib import Path\n"
+                "s = u.spec_from_file_location('b', sys.argv[1]); b = u.module_from_spec(s); s.loader.exec_module(b)\n"
+                "b.STATE = Path(sys.argv[2])\n"
+                "for i in range(25):\n    b.note(f'{sys.argv[3]}-{i}', n=i)\n")
+        writers = [subprocess.Popen([sys.executable, "-c", code, str(BACKEND), str(self.b.STATE), str(n)]) for n in range(4)]
+        self.assertEqual([w.wait() for w in writers], [0] * 4)
+        self.assertEqual(len(self.sessions()), 100)
 
 
 if __name__ == "__main__":
