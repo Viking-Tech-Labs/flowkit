@@ -637,5 +637,180 @@ class Launching(Case):
             self.assertEqual((refused.exception.why, str(refused.exception)), (why, text))
 
 
+class OutsideDriver(Case):
+    """The same requests, asked of an executable of the user's own, `flowkit-driver-stub`: it
+    answers open, list, type, screen, label and close from files and has no answer to pick. Its
+    calls are recorded with Enter, Escape and Ctrl-U as R, E and U."""
+
+    def setUp(self):
+        super().setUp()
+        d = self.tmp
+        self.stub("flowkit-driver-stub", f"printf '%s\\n' \"driver $*\" | tr '\\015\\033\\025' 'REU' >> {d}/calls\n"
+                                         f"grep -qx \"$1\" {d}/silent && exit 2\n"
+                                         f"[ -f {d}/refuse ] && {{ echo 'no room' >&2; exit 1; }}\n"
+                                         f"case \"$1\" in\nopen) cat {d}/opened;;\nlist) cat {d}/places;;\n"
+                                         f"screen) cat {d}/screen;;\nesac\nexit 0\n")
+        (d / "silent").write_text("pick\n")
+        (d / "places").write_text("p1\t500\np2\t\n")
+        (d / "opened").write_text("p9\n")
+        (d / "ps").write_text(f"700 600\n600 500\n{os.getpid()} 500\n")
+        self.b.CONF = d / "handoff.conf"
+        self.b.CONF.write_text("reporter=on\ndriver=stub\n")
+        self.s = self.b.driver()
+
+    def asked(self, **more):
+        return self.b.Launch(**{"story": "st", "name": "st-s2", "cwd": str(self.tmp), "args": "--name 'st-s2'", **more})
+
+    def leaves_out(self, *requests):
+        (self.tmp / "silent").write_text("".join(f"{r}\n" for r in requests))
+
+    def test_the_driver_is_the_one_handoff_conf_names(self):
+        path = str(self.tmp / "bin" / "flowkit-driver-stub")
+        self.assertIsInstance(self.s, self.b.Driver)
+        self.assertEqual((self.s.name, self.s.program, self.s.path, self.s.available()), ("stub", "flowkit-driver-stub", path, True))
+        self.assertIs(self.b.driver("stub"), self.s)
+        self.assertIs(self.b.terminal(), self.s, "a session in a terminal runs in the driver's places")
+        self.assertEqual((self.b.driver("tmux"), self.b.driver("background")), (self.b.TMUX, self.b.BACKGROUND))
+        for line, named in (("driver=tmux", self.b.TMUX), ("driver=background", self.b.BACKGROUND), ("", self.b.TMUX),
+                            ("driver=nope", None), ("driver=../bin/flowkit-driver-stub", None), ("driver = stub ", self.s)):
+            self.b.CONF.write_text(f"{line}\n")
+            self.assertIs(self.b.driver(), named, line)
+            self.assertIs(self.b.terminal(), self.s if named is self.s else self.b.TMUX, line)
+        self.b.CONF.unlink()
+        self.assertEqual((self.b.configured(), self.b.driver()), ("tmux", self.b.TMUX))
+        self.assertEqual(self.calls(), [], "naming a driver asks it nothing")
+        self.without("flowkit-driver-stub")
+        self.assertEqual((self.b.driver("stub"), self.s.available()), (None, False))
+
+    def test_it_answers_the_requests_of_the_other_two(self):
+        for name, value in vars(self.b.Backend).items():
+            if inspect.isfunction(value):
+                self.assertEqual(inspect.signature(getattr(self.s, name)), inspect.signature(getattr(self.b.Backend(), name)), name)
+        self.assertEqual((self.s.target(), self.s.last_input(), self.s.marked("p1")), ("", None, ("", False)))
+
+    def test_a_session_is_found_through_the_processes_above_it_up_to_the_place_s_own(self):
+        self.assertEqual(self.s.locate(pid=700), self.b.Place("p1", False, None))
+        self.assertEqual((self.s.locate(pid=999), self.s.locate(sid=SID), self.s.here()), (None, None, self.b.Place("p1", False, None)))
+        self.calls()
+        find = self.s.finder()
+        self.assertEqual(self.calls(), ["driver list"])
+        self.assertEqual((find(700).id, find(600).id, find(1), self.calls()), ("p1", "p1", None, []))
+        self.leaves_out("list")
+        self.assertEqual((self.s.locate(pid=700), self.s.places()), (None, []), "a driver with no list has no place for anyone")
+
+    def test_places_are_the_driver_s_list_with_what_the_file_keeps_for_each(self):
+        blank = {"sess": "", "widx": "", "pidx": "", "cmd": "", "hold": "", "rung": "", "parked": "", "title": ""}
+        self.assertEqual(self.s.places(), [
+            {"id": "p1", "pid": "500", "wid": "p1", "wname": "-", "story": "", "slug": "", "born": "", **blank},
+            {"id": "p2", "pid": "", "wid": "p2", "wname": "-", "story": "", "slug": "", "born": "", **blank}])
+        self.b.launched("stub", "p1", "st")
+        self.b.launched("stub", "p2", "adhoc", adhoc=True)
+        one, two = self.s.places()
+        self.assertEqual((one["story"], one["slug"], one["wname"], one["born"].isdigit()), ("st", "st", "st", True))
+        self.assertEqual((two["story"], two["slug"], self.s.story("p1"), self.s.story("p2")), ("adhoc", "", "st", ""))
+        entry = self.b.register(SID, "stub", "p1", pid=700)
+        self.assertEqual((entry["story"], self.b.kept()["places"].get("stub p1")), ("st", None), "the session took the record over")
+        self.assertEqual((self.s.story(self.b.Place("p1", False, None)), self.s.places()[0]["slug"]), ("st", "st"))
+        panes = dict(zip(("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "story", "slug", "hold", "born", "rung",
+                          "parked", "title"), range(15)))
+        self.assertEqual(set(one), set(panes), "the keys of a tmux pane")
+
+    def test_a_line_is_its_characters_then_enter_after_the_pause(self):
+        self.assertEqual(self.s.type("p1", "hello"), "")
+        self.assertEqual((self.calls(), self.slept), (["driver type p1 hello", "driver type p1 R"], [self.b.PAUSE]))
+        self.assertEqual(self.s.type(self.b.Place("p1", False, None), "hello", self.b.OVER), "")
+        self.assertEqual(self.calls(), ["driver type p1 Uhello", "driver type p1 R"])
+        self.assertEqual(self.s.type("p1", "hello", self.b.ESCAPE, settled=lambda: True), "")
+        self.assertEqual(self.calls(), ["driver type p1 E", "driver type p1 Uhello", "driver type p1 R"])
+        self.assertEqual(self.s.type("p1", "hello", self.b.ESCAPE, settled=lambda: False), "not settled")
+        self.assertEqual((self.calls(), self.s.escape("p1"), self.calls()), (["driver type p1 E"], True, ["driver type p1 E"]))
+        (self.tmp / "refuse").write_text("")
+        self.assertEqual((self.s.type("p1", "hello"), self.s.escape("p1")), ("not typed", False))
+
+    def test_a_line_for_a_free_box_looks_at_the_screen_the_driver_shows(self):
+        for screen, why, draft in (("❯ \n", "", False), ("❯ half typed\n", "draft", True), ("no box here\n", "no prompt box", False),
+                                   ("❯ \n Enter to confirm · Esc to cancel\n", "dialog", False)):
+            (self.tmp / "screen").write_text(f"above\n{screen}")
+            self.assertEqual((self.s.parked("p1"), self.s.draft("p1")), (why, draft), screen)
+            self.calls()
+            self.assertEqual(self.s.type("p1", "/cmd", self.b.COMMAND), why)
+            self.assertEqual(self.calls(), ["driver screen p1"] + ([] if why else ["driver type p1 /cmd", "driver type p1 R"]))
+        self.assertEqual((self.s.screen("p1")[0], self.s.bottom("p1")), (("above", "above"), ["above", "❯ ", " Enter to confirm · Esc to cancel"]))
+        self.leaves_out("screen", "pick")
+        self.calls()
+        self.assertEqual((self.s.screen("p1"), self.s.bottom("p1"), self.s.parked("p1"), self.s.draft("p1")), ([], [], "", False))
+        self.assertEqual(self.s.type("p1", "ring", self.b.FREE), "", "with no screen to look at the line is typed")
+        self.assertEqual(self.calls(), ["driver screen p1", "driver type p1 ring", "driver type p1 R"], "what it left out is asked once")
+
+    def test_label_close_and_pick(self):
+        self.assertIsNone(self.s.label({"p1": "waiting"}, {"p1": (1, "needs you")}))
+        self.assertEqual(self.calls(), ["driver list", "driver label p1 waiting", "driver label p2 "])
+        self.assertEqual((self.s.close("p1"), self.s.pick("p1"), self.s.pick("p2", "client")), (True, False, False))
+        self.assertEqual(self.calls(), ["driver close p1", "driver pick p1"], "a request it has no answer to is asked once")
+        (self.tmp / "refuse").write_text("")
+        self.assertEqual((self.s.label({}, {}), self.s.close("p1")), (False, False))
+
+    def test_a_launch_opens_a_place_and_waits_until_claude_lists_the_session_under_it(self):
+        (self.tmp / "places").write_text("p9\t500\n")
+        (self.tmp / "screen").write_text("connect: https://claude.ai/code/session_AB12 (open)\n")
+        self.agents([{"name": "st-s2", "pid": 700}, {"name": "st-report", "pid": 600}])
+        asked, said = self.asked(reporter="st-report", reporter_args="--name 'st-report'"), []
+        plan = self.s.plan(asked, [])
+        run = f"flowkit-driver-stub open st st-s2 {self.tmp} " + "'claude --name '\"'\"'st-s2'\"'\"''"
+        self.assertEqual((plan.reporter, plan.show(asked)), ("first", [("driver", "stub"), ("run", run)]))
+        self.assertEqual(self.s.plan(asked, [{"name": "st-report"}]).reporter, "", "a story's reporter that runs is not started again")
+        self.calls()
+        opened = list(self.s.open(asked, plan, said.append))
+        link = "https://claude.ai/code/session_AB12"
+        self.assertEqual([(o.name, o.place, o.where, o.up, o.rc, o.created, o.tried, o.parked) for o in opened],
+                         [("st-report", "p9", "driver=stub id=p9", True, link, 1, 1, ""),
+                          ("st-s2", "p9", "driver=stub id=p9", True, link, 1, 1, "")])
+        calls = self.calls()
+        self.assertEqual([c for c in calls if c.startswith("driver open")],
+                         [f"driver open st st-report {self.tmp} claude --name 'st-report'",
+                          f"driver open st st-s2 {self.tmp} claude --name 'st-s2'"])
+        self.assertEqual((said, self.slept, self.b.kept()["places"]["stub p9"]["story"]), ([], [1, 1], "st"))
+        self.agents([{"name": "st-s2", "pid": 999}])
+        (opened,) = self.s.open(self.asked(rc=False), self.s.plan(self.asked(), []), said.append)
+        self.assertEqual((opened.up, opened.rc, len(said)), (False, "off", 1), "a namesake that runs elsewhere is not the session")
+
+    def test_a_driver_that_only_opens_lists_and_types_still_launches(self):
+        self.leaves_out("screen", "label", "close", "pick")
+        (self.tmp / "places").write_text("p9\t500\n")
+        self.agents([{"name": "st-s2", "pid": 700}])
+        (opened,) = self.s.open(self.asked(), self.s.plan(self.asked(), []))
+        self.assertEqual((opened.up, opened.rc, self.slept), (True, "pending", [1]), "no screen to read a link from: none is waited for")
+
+    def test_a_place_that_is_gone_at_once_is_opened_once_more_then_refused(self):
+        (self.tmp / "places").write_text("")
+        said, again = [], []
+        with self.assertRaises(self.b.Refused) as refused:
+            list(self.s.open(self.asked(), self.s.plan(self.asked(), []), said.append, again.append))
+        self.assertEqual((refused.exception.why, str(refused.exception)),
+                         ("exited", "session 'st-s2' exited twice at start-up; flowkit-driver-stub kept no place for it"))
+        self.assertEqual((said, again, self.slept), (["warning: session 'st-s2' exited at start-up in p9; opened again"],
+                                                     ["st-s2"], [1] * 6))
+        self.assertEqual(len([c for c in self.calls() if c.startswith("driver open")]), 2)
+
+    def test_a_place_that_stays_with_no_session_listed_gets_the_warning(self):
+        (self.tmp / "places").write_text("p9\t500\n")
+        said = []
+        (opened,) = self.s.open(self.asked(), self.s.plan(self.asked(), []), said.append, None, lambda screen: "Do you trust this folder?")
+        self.assertEqual((opened.up, opened.tried, opened.parked, len(self.slept)), (False, 1, "Do you trust this folder?", 15))
+        (opened,) = self.s.open(self.asked(), self.s.plan(self.asked(), []), said.append, None, lambda screen: "")
+        self.assertEqual(said, ["warning: session 'st-s2' is parked at a start-up prompt in p9 (Do you trust this folder?); answer it there",
+                                "warning: no session 'st-s2' came up in p9 within 15s; look at it (a folder trust prompt?)"])
+
+    def test_a_driver_that_opens_nothing_is_a_launch_refused(self):
+        for setup, text in ((lambda: (self.tmp / "opened").write_text(""), "flowkit-driver-stub open gave no place"),
+                            (lambda: (self.tmp / "refuse").write_text(""), "no room"),
+                            (lambda: ((self.tmp / "refuse").unlink(), self.leaves_out("open")), "flowkit-driver-stub open gave no place")):
+            setup()
+            with self.assertRaises(self.b.Refused) as refused:
+                list(self.s.open(self.asked(), self.s.plan(self.asked(), [])))
+            self.assertEqual((refused.exception.why, str(refused.exception)), ("failed", text))
+        self.assertEqual(self.b.kept()["places"], {}, "nothing was opened, nothing is written")
+
+
 if __name__ == "__main__":
     unittest.main()

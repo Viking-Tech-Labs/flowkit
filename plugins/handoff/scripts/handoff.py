@@ -203,7 +203,8 @@ def _backend():
 
 
 backend = _backend()
-TMUX, BACKGROUND = backend.TMUX, backend.BACKGROUND
+# TMUX: where a session with a terminal of its own runs, tmux unless handoff.conf names an outside driver
+TMUX, BACKGROUND = backend.terminal(), backend.BACKGROUND
 parked, draft = TMUX.parked, TMUX.draft
 
 

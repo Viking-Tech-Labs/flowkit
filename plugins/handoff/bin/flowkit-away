@@ -52,6 +52,13 @@ def backend():
     return module
 
 
+def terminal():
+    """The backend of a session in a terminal: tmux, or the outside driver handoff.conf names (a
+    plugin older than 0.16.0 knows tmux alone)."""
+    b = backend()
+    return b.terminal() if hasattr(b, "terminal") else b.TMUX
+
+
 def agents():
     try:
         rows = backend().agents()
@@ -92,7 +99,7 @@ def reach(row, place):
         if place is None:
             why = b.BACKGROUND.type(b.Place(row.get("sessionId"), False, row), line(), b.ESCAPE)
         else:
-            why = b.TMUX.type(place, line(), b.ESCAPE, settled=lambda: settled(row.get("name")))
+            why = terminal().type(place, line(), b.ESCAPE, settled=lambda: settled(row.get("name")))
     except (OSError, subprocess.SubprocessError, KeyError, ValueError):
         return False, ""
     said = getattr(why, "said", "").strip().splitlines()
@@ -123,7 +130,7 @@ def nudge(dry, only):
         print("cannot read `claude agents --json`: no session nudged")
         return 3
     try:
-        find = backend().TMUX.finder()
+        find = terminal().finder()
     except (OSError, subprocess.SubprocessError):
         find = lambda pid: None  # no tmux: a question in a terminal cannot be reached
     shown = 0

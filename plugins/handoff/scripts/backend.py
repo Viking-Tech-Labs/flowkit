@@ -1,8 +1,10 @@
 """Where a session runs and how flowkit reaches it there.
 
-A session runs in a tmux pane (driver=tmux) or as one of Claude Code's own background sessions
-(driver=background, `claude --bg`). Whatever finds a session, reads what it shows or types into it
-asks one of the two backends here, TMUX and BACKGROUND, which answer the same requests:
+A session runs in a tmux pane (driver=tmux), as one of Claude Code's own background sessions
+(driver=background, `claude --bg`), or in a place of another program, reached through an
+executable of the user's own (driver=<name>, `flowkit-driver-<name>`: the class Driver). Whatever
+finds a session, reads what it shows or types into it asks a backend here, and each answers the
+same requests:
 
   available()                 its program is installed
   locate(pid=, sid=, name=)   the place a session runs at, None when this backend has none for it:
@@ -47,8 +49,13 @@ a caller asks without knowing which it holds. A program that is missing or hangs
 or subprocess.SubprocessError: the caller says what that means where it is. A place may also be a
 bare pane id for TMUX, known some other way than through locate.
 
-The same for both, read from Claude Code's own list: agents() and mode(row), which says busy,
+The same for all, read from Claude Code's own list: agents() and mode(row), which says busy,
 waiting or idle.
+
+Which backend: driver(name) gives the one of that name, the one `driver=` in handoff.conf names
+when no name is given (tmux without the line), None when nothing answers to the name; terminal()
+gives the one a session with a terminal of its own runs in, tmux unless handoff.conf names an
+outside driver.
 
 What flowkit knows of a session and no backend has to keep for it is in one file, STATE: kept()
 reads it, keep(change) changes it under its lock, register() writes a session's own entry at its
@@ -63,6 +70,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -90,10 +98,14 @@ GRACE = 3  # seconds from the process going to the resume after ESCAPE: measured
 STARTING = 15  # seconds a launch waits for its session to be listed
 LINKING = 30  # seconds more for the Remote Control link alone
 SLOTS = 9  # sessions tiled in one tab
+ASKING = 10  # seconds an outside driver has for one request
+ABOVE = 8  # processes looked through from a session up to the one an outside driver started in its place
 
 SEP = "\x1f"
 STATE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "flowkit" / "sessions.json"
 GONE = 86400  # seconds an entry outlives its session's process: a stopped session that starts again registers again
+CONF = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "flowkit" / "handoff.conf"
+NAMED = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*$")  # a driver's name: what its executable's name ends on
 
 PROMPT_LINE = re.compile(r"^[│|\s]*[>❯]\s?(.*?)[\s│|]*$")
 # what `capture-pane -e` adds to a row: a change of attributes (its codes are group 1), a link, any other sequence
@@ -171,6 +183,29 @@ def drafted(row):
     return row[1][m.start(1):m.end(1)].strip()
 
 
+def stuck(found):
+    """Why the prompt box of a screen takes no line, "" when it does: no prompt box (none on
+    screen), dialog (rows of one sit below it: a menu's numbered options, its Enter or Esc hint)
+    or draft. Only rows below the last prompt-box line count, so a dialog quoted in the
+    conversation above it never does."""
+    last = max((i for i, row in enumerate(found) if PROMPT_LINE.match(row[0])), default=None)
+    if last is None:
+        return "no prompt box"
+    if DIALOG.search("\n".join(row[0] for row in found[last + 1:])):
+        return "dialog"
+    return "draft" if drafted(found[last]) else ""
+
+
+def cleaned():
+    """The environment a launch's place is made with. A place gets the PATH of the process that
+    makes it: called from a session, that PATH holds the session's plugin bin/ directories,
+    which the session started in the place would keep ahead of its own, so an older release's
+    commands would answer there. A launch goes without them."""
+    path = os.environ.get("PATH", "")
+    clean = os.pathsep.join(p for p in path.split(os.pathsep) if not re.search(r"/plugins/cache/.*/bin/*$", p))
+    return {**os.environ, "PATH": clean or path}
+
+
 class Typed(str):
     """type()'s answer: "" once typed, else why not. `said` is what the backend's program printed
     while it typed, for a caller that shows it."""
@@ -195,8 +230,10 @@ class Launch(types.SimpleNamespace):
     follows `claude` on its command line, as shell text; `rc`: a Remote Control link is waited
     for; `reporter` and `reporter_args`: the name of the story's reporter, started first where the
     story has none, and its arguments; `place`: this place, an idle one, instead of the group's
-    next; `fresh`: never a place that is there already; `target`: the word target() gave."""
+    next; `fresh`: never a place that is there already; `target`: the word target() gave;
+    `program`: what is started in a terminal's place, `claude` unless a driver is being tried."""
     args = reporter = reporter_args = place = target = ""
+    program = "claude"
     adhoc = fresh = False
     rc = True
 
@@ -432,16 +469,7 @@ class Tmux(Backend):
         return found[-BOTTOM:]
 
     def parked(self, place):
-        """no prompt box (none on screen), dialog (rows of one sit below it: a menu's numbered
-        options, its Enter or Esc hint) or draft. Only rows below the last prompt-box line count,
-        so a dialog quoted in the conversation above it never does."""
-        found = self.screen(place)
-        last = max((i for i, row in enumerate(found) if PROMPT_LINE.match(row[0])), default=None)
-        if last is None:
-            return "no prompt box"
-        if DIALOG.search("\n".join(row[0] for row in found[last + 1:])):
-            return "dialog"
-        return "draft" if drafted(found[last]) else ""
+        return stuck(self.screen(place))
 
     def draft(self, place):
         """Text sits in the prompt box: the last row that starts with the prompt mark."""
@@ -558,13 +586,9 @@ class Tmux(Backend):
     @staticmethod
     def ask(*args):
         """tmux for a launch: what it printed, Refused when it refuses. tmux starts a pane a
-        process creates with that process's PATH, not the server's. Called from a session, that
-        PATH holds the session's plugin bin/ directories, which the session started in the pane
-        would keep ahead of its own: an older release's commands would answer there. So a launch
-        calls tmux without them."""
-        path = os.environ.get("PATH", "")
-        clean = os.pathsep.join(p for p in path.split(os.pathsep) if not re.search(r"/plugins/cache/.*/bin/*$", p))
-        done = tmux(*args, env={**os.environ, "PATH": clean or path})
+        process creates with that process's PATH, not the server's, so a launch calls it with
+        cleaned()'s."""
+        done = tmux(*args, env=cleaned())
         if done.returncode:
             raise Refused("failed", done.stderr.strip() or f"tmux {args[0]} failed")
         return done.stdout.rstrip("\n")
@@ -630,7 +654,7 @@ class Tmux(Backend):
             tab = f"new tab {plan.tab} after the last one" if plan.tab else self.ask("display-message", "-p", "-t", plan.win, "#{window_name}")
             return [("tab", tab + (f" (becomes tab {plan.part} of the story)" if plan.claim else "")),
                     ("pane", "<new, tiled after the last pane>" if plan.pane == "new" else plan.pane),
-                    ("send", f"cd '{launch.cwd}' && clear; claude {launch.args}")]
+                    ("send", f"cd '{launch.cwd}' && clear; {launch.program} {launch.args}")]
         plan.show = show
         return plan
 
@@ -703,7 +727,7 @@ class Tmux(Backend):
         self.ask("set-option", "-p", "-t", pane, "@flowkit_born", str(int(time.time())),
                  ";", "set-option", "-p", "-u", "-t", pane, "@flowkit_parked")
         self.ask("send-keys", "-t", pane, "C-u")  # anything half-typed would prefix the command
-        self.ask("send-keys", "-t", pane, f"cd '{launch.cwd}' && clear; claude {args}", "Enter")
+        self.ask("send-keys", "-t", pane, f"cd '{launch.cwd}' && clear; {launch.program} {args}", "Enter")
 
     def start(self, pane, name, args, tab, launch, created, say, again, dialog):
         """Types the launch into a pane, then waits up to 15 s until Claude Code lists a session of
@@ -870,5 +894,297 @@ class Background(Backend):
                       rc=(link.group(0) if link else "pending") if launch.rc else "off")
 
 
+class Driver(Backend):
+    """A session in a place of a program flowkit does not know (a window, a tab, a pane of some
+    multiplexer or terminal), reached through the executable `flowkit-driver-<name>`. It is run
+    as `<executable> <request> [argument ...]` and answers on its standard output with exit 0;
+    exit 2 says it has no answer to that request, any other exit that it failed, the reason on
+    its standard error. Its requests (docs/drivers.md has them in full), the first three
+    required:
+
+      open <story> <name> <folder> <command>   a new place for that session of the story, the shell command started
+                                               in it in that folder; prints the place's id
+      list                                     every place it has, a line each: the id, a tab, the pid of the process
+                                               it started there
+      type <id> <text>                         the characters reach what runs there as if typed, control ones too
+      screen <id>                              what the place shows, as text
+      label <id> <word>                        the word the user sees beside it, none for an empty one
+      close <id>                               the place goes, with what runs in it
+      pick <id>                                the user's terminal turns to it
+
+    The rest is flowkit's, here: a session is found through the processes above it, up to the
+    one the driver started in its place; a line is its characters, then Enter after the same
+    pause; what a prompt box holds is read from the screen; a launch is waited for by looking at
+    Claude Code's list and at the driver's."""
+
+    def __init__(self, name, path):
+        self.name, self.program, self.path = name, f"flowkit-driver-{name}", path
+        self.silent = set()  # the requests it has said it has no answer to: each is asked once
+
+    @staticmethod
+    def at(place):
+        return place.id if isinstance(place, Place) else place
+
+    def available(self):
+        return os.access(self.path, os.X_OK)
+
+    def ask(self, request, *args, env=None):
+        """A request to the executable: (True, what it printed), (False, why it failed) or
+        (None, "") where it has no answer to the request."""
+        if request in self.silent:
+            return None, ""
+        done = subprocess.run([self.path, request, *args], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              errors="replace", timeout=ASKING, env=env)
+        if done.returncode == 2:
+            self.silent.add(request)
+            return None, ""
+        return (True, done.stdout.rstrip("\n")) if done.returncode == 0 else (False, done.stderr.strip())
+
+    def listed(self):
+        """{a place's id: the pid of what the driver started there, None where it names none};
+        None when it gave no list."""
+        answered, said = self.ask("list")
+        if not answered:
+            return None
+        found = {}
+        for line in said.splitlines():
+            at, _, pid = line.partition("\t")
+            if at.strip():
+                found[at.strip()] = int(pid) if pid.strip().isdigit() else None
+        return found
+
+    def finder(self):
+        """As Tmux.finder: one reading of the places and of the processes, as a function from a
+        session's pid to its place."""
+        tops = {pid: at for at, pid in (self.listed() or {}).items() if pid}
+        above = parents()
+
+        def find(pid):
+            for _ in range(ABOVE):
+                if pid in tops:
+                    return Place(tops[pid], False, None)
+                pid = above.get(pid)
+                if pid is None:
+                    return None
+            return None
+        return find
+
+    def locate(self, pid=None, sid=None, name=None):
+        return self.finder()(pid) if pid else None
+
+    def here(self):
+        return self.finder()(os.getpid())
+
+    def shown(self, place):
+        """What the driver prints for a place's screen, "" where it shows none."""
+        answered, said = self.ask("screen", self.at(place))
+        return said if answered else ""
+
+    def screen(self, place):
+        return rows(self.shown(place))
+
+    def bottom(self, place):
+        found = [text for text, _ in self.screen(place)]
+        while found and not found[-1].strip():
+            found.pop()
+        return found[-BOTTOM:]
+
+    def parked(self, place):
+        """As in a tmux pane, read from the screen the driver shows; "" where it shows none, since
+        nothing is known to be in the line's way."""
+        found = self.screen(place)
+        return stuck(found) if found else ""
+
+    def draft(self, place):
+        found = [row for row in self.screen(place) if PROMPT_LINE.match(row[0])]
+        return bool(found) and bool(drafted(found[-1]))
+
+    def type(self, place, text, how=LINE, settled=None):
+        """The line's characters, then Enter (a carriage return) after the pause, each a request of
+        its own; Ctrl-U before the line clears what is half typed, Escape goes first as its own
+        character. Why not: parked's (FREE, COMMAND, where the driver shows a screen), not
+        settled (ESCAPE, as for tmux), not typed (the driver failed)."""
+        at = self.at(place)
+        if how in (FREE, COMMAND):
+            why = self.parked(place)
+            if why:
+                return why
+        if how == ESCAPE:
+            self.ask("type", at, "\x1b")
+            if settled is not None and not settled():
+                return "not settled"
+            time.sleep(PAUSE)
+        if not self.ask("type", at, ("\x15" if how in (OVER, ESCAPE) else "") + text)[0]:
+            return "not typed"
+        time.sleep(PAUSE)
+        return "" if self.ask("type", at, "\r")[0] else "not typed"
+
+    def escape(self, place):
+        return bool(self.ask("type", self.at(place), "\x1b")[0])
+
+    def story(self, place):
+        """What the last launch into the place wrote while no session has registered there
+        since, else the story of the session registered there."""
+        record = kept()["places"].get(f"{self.name} {self.at(place)}") or {}
+        return record["story"] or "" if "story" in record else super().story(place)
+
+    @staticmethod
+    def marked(place):
+        """A place carries no mark of its own: what it was opened for is in STATE alone."""
+        return "", False
+
+    def places(self):
+        """Every place the driver lists, as a dict with the keys of a tmux pane. `id`; `pid`, of
+        what the driver started there; `story`, `slug` and `born` from STATE (the last launch into
+        it, else the session registered there). A place is its own group of one: `wid` is its
+        id and `wname` its story. What only tmux knows is empty."""
+        doc = kept()
+        sessions = {e.get("place"): e for e in doc["sessions"].values() if e.get("backend") == self.name}
+        found = []
+        for at, pid in (self.listed() or {}).items():
+            record, entry = doc["places"].get(f"{self.name} {at}") or {}, sessions.get(at) or {}
+            known = record if "story" in record else entry
+            slug = known.get("story") or ""
+            born = [int(x) for x in (record.get("born"), entry.get("born")) if str(x or "").isdigit()]
+            found.append({"id": at, "pid": str(pid or ""), "sess": "", "wid": at, "widx": "", "wname": slug or "-", "pidx": "",
+                          "cmd": "", "story": slug or ("adhoc" if known.get("adhoc") else ""), "slug": slug, "hold": "",
+                          "born": str(max(born)) if born else "", "rung": "", "parked": "", "title": ""})
+        return found
+
+    def label(self, states, groups):
+        """Each place is told its word, an empty one where it shows none: what a driver shows
+        cannot be read back, so all are told at every call. A group has no label of its own.
+        False when the driver failed at one."""
+        there = self.listed()
+        told = [self.ask("label", at, states.get(at, ""))[0] for at in there or {}]
+        return False if there is None or False in told else None
+
+    def close(self, place):
+        return bool(self.ask("close", self.at(place))[0])
+
+    def pick(self, place, client=""):
+        return bool(self.ask("pick", self.at(place))[0])
+
+    def plan(self, launch, listed=None):
+        """Nothing to pick: where a new place goes is the driver's. The reporter: whenever the
+        story has none running."""
+        first = bool(launch.reporter) and not running(self, launch.reporter, listed or [])
+        return types.SimpleNamespace(reporter="first" if first else "", show=lambda launch: [
+            ("driver", self.name),
+            ("run", shlex.join([self.program, "open", launch.story, launch.name, launch.cwd, f"{launch.program} {launch.args}"]))])
+
+    def open(self, launch, plan, say=None, again=None, dialog=None):
+        if plan.reporter:
+            yield self.start(launch.reporter, launch.reporter_args, launch, say, again, dialog)
+        yield self.start(launch.name, launch.args, launch, say, again, dialog)
+
+    def make(self, name, args, launch):
+        """A new place with the session's command started in it, the story's from that moment
+        (launched()); Refused when the driver made none."""
+        answered, said = self.ask("open", launch.story, name, launch.cwd, f"{launch.program} {args}", env=cleaned())
+        place = said.strip() if answered else ""
+        if not place:
+            raise Refused("failed", (said if answered is False else "") or f"{self.program} open gave no place")
+        launched(self.name, place, launch.story, launch.adhoc)
+        return place
+
+    def start(self, name, args, launch, say, again, dialog):
+        """Opens a place, then waits up to 15 s until Claude Code lists a session of that name
+        that runs under what the driver started there and, where the driver shows a screen,
+        Remote Control has printed its link, 30 s more for the link alone. A place the driver no
+        longer lists within the 15 s, from the third second on and with no session of the name
+        listed, means claude exited at start-up: a place is opened once more, once `again` let
+        it; a second exit is Refused. A place that is still there at 15 s with nothing listed
+        gets the warning, with the first line of the dialog its screen ends on. A dialog is
+        never answered here."""
+        def under(pid, top, above):
+            for _ in range(ABOVE):
+                if pid == top:
+                    return True
+                pid = above.get(pid)
+            return False
+
+        link, tried, up, i = None, 1, False, 0
+        place = self.make(name, args, launch)
+        while i < STARTING:
+            i += 1
+            time.sleep(1)
+            try:
+                listed, above = agents(), parents()
+            except (OSError, ValueError, subprocess.SubprocessError):
+                listed, above = [], {}
+            there = self.listed()
+            top = (there or {}).get(place)
+            up = up or any(isinstance(a, dict) and a.get("name") == name and a.get("pid")
+                           and (top is None or under(a["pid"], top, above)) for a in listed)
+            link = LINK.search(self.shown(place)) if launch.rc else None
+            if up and (link or not launch.rc or "screen" in self.silent):
+                break
+            if up or there is None or place in there or i < 3:
+                continue
+            if tried == 2:
+                raise Refused("exited", f"session '{name}' exited twice at start-up; {self.program} kept no place for it")
+            if again:
+                again(name)
+            if say:
+                say(f"warning: session '{name}' exited at start-up in {place}; opened again")
+            tried, i = 2, 0
+            place = self.make(name, args, launch)
+        if up and launch.rc and not link and "screen" not in self.silent:
+            for _ in range(LINKING):
+                time.sleep(1)
+                link = LINK.search(self.shown(place))
+                if link:
+                    break
+        parked = ""
+        if not up:
+            parked = dialog(self.shown(place)) if dialog else ""
+            if say and parked:
+                say(f"warning: session '{name}' is parked at a start-up prompt in {place} ({parked}); answer it there")
+            elif say:
+                say(f"warning: no session '{name}' came up in {place} within 15s; look at it (a folder trust prompt?)")
+        return Opened(name=name, place=place, where=f"driver={self.name} id={place}", up=up, created=1, tried=tried,
+                      rc=(link.group(0) if link else "pending") if launch.rc else "off", parked=parked)
+
+
 TMUX, BACKGROUND = Tmux(), Background()
-BACKENDS = {TMUX.name: TMUX, BACKGROUND.name: BACKGROUND}  # by the name `driver=` takes in handoff.conf
+BACKENDS = {TMUX.name: TMUX, BACKGROUND.name: BACKGROUND}  # the ones built in, by the name `driver=` takes in handoff.conf
+OUTSIDE = {}  # the outside drivers asked for so far, by their executable
+
+
+def configured():
+    """The name on handoff.conf's last `driver=` line, tmux without one."""
+    found = ""
+    try:
+        for line in CONF.read_text(errors="replace").splitlines():
+            m = re.match(r"\s*driver\s*=\s*(.*)", line)
+            if m:
+                found = m.group(1).rstrip()
+    except OSError:
+        pass
+    return found or "tmux"
+
+
+def driver(name=None):
+    """The backend of that name, the one handoff.conf names when none is given: a built-in one,
+    else an outside driver, whose executable `flowkit-driver-<name>` is looked for on the PATH,
+    in ~/.local/bin (where flowkit's own copies sit) and beside flowkit's commands. None when
+    there is no such executable."""
+    name = name or configured()
+    if name in BACKENDS:
+        return BACKENDS[name]
+    if not NAMED.match(name):
+        return None
+    program = f"flowkit-driver-{name}"
+    own = Path(__file__).resolve().parent.parent / "bin"
+    path = shutil.which(program, path=os.pathsep.join([os.environ.get("PATH", ""), str(Path.home() / ".local/bin"), str(own)]))
+    if not path:
+        return None
+    return OUTSIDE.setdefault(path, Driver(name, path))
+
+
+def terminal():
+    """The backend of a session that has a terminal of its own (`interactive` in Claude Code's
+    list): the outside driver handoff.conf names, tmux with any other line."""
+    at = driver()
+    return at if isinstance(at, Driver) else TMUX

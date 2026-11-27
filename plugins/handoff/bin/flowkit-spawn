@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # flowkit-spawn — start the next Claude Code session of a story with its prompt file, through
-# the launch driver set in ~/.config/flowkit/handoff.conf (driver=tmux or driver=background).
+# the launch driver set in ~/.config/flowkit/handoff.conf (driver=tmux, driver=background or the
+# name of an outside driver).
 #
 # tmux driver: one tab per story, up to 9 sessions tiled in launch order (1 top left, 2 to its
 # right, …), a 10th opens <story>-2. With reporter=on, a launch that finds no `<story>-report`
@@ -11,7 +12,11 @@
 # shows in `claude agents`, the board and Remote Control, and `claude attach <name>` opens it.
 # With reporter=on, a story with no `<story>-report` session yet gets one first.
 #
-# Either driver first waits while ~/.claude/load-hold exists (see "The launch hold" below).
+# an outside driver (driver=<name>): the executable flowkit-driver-<name> opens a place for the
+# session in whatever it drives (docs/drivers.md). With reporter=on, a launch that finds no
+# `<story>-report` running starts one first.
+#
+# Any driver first waits while ~/.claude/load-hold exists (see "The launch hold" below).
 #
 # Usage: flowkit-spawn [options] <prompt-file>
 #   --repo <path>          working directory of the new session (default: the current one)
@@ -55,6 +60,9 @@
 # background driver, <id> being the id `claude attach`, `logs` and `stop` take:
 #   REPORTER driver=background id=<id> name=<slug>-report rc=<url|pending>   (reporter only)
 #   SPAWNED driver=background id=<id> story=<slug> name=<name> rc=<url|pending> prompt=<file>
+# an outside driver, <id> being its own for the place (try=2 when a place was opened a second time):
+#   REPORTER driver=<name> id=<id> name=<slug>-report rc=<url|pending> try=<1|2> [parked=<line>]   (reporter only)
+#   SPAWNED driver=<name> id=<id> story=<slug> name=<name> rc=<url|pending> prompt=<file> created=1 try=<1|2> [parked=<line>]
 #
 # Where a session runs, and everything that is made, typed or read there, is the launch driver's:
 # the plugin's scripts/backend.py answers for it, and nothing here calls tmux or Claude Code's
@@ -197,7 +205,7 @@ def no_chrome(b):
 
 def main(argv):
     b = backend()
-    driver = setting("driver") or "tmux"
+    driver = b.configured()
     reporter_on, perm = setting("reporter"), setting("permission_mode")
 
     repo, name, story, model, effort, submodel = os.getcwd(), "", "", "", "", ""
@@ -260,9 +268,10 @@ def main(argv):
 
 def launch(b, driver, reporter_on, perm, repo, name, story, model, effort, submodel, rc, single, pane, force_new, force, dry,
            prompt, over_cap, from_queue, from_watch, capacity, owed):
-    at = b.BACKENDS.get(driver)
+    at = b.driver(driver)
     if at is None:
-        fail(7, f"launch driver '{driver}' (set in {CONF}) is not available in this version; use driver=tmux or driver=background")
+        fail(7, f"launch driver '{driver}' (set in {CONF}) is not available: no executable flowkit-driver-{driver} on the PATH; "
+                "use driver=tmux or driver=background, or install that driver (docs/drivers.md in the flowkit repository)")
 
     for v in (model, effort, submodel, perm):
         if re.search(r"[^A-Za-z0-9._\[\]-]", v):

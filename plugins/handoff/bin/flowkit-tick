@@ -313,9 +313,10 @@ def remind():
 
 def marks():
     """The status line `flowkit-tmux marks` prints once it has marked the panes and tabs and closed
-    what autoclose lets it close; "" where tmux is not installed. The helper is the one beside this
-    file (its own version: the copies in ~/.local/bin move together), else the plugin's."""
-    if not shutil.which("tmux"):
+    what autoclose lets it close; "" where tmux is not installed and handoff.conf names no outside
+    driver. The helper is the one beside this file (its own version: the copies in ~/.local/bin
+    move together), else the plugin's."""
+    if not shutil.which("tmux") and setting("driver") in ("", "tmux", "background"):
         return ""
     helper = Path(__file__).resolve().parent / "flowkit-tmux"
     if not helper.is_file():

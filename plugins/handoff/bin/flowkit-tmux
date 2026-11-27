@@ -83,8 +83,21 @@ def agents():
     return rows if isinstance(rows, list) else None
 
 
+def terminal():
+    """The backend of a session in a terminal: tmux, or the outside driver handoff.conf names (a
+    plugin older than 0.16.0 knows tmux alone)."""
+    b = backend()
+    return b.terminal() if hasattr(b, "terminal") else b.TMUX
+
+
 def panes():
-    return ask(backend().TMUX.places) or []
+    return ask(terminal().places) or []
+
+
+def runs_claude(pane):
+    """A pane that runs claude shows its version as its command; a place of an outside driver
+    names no command, and may run it."""
+    return bool(VERSION.match(pane["cmd"])) or (not pane["cmd"] and terminal() is not backend().TMUX)
 
 
 def placed(rows, pane_list):
@@ -240,7 +253,7 @@ def ring(pane, row, now):
         backend().note(row["sessionId"], rung=int(now))
     except OSError:
         return  # a ring that cannot be noted would come again at every pass
-    ask(backend().TMUX.type, pane["id"], "report now", backend().OVER)
+    ask(terminal().type, pane["id"], "report now", backend().OVER)
 
 
 def starting(pane, now):
@@ -276,15 +289,15 @@ def parked(pane_list, listed, now):
     the backend's file, by pane) that long ago. A claude pane with no dialog on it (`claude
     agents`, a picker, a `-p` job) is none."""
     out, changes = [], {}
-    places = backend().kept()["places"]
+    places, at = backend().kept()["places"], terminal()
     for key in places if pane_list else ():  # no pane at all is tmux not answering: nothing is known to be gone
-        if key.startswith("tmux ") and key[5:] not in {p["id"] for p in pane_list}:
+        if key.startswith(f"{at.name} ") and key[len(at.name) + 1:] not in {p["id"] for p in pane_list}:
             changes[key] = None  # the pane is gone
     for p in pane_list:
         line = ""
-        if p["id"] not in listed and VERSION.match(p["cmd"]):
-            line = dialog([text for text, _ in ask(backend().TMUX.screen, p["id"]) or []])
-        key, born = f"tmux {p['id']}", p.get("born") or ""
+        if p["id"] not in listed and runs_claude(p):
+            line = dialog([text for text, _ in ask(at.screen, p["id"]) or []])
+        key, born = f"{at.name} {p['id']}", p.get("born") or ""
         seen = str(places.get(key, {}).get("parked") or p.get("parked") or "")
         if seen.isdigit() and born.isdigit() and int(seen) < int(born):
             seen = ""  # seen before the last launch into this pane: that was another session's dialog
@@ -388,7 +401,7 @@ def close_stories(pane_list, found, words):
         for p in [p for p in members if p["id"] not in rows] + [p for p, _ in claudes if p not in report] + report:
             if p["id"] in rows and not terminate(int(rows[p["id"]]["pid"])):
                 break  # it would not go: the rest stay, the reporter with them
-            ask(backend().TMUX.close, p["id"])
+            ask(terminal().close, p["id"])
 
 
 def coordinators():
@@ -454,14 +467,14 @@ def close_panes(rows, found, words):
         if not now_p or now_p["pid"] != p["pid"] or starting(now_p, time.time()):
             continue
         if terminate(int(r["pid"])):
-            ask(backend().TMUX.close, p["id"])
+            ask(terminal().close, p["id"])
     return True
 
 
 def waiting():
     pane_list = panes()
     found, rows = [], []
-    if any(VERSION.match(p["cmd"]) for p in pane_list):
+    if any(runs_claude(p) for p in pane_list):
         rows = agents()
         if rows is None:
             return  # claude agents failed: leave the marks as they are
@@ -487,7 +500,7 @@ def waiting():
     for p in pane_list:  # a story with a watch open is watched, while nothing in its tab is more urgent
         if p.get("slug") in arms and tab.get(p["wid"], "done") == "done":
             tab[p["wid"]] = "watching"
-    ask(backend().TMUX.label, want, {wid: (count.get(wid, 0), tab.get(wid, "")) for wid in {*count, *tab}})
+    ask(terminal().label, want, {wid: (count.get(wid, 0), tab.get(wid, "")) for wid in {*count, *tab}})
     if setting("autoclose") == "on" and not close_panes(rows, found, words):
         close_stories(pane_list, found, words)
     total = sum(count.values())
@@ -545,7 +558,7 @@ def list_sessions(client=""):
         print("\n  claude agents --json failed.")
         pause()
         return
-    here = ask(backend().TMUX.session) or ""
+    here = ask(getattr(terminal(), "session", str)) or ""
     order = {"waiting": 0, "busy": 1}
     pane_list = panes()
     found = placed(rows, pane_list)
@@ -569,7 +582,7 @@ def list_sessions(client=""):
     except EOFError:
         return
     if choice.isdigit() and 1 <= int(choice) <= len(found):
-        ask(backend().TMUX.pick, found[int(choice) - 1][0]["id"], client)
+        ask(terminal().pick, found[int(choice) - 1][0]["id"], client)
 
 
 def help_text():

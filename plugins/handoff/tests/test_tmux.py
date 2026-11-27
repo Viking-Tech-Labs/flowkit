@@ -13,6 +13,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "flowkit-tmux"
 SEP = "\x1f"
@@ -29,6 +30,7 @@ def backend(ft, tmp):
     """The backend.py a loaded flowkit-tmux reaches tmux and claude through, its file under tmp."""
     b = ft.backend()
     b.STATE = tmp / "flowkit" / "sessions.json"
+    b.CONF = tmp / "handoff.conf"  # never the user's driver
     return b
 
 
@@ -237,6 +239,39 @@ WORKING = """⏺ Reading the plan.
 ✻ Working… (12s · esc to interrupt)
 
 """ + "─" * 120 + "\n❯ \n" + "─" * 120 + "\n  ⏵⏵ auto mode on\n"
+
+
+class Outside(unittest.TestCase):
+    """The marks with an outside driver named in handoff.conf: its places in place of tmux's panes."""
+
+    def test_the_marks_go_to_the_driver_the_conf_names(self):
+        tmp = Path(tempfile.mkdtemp())
+        for sub in ("stories", "sessions", "flowkit", "bin"):
+            (tmp / sub).mkdir()
+        stub = tmp / "bin" / "flowkit-driver-stub"
+        stub.write_text(f"#!/bin/sh\necho \"driver $*\" >> {tmp}/calls\ncase \"$1\" in\n"
+                        "list) printf 'p1\\t500\\np2\\t\\n';;\nscreen) echo nothing;;\nlabel) ;;\n*) exit 2;;\nesac\n")
+        stub.chmod(0o755)
+        ft = load()
+        ft.CLAUDE = ft.CONFIG = tmp
+        b = backend(ft, tmp)
+        b.CONF.write_text("driver=stub\n")
+        sid = "00000001-0000-0000-0000-000000000000"
+        b.agents = lambda *cmd: [{"kind": "interactive", "pid": 700, "sessionId": sid, "status": "waiting", "name": "st-s1",
+                                  "startedAt": time.time() * 1000}]
+        b.parents = lambda: {700: 600, 600: 500}
+        b.tmux = lambda *cmd: self.fail(f"tmux {cmd}")
+        said = io.StringIO()
+        with mock.patch.dict(os.environ, {"PATH": f"{tmp / 'bin'}{os.pathsep}{os.defpath}"}):
+            self.assertIs(ft.terminal(), b.driver("stub"))
+            b.register(sid, "stub", "p1", "st")
+            with contextlib.redirect_stdout(said):
+                ft.waiting()
+        calls = (tmp / "calls").read_text().splitlines()
+        self.assertEqual([c for c in calls if c.startswith("driver label")], ["driver label p1 waiting", "driver label p2 "])
+        self.assertIn("driver screen p2", calls, "a place with no session listed may sit at a start-up prompt")
+        self.assertNotIn("driver screen p1", calls)
+        self.assertIn("1 needs you", said.getvalue())
 
 
 class Parked(Labels):

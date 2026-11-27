@@ -245,6 +245,45 @@ class Handoff(unittest.TestCase):
         self.assertIn("?? work.txt", out.stderr)
         self.assertNotIn(".claude", out.stderr)
 
+    def test_spawn_goes_through_the_outside_driver_the_conf_names(self):
+        repo = self.spawn_repo()
+        conf, prompt, sid = self.tmp / "flowkit" / "handoff.conf", self.tmp / "p.md", "0a1b2c3d-0000-4000-8000-00000000000d"
+        prompt.write_text("hi\n")
+        conf.write_text("driver=nope\n")
+        out = self.spawn("--repo", str(repo), "--name", "s2", str(prompt))
+        self.assertEqual((out.returncode, out.stdout, out.stderr),
+                         (7, "", f"launch driver 'nope' (set in {conf}) is not available: no executable flowkit-driver-nope "
+                                 "on the PATH; use driver=tmux or driver=background, or install that driver (docs/drivers.md in the flowkit repository)\n"))
+        # a driver that opens, lists and types and has no answer to anything else; its place runs under this test
+        stub = self.tmp / "bin" / "flowkit-driver-stub"
+        listed = json.dumps([{"name": "s2", "pid": os.getpid(), "sessionId": sid, "kind": "interactive", "status": "idle"}])
+        stub.write_text(f"#!/bin/sh\necho \"driver $*\" >> {self.calls}\ncase \"$1\" in\n"
+                        f"open) echo '{listed}' > {self.tmp / 'agents.json'}; echo place-1;;\n"
+                        f"list) printf 'place-1\\t{os.getpid()}\\n';;\ntype) ;;\n*) exit 2;;\nesac\n")
+        stub.chmod(0o755)
+        conf.write_text("driver=stub\n")
+        out = self.spawn("--repo", str(repo), "--name", "s2", "--story", "st", str(prompt))
+        self.assertEqual((out.returncode, out.stderr), (0, ""))
+        self.assertIn("driver: stub\n", out.stdout)
+        self.assertRegex(out.stdout, rf"(?m)^run:    flowkit-driver-stub open st s2 {re.escape(str(repo.resolve()))} 'claude --remote-control ")
+        self.assertNotIn("driver open", self.calls.read_text(), "a dry run opens nothing")
+        out = subprocess.run([str(SPAWN_BIN), "--repo", str(repo), "--name", "s2", "--story", "st", str(prompt)],
+                             capture_output=True, text=True, env=self.env)
+        self.assertEqual((out.returncode, out.stderr), (0, ""))
+        self.assertRegex(out.stdout, r"^SPAWNED driver=stub id=place-1 story=st name=s2 rc=pending prompt=\S+ created=1 try=1\n$")
+        opened = [l for l in self.calls.read_text().splitlines() if l.startswith("driver open")]
+        self.assertEqual(len(opened), 1, opened)
+        self.assertRegex(opened[0], rf"^driver open st s2 {re.escape(str(repo.resolve()))} claude --remote-control --name 's2' \"\$\(cat \S+\)\"$")
+        self.assertRegex((self.tmp / "claude" / "stories" / "st.md").read_text(), r"> launched s2 · ")
+        state = self.tmp / "claude" / "flowkit" / "sessions.json"
+        self.assertEqual(json.loads(state.read_text())["places"]["stub place-1"]["story"], "st")
+        # the session's start: it finds its place through the driver's list and takes the launch's record over
+        self.env["CLAUDE_PID"] = str(os.getpid())
+        self.assertEqual(self.handoff("refresh", str(repo), stdin=json.dumps({"session_id": sid})).returncode, 0)
+        kept = json.loads(state.read_text())
+        entry = kept["sessions"][sid]
+        self.assertEqual((entry["backend"], entry["place"], entry["story"], kept["places"]), ("stub", "place-1", "st", {}))
+
     def test_spawn_copies_only_a_prompt_from_outside_the_store(self):
         repo = self.spawn_repo()
         store = self.tmp / "claude" / "spawned"
