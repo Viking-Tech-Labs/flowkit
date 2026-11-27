@@ -26,7 +26,8 @@ JOBS = [{"id": 31, "name": "rspec", "stage": "test", "web_url": "https://gitlab.
 SID = "11111111-1111-1111-1111-111111111111"
 T0 = 1_800_000_000.0
 GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
-       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+       "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "maintenance.auto", "GIT_CONFIG_VALUE_0": "false"}
 GLAB = """#!/bin/sh
 d="{dir}"
 echo "$PWD|$*" >> "$d/calls"
