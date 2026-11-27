@@ -1,6 +1,7 @@
 """Run with `python3 -m unittest discover plugins/handoff/tests`. Loads flowkit-tmux as a module and
-swaps its command runner for a stub that serves panes, windows and `claude agents`, and records the
-tmux writes, so nothing reaches a real tmux server or the user's files."""
+swaps the command runners of the backend.py it loads for a stub that serves panes, windows and
+`claude agents`, and records the tmux writes, so nothing reaches a real tmux server or the user's
+files."""
 import contextlib
 import importlib.machinery
 import io
@@ -9,6 +10,7 @@ import json
 import os
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 
@@ -23,6 +25,13 @@ def load(path=BIN):
     return module
 
 
+def backend(ft, tmp):
+    """The backend.py a loaded flowkit-tmux reaches tmux and claude through, its file under tmp."""
+    b = ft.backend()
+    b.STATE = tmp / "flowkit" / "sessions.json"
+    return b
+
+
 class Labels(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -31,7 +40,10 @@ class Labels(unittest.TestCase):
         self.ft = load()
         self.ft.CLAUDE = self.tmp
         self.ft.CONFIG = self.tmp  # never the user's handoff.conf
-        self.ft.run = self.run_stub
+        self.b = backend(self.ft, self.tmp)
+        self.b.tmux = lambda *cmd: types.SimpleNamespace(stdout=self.run_stub("tmux", *cmd), returncode=0)
+        self.b.agents = lambda *cmd: json.loads(self.run_stub("claude", "agents", "--json"))
+        self.b.parents = dict
         self.rows, self.pane_list, self.windows, self.writes = [], [], {}, []
         self.later, self.listed, self.asked = None, 0, 0  # a second pane list, served from the second list-panes on
         self.screens = {}  # pane id → what capture-pane shows
@@ -44,16 +56,15 @@ class Labels(unittest.TestCase):
         if cmd[:2] == ("claude", "agents"):
             self.asked += 1
             return json.dumps(self.rows)
-        if cmd[0] == "ps":
-            return ""
-        if cmd[:2] == ("tmux", "list-panes"):
+        if cmd[:2] == ("tmux", "list-panes") and cmd[4].startswith("p" + SEP):  # what each pane and tab shows now
+            return "".join(SEP.join(["p", p[1], p[8]]) + "\n" for p in self.pane_list) + \
+                "".join(SEP.join(["w", wid, "", label]) + "\n" for wid, label in self.windows.items())
+        if cmd[:2] == ("tmux", "list-panes"):  # a pane's row here keeps what it shows at 8, its rung before its born
             self.listed += 1
             panes = self.later if self.later is not None and self.listed > 1 else self.pane_list
-            return "".join(SEP.join(p) + "\n" for p in panes)
+            return "".join(SEP.join(p[i] for i in (0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 13, 12, 14)) + "\n" for p in panes)
         if cmd[:2] == ("tmux", "capture-pane"):
             return self.screens.get(cmd[-1], "")
-        if cmd[:2] == ("tmux", "list-windows"):
-            return "".join(SEP.join([wid, "", label]) + "\n" for wid, label in self.windows.items())
         self.writes.append(cmd[1:])
         return ""
 
@@ -239,6 +250,12 @@ class Parked(Labels):
         self.now = int(time.time())
         self.file = self.tmp / "flowkit" / "parked.json"
 
+    def seen(self, at=None):
+        """When pane %1's dialog was first seen, as the backend's file keeps it; `at` sets it."""
+        if at:
+            self.b.keep(lambda doc: doc["places"].update({"tmux %1": {"parked": at}}))
+        return self.b.kept()["places"].get("tmux %1", {}).get("parked")
+
     def tick(self):
         """One tick: what it printed and the tmux options it wrote, one tuple each."""
         self.writes.clear()
@@ -268,10 +285,12 @@ class Parked(Labels):
         self.screens["%1"] = TRUST
         out, sets = self.tick()
         self.assertEqual(out, "", "a launch 20 s old may still be answered")
-        self.assertEqual([s[:5] for s in sets], [("set-option", "-p", "-t", "%1", "@flowkit_parked")], "first seen")
+        self.assertEqual(sets, [])
+        self.assertAlmostEqual(self.seen(), self.now, delta=5, msg="first seen")
         self.assertFalse(self.file.exists())
 
-        self.pane_list[0][14] = str(self.now - 61)
+        self.seen(self.now - 61)
+        self.pane_list[0][13] = str(self.now - 81)
         out, sets = self.tick()
         self.assertIn("⚑ 1 needs you", out)
         self.assertEqual(sets, [("set-option", "-p", "-t", "%1", "@flowkit_state", "waiting"),
@@ -293,7 +312,7 @@ class Parked(Labels):
         self.rows.append({"kind": "interactive", "pid": 900, "status": "busy", "name": "st-s2"})
         out, sets = self.tick()
         self.assertEqual(out, "")
-        self.assertIn(("set-option", "-p", "-u", "-t", "%1", "@flowkit_parked"), sets)
+        self.assertIsNone(self.seen())
         self.assertIn(("set-option", "-p", "-t", "%1", "@flowkit_state", "working"), sets)
         self.assertIn(("set-option", "-w", "-t", "@1", "@flowkit_tab", "running"), sets)
         self.assertFalse(self.file.exists(), "the file drops a pane that no longer waits")
@@ -317,16 +336,30 @@ class Parked(Labels):
         self.assertFalse(self.file.exists())
 
     def test_a_pane_used_again_starts_from_nothing(self):
-        self.pane("900", 1, "zsh", parked=str(self.now - 3600))  # its claude exited at the prompt
+        self.pane("900", 1, "zsh")  # its claude exited at the prompt
+        self.seen(self.now - 3600)
         self.screens["%1"] = TRUST  # still on the screen, above the shell's prompt
         self.file.write_text(json.dumps({"at": self.now - 10, "panes": [{"pane": "%1"}]}))
-        out, sets = self.tick()
-        self.assertEqual((out, sets), ("", [("set-option", "-p", "-u", "-t", "%1", "@flowkit_parked")]))
+        self.assertEqual(self.tick(), ("", []))
         self.assertFalse(self.file.exists())
-        self.pane_list[0][7], self.pane_list[0][14] = "2.1.328", ""  # a claude started there by hand
-        out, sets = self.tick()
-        self.assertEqual(out, "", "its prompt is new: a minute from now")
-        self.assertEqual([s[4] for s in sets], ["@flowkit_parked"])
+        self.assertIsNone(self.seen())
+        self.pane_list[0][7] = "2.1.328"  # a claude started there by hand
+        self.assertEqual(self.tick(), ("", []), "its prompt is new: a minute from now")
+        self.assertAlmostEqual(self.seen(), self.now, delta=5)
+        self.seen(self.now - 3600)
+        self.pane_list[0][13] = str(self.now - 20)  # a launch typed there since: the dialog is that session's
+        self.assertEqual(self.tick(), ("", []))
+        self.assertAlmostEqual(self.seen(), self.now, delta=5)
+        self.pane_list.pop()
+        self.tick()
+        self.assertIsNone(self.seen(), "a pane that is gone keeps no stamp")
+
+    def test_what_a_tick_before_0_15_0_kept_in_the_pane_still_counts(self):
+        self.pane("900", 1, "2.1.328", parked=str(self.now - 61))
+        self.screens["%1"] = TRUST
+        self.assertIn("⚑ 1 needs you", self.tick()[0])
+        self.assertEqual(json.loads(self.file.read_text())["panes"][0]["since"], self.now - 61)
+        self.assertIsNone(self.seen(), "the file gets no stamp of its own while the pane's is read")
 
     def test_the_list_shows_a_parked_pane_among_those_that_wait(self):
         self.pane("900", 1, "2.1.328", born=str(self.now - 61))
@@ -363,9 +396,13 @@ class Asks(Labels):
     def test_a_program_that_is_not_installed_ends_no_pass(self):
         """No tmux, or no claude, on the PATH raised out of the marks and took the whole tick along."""
         ft = load()
-        self.assertIsNone(ft.run("flowkit-no-such-program", "--version"))
+        b = backend(ft, self.tmp)
+
+        def missing(*cmd):
+            raise FileNotFoundError("flowkit-no-such-program")
+        b.tmux = b.agents = b.parents = missing  # what every call does on a computer with neither
+        self.assertIsNone(ft.ask(b.TMUX.places))
         ft.CLAUDE = ft.CONFIG = self.tmp
-        ft.run = lambda *cmd: None  # what every call answers on a computer with neither
         with contextlib.redirect_stdout(io.StringIO()) as out:
             ft.main(["marks"])
         self.assertEqual(out.getvalue(), "")
@@ -437,19 +474,24 @@ class Closer(Labels):
     def test_a_complete_story_rings_its_reporter_until_the_report_is_in(self):
         self.note("# st", "Next: spawned s2")
         self.session(2, status="idle", idle_for=10 * 60, closed=True)
-        self.session(1, status="idle", idle_for=10 * 60, name="st-report")
-        self.assertEqual(self.closes(), [])
-        self.assertTrue(self.rang())
+        reporter = self.session(1, status="idle", idle_for=10 * 60, name="st-report")
         self.pane_list[-1][12] = str(int(time.time()))
+        self.assertEqual(self.closes(), [])
+        self.assertFalse(self.rang(), "a tick before 0.15.0 rang it and kept that in the pane")
+        self.pane_list[-1][12] = ""
         self.closes()
-        self.assertFalse(self.rang())  # rung a minute ago: not again yet
+        self.assertEqual([a for a in self.writes if a[0] == "send-keys"], [("send-keys", "-t", "%1", "C-u", ";", "send-keys", "-t", "%1", "-l", "report now",
+                                        ";", "run-shell", "sleep 0.5", ";", "send-keys", "-t", "%1", "Enter")])
+        self.assertAlmostEqual(self.b.kept()["sessions"][reporter]["rung"], time.time(), delta=5)
+        self.closes()
+        self.assertFalse(self.rang())  # rung a moment ago: not again yet
 
     def test_an_open_watch_keeps_the_story_and_its_reporter_unrung(self):
         self.note("# st")
         sid = self.session(2, status="idle", idle_for=20 * 60)
         self.note("## s2 · 2026-11-17 15:20", f"Session: {sid} · Repo: /repo",
                   "Next: watching app!7 (https://gitlab.com/g/p/-/merge_requests/7)")
-        self.session(1, status="idle", idle_for=20 * 60, name="st-report")
+        reporter = self.session(1, status="idle", idle_for=20 * 60, name="st-report")
         arm = self.arm("app!7")
         self.assertEqual(self.closes(), ["%2"], "the slice's pane goes; the story and its reporter stay")
         self.assertFalse(self.rang(), "a watch longer than the backfill's 15 minutes")
@@ -460,7 +502,7 @@ class Closer(Labels):
         self.assertEqual(self.closes(), [])
         self.assertTrue(self.rang())
         self.note("## app!7 · 2026-11-17 16:05", "Watch: pipeline green 16:04", "Next: none")
-        self.pane_list[-1][12] = ""
+        self.b.note(reporter, rung=0)
         self.assertEqual(self.closes(), [])
         self.assertTrue(self.rang(), "complete: the reporter writes its final report")
         self.note(self.final())

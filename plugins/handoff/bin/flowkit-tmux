@@ -2,10 +2,9 @@
 """flowkit-tmux: the Claude Code sessions in tmux at a glance, for the flowkit tmux kit.
 
   flowkit-tmux marks          the tick's job in tmux (flowkit-tick runs it at every pass): marks
-                              each Claude pane with its state (@flowkit_state: working, waiting,
-                              idle), each tab with how many of its sessions wait on you
-                              (@flowkit_wait), each story and adhoc tab with its most urgent
-                              state (@flowkit_tab), prints the total for the status bar;
+                              each Claude pane with its state (working, waiting, idle), each tab
+                              with how many of its sessions wait on you, each story and adhoc
+                              tab with its most urgent state, prints the total for the status bar;
                               a claude pane left at a start-up prompt waits on you too, and is
                               listed in ~/.claude/flowkit/parked.json while it does;
                               with autoclose=on in handoff.conf it also closes a finished slice's
@@ -24,8 +23,10 @@ The kit's conf calls the copy at ~/.local/bin/flowkit-tmux, which the handoff pl
 forward to its own version at every session start; the copy finds the plugin's other files
 through installed_plugins.json. A session is mapped to its pane through its parent
 processes, up to the pane's shell; background sessions have no pane and are listed apart.
+tmux and Claude Code's list of sessions are reached through the plugin's scripts/backend.py alone.
 """
 import functools
+import importlib.util
 import json
 import os
 import re
@@ -37,7 +38,6 @@ from pathlib import Path
 
 os.environ["PATH"] = os.pathsep.join(
     [str(Path.home() / ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", os.environ.get("PATH", "")])
-SEP = "\x1f"
 VERSION = re.compile(r"^\d+\.\d+\.\d+$")  # a pane running claude shows its version as the command
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "flowkit"
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
@@ -55,62 +55,62 @@ QUIET = 5 * 60  # a session is closed only once its transcript and forks have be
 BACKFILL = 15 * 60  # an unfinished story this quiet rings its reporter, who records the missing closes
 GRACE = 5 * 60  # the story file sits this long after its last write before the tab goes
 RING_EVERY = 5 * 60
-SPAWN_GRACE = 2 * 60  # a pane flowkit-spawn stamped @flowkit_born this recently is still starting its claude
+SPAWN_GRACE = 2 * 60  # a pane flowkit-spawn stamped this recently is still starting its claude
 HINT = re.compile(r"enter to (?:confirm|select|continue)|esc to (?!interrupt)\w+", re.I)  # the key hints under a dialog
 RULE = re.compile(r"^\s*[─-╿]{10,}\s*$")  # a row of box-drawing characters
 PARKED = 60  # a dialog this long on a claude pane with no session listed is a start-up prompt nobody answered
 
 
-def run(*cmd):
+@functools.lru_cache(None)
+def backend():
+    """The plugin's scripts/backend.py: the one file that reaches tmux and Claude Code's list."""
+    spec = importlib.util.spec_from_file_location("flowkit_backend", plugin_root() / "scripts" / "backend.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def ask(request, *args):
+    """A request to the backend; None where its program is not installed or did not answer."""
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True)
-    except OSError:
-        return None  # the program is not installed: the same as one that failed
-    return out.stdout if out.returncode == 0 else None
-
-
-def tmux(*args):
-    return run("tmux", *args) or ""
+        return request(*args)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
 def agents():
-    out = run("claude", "agents", "--json")
-    try:
-        rows = json.loads(out) if out else None
-    except ValueError:
-        return None
+    rows = ask(backend().agents)
     return rows if isinstance(rows, list) else None
 
 
 def panes():
-    fmt = SEP.join(["#{pane_pid}", "#{pane_id}", "#{session_name}", "#{window_id}", "#{window_index}",
-                    "#{window_name}", "#{pane_index}", "#{pane_current_command}", "#{@flowkit_state}",
-                    "#{@flowkit_story}#{@flowkit_adhoc}", "#{@flowkit_story}", "#{@flowkit_hold}#{@cc_hold}",
-                    "#{@flowkit_rung}", "#{@flowkit_born}", "#{@flowkit_parked}"])
-    keys = ("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "state", "story", "slug", "hold", "rung",
-            "born", "parked")
-    return [dict(zip(keys, line.split(SEP)))
-            for line in tmux("list-panes", "-a", "-F", fmt).splitlines() if line]
+    return ask(backend().TMUX.places) or []
 
 
 def placed(rows, pane_list):
-    """(pane, agent row) for every interactive session that runs inside a tmux pane."""
-    parent = {}
-    for line in (run("ps", "-axo", "pid=,ppid=") or "").splitlines():
-        parts = line.split()
-        if len(parts) == 2:
-            parent[parts[0]] = parts[1]
+    """(pane, agent row) for every interactive session that runs inside a tmux pane. The pane's
+    story is the one its session registered at its start, and its reporter's last ring the one
+    noted for it (the backend's file); a session that registered nothing keeps what its pane
+    lists."""
+    parent = ask(backend().parents) or {}
     by_pid = {p["pid"]: p for p in pane_list}
+    sessions = backend().kept()["sessions"]
     found = []
     for row in rows:
         if row.get("kind") != "interactive" or row.get("pid") is None:
             continue
-        pid = str(row["pid"])
+        pid = row["pid"]
         for _ in range(4):
-            if pid in by_pid:
-                found.append((by_pid[pid], row))
+            if str(pid) in by_pid:
+                pane, entry = by_pid[str(pid)], sessions.get(row.get("sessionId")) or {}
+                if "place" in entry:
+                    pane["slug"] = entry.get("story") or ""
+                    pane["story"] = pane["slug"] or ("adhoc" if entry.get("adhoc") else "")
+                if entry.get("rung"):
+                    pane["rung"] = str(entry["rung"])
+                found.append((pane, row))
                 break
-            pid = parent.get(pid, "")
+            pid = parent.get(pid)
     return found
 
 
@@ -231,13 +231,16 @@ def story_reported(text):
         return 0
 
 
-def ring(pane, now):
+def ring(pane, row, now):
     """Wake the reporter so it writes the final report; at most once every 5 min."""
     rung = pane.get("rung") or ""
-    if rung.isdigit() and now - int(rung) < RING_EVERY:
+    if not row.get("sessionId") or (rung.isdigit() and now - int(rung) < RING_EVERY):
         return
-    tmux("set-option", "-p", "-t", pane["id"], "@flowkit_rung", str(int(now)),
-         ";", "send-keys", "-t", pane["id"], "C-u", ";", "send-keys", "-t", pane["id"], "report now", "Enter")
+    try:
+        backend().note(row["sessionId"], rung=int(now))
+    except OSError:
+        return  # a ring that cannot be noted would come again at every pass
+    ask(backend().TMUX.type, pane["id"], "report now", backend().OVER)
 
 
 def starting(pane, now):
@@ -266,25 +269,43 @@ def dialog(rows):
 
 
 def parked(pane_list, listed, now):
-    """The panes parked at a start-up prompt, as (pane, the dialog's first line, since), and the
-    tmux writes that keep @flowkit_parked. Such a pane runs claude, no session is listed for it
-    (before a start-up prompt is answered there is none), and its screen ends on a dialog that has
-    stood for a minute: the launch was stamped (@flowkit_born) or the dialog first seen
-    (@flowkit_parked, kept here) that long ago. A claude pane with no dialog on it (`claude
+    """The panes parked at a start-up prompt, as (pane, the dialog's first line, since), and what
+    changes in the stamps of when each dialog was first seen. Such a pane runs claude, no session
+    is listed for it (before a start-up prompt is answered there is none), and its screen ends on a
+    dialog that has stood for a minute: the launch was stamped or the dialog first seen (kept in
+    the backend's file, by pane) that long ago. A claude pane with no dialog on it (`claude
     agents`, a picker, a `-p` job) is none."""
-    out, cmds = [], []
+    out, changes = [], {}
+    places = backend().kept()["places"]
+    for key in places:
+        if key.startswith("tmux ") and key[5:] not in {p["id"] for p in pane_list}:
+            changes[key] = None  # the pane is gone
     for p in pane_list:
         line = ""
         if p["id"] not in listed and VERSION.match(p["cmd"]):
-            line = dialog(tmux("capture-pane", "-p", "-t", p["id"]).splitlines())
-        seen = p.get("parked") or ""
+            line = dialog([text for text, _ in ask(backend().TMUX.screen, p["id"]) or []])
+        key, born = f"tmux {p['id']}", p.get("born") or ""
+        seen = str(places.get(key, {}).get("parked") or p.get("parked") or "")
+        if seen.isdigit() and born.isdigit() and int(seen) < int(born):
+            seen = ""  # seen before the last launch into this pane: that was another session's dialog
         if line and not seen:
-            cmds += [";", "set-option", "-p", "-t", p["id"], "@flowkit_parked", str(int(now))]
-        elif seen and not line:
-            cmds += [";", "set-option", "-p", "-u", "-t", p["id"], "@flowkit_parked"]
-        if line and any(at.isdigit() and now - int(at) > PARKED for at in (seen, p.get("born") or "")):
+            changes[key] = int(now)
+        elif key in places and not line:
+            changes[key] = None
+        if line and any(at.isdigit() and now - int(at) > PARKED for at in (seen, born)):
             out.append((p, line, int(seen) if seen.isdigit() else int(now)))
-    return out, cmds
+    return out, changes
+
+
+def stamp(changes):
+    """Keeps when each parked pane's dialog was first seen."""
+    def change(doc):
+        for key, at in changes.items():
+            doc["places"].pop(key, None)
+            if at:
+                doc["places"][key] = {"parked": at}
+    if changes:
+        ask(backend().keep, change)
 
 
 def note_parked(stuck, now):
@@ -320,8 +341,8 @@ def terminate(pid):
 
 
 def close_stories(pane_list, found, words):
-    """A story whose sessions are all finished goes as a whole, its reporter last. Only tabs marked
-    @flowkit_story are looked at; @flowkit_hold (or the older @cc_hold) on a tab keeps its story."""
+    """A story whose sessions are all finished goes as a whole, its reporter last. Only a story's
+    tabs are looked at; a tab the user holds keeps its story."""
     now = time.time()
     rows = {p["id"]: r for p, r in found}
     arms = watched()
@@ -349,7 +370,7 @@ def close_stories(pane_list, found, words):
         if not (reported or not claudes or (complete and not report)):
             if report and slug not in arms and (
                     complete or all(untouched(r.get("sessionId") or "", now - BACKFILL) for _, r in claudes)):
-                ring(report[0], now)  # never while a watch is open: its section rings the reporter itself
+                ring(report[0], rows[report[0]["id"]], now)  # never while a watch is open: its section rings the reporter itself
             continue
         if now - written < GRACE or not all(untouched(r.get("sessionId") or "", now - QUIET) for _, r in claudes):
             continue
@@ -363,7 +384,7 @@ def close_stories(pane_list, found, words):
         for p in [p for p in members if p["id"] not in rows] + [p for p, _ in claudes if p not in report] + report:
             if p["id"] in rows and not terminate(int(rows[p["id"]]["pid"])):
                 break  # it would not go: the rest stay, the reporter with them
-            tmux("kill-pane", "-t", p["id"])
+            ask(backend().TMUX.close, p["id"])
 
 
 def coordinators():
@@ -429,7 +450,7 @@ def close_panes(rows, found, words):
         if not now_p or now_p["pid"] != p["pid"] or starting(now_p, time.time()):
             continue
         if terminate(int(r["pid"])):
-            tmux("kill-pane", "-t", p["id"])
+            ask(backend().TMUX.close, p["id"])
     return True
 
 
@@ -450,36 +471,19 @@ def waiting():
         if word and (p["wid"] not in tab or URGENCY.index(word) < URGENCY.index(tab[p["wid"]])):
             tab[p["wid"]] = word
     now = time.time()
-    stuck, cmds = parked(pane_list, set(want), now)
+    stuck, changes = parked(pane_list, set(want), now)
     for p, _, _ in stuck:  # no session to ask: the pane itself waits on the user
         want[p["id"]] = "waiting"
         count[p["wid"]] = count.get(p["wid"], 0) + 1
         if p.get("story"):
             tab[p["wid"]] = "needs you"
     note_parked(stuck, now)
+    stamp(changes)
     arms = watched()
     for p in pane_list:  # a story with a watch open is watched, while nothing in its tab is more urgent
         if p.get("slug") in arms and tab.get(p["wid"], "done") == "done":
             tab[p["wid"]] = "watching"
-    for p in pane_list:
-        if p["id"] in want and want[p["id"]] != p["state"]:
-            cmds += [";", "set-option", "-p", "-t", p["id"], "@flowkit_state", want[p["id"]]]
-        elif p["id"] not in want and p["state"]:
-            cmds += [";", "set-option", "-p", "-u", "-t", p["id"], "@flowkit_state"]
-    for line in tmux("list-windows", "-a", "-F", SEP.join(["#{window_id}", "#{@flowkit_wait}", "#{@flowkit_tab}"])).splitlines():
-        wid, have, label = (line.split(SEP) + ["", ""])[:3]
-        n = count.get(wid, 0)
-        if n and have != str(n):
-            cmds += [";", "set-option", "-w", "-t", wid, "@flowkit_wait", str(n)]
-        elif not n and have:
-            cmds += [";", "set-option", "-w", "-u", "-t", wid, "@flowkit_wait"]
-        word = tab.get(wid, "")
-        if word and label != word:
-            cmds += [";", "set-option", "-w", "-t", wid, "@flowkit_tab", word]
-        elif not word and label:
-            cmds += [";", "set-option", "-w", "-u", "-t", wid, "@flowkit_tab"]
-    if cmds:
-        tmux(*cmds[1:])
+    ask(backend().TMUX.label, want, {wid: (count.get(wid, 0), tab.get(wid, "")) for wid in {*count, *tab}})
     if setting("autoclose") == "on" and not close_panes(rows, found, words):
         close_stories(pane_list, found, words)
     total = sum(count.values())
@@ -537,7 +541,7 @@ def list_sessions(client=""):
         print("\n  claude agents --json failed.")
         pause()
         return
-    here = tmux("display-message", "-p", "#{session_name}").strip()
+    here = ask(backend().TMUX.session) or ""
     order = {"waiting": 0, "busy": 1}
     pane_list = panes()
     found = placed(rows, pane_list)
@@ -561,7 +565,7 @@ def list_sessions(client=""):
     except EOFError:
         return
     if choice.isdigit() and 1 <= int(choice) <= len(found):
-        tmux("switch-client", *(["-c", client] if client else []), "-t", found[int(choice) - 1][0]["id"])
+        ask(backend().TMUX.pick, found[int(choice) - 1][0]["id"], client)
 
 
 def help_text():

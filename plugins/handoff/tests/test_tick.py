@@ -403,15 +403,16 @@ class Commands(unittest.TestCase):
         self.home, self.claude = self.tmp / "home", self.tmp / "claude"
         self.bin = self.home / ".local" / "bin"  # first on the PATH the commands give themselves
         self.bin.mkdir(parents=True)
-        self.claude.mkdir()
-        pane = [str(os.getpid()), "%1", "work", "@1", "1", "w", "1", "2.1.304", "", "", "", "", "", "", ""]
+        (self.claude / "plugins").mkdir(parents=True)  # the copies find the plugin's scripts as installed
+        (self.claude / "plugins" / "installed_plugins.json").write_text(
+            json.dumps({"plugins": {"handoff@flowkit": [{"installPath": str(PLUGIN)}]}}))
+        pane = [str(os.getpid()), "%1", "work", "@1", "1", "w", "1", "2.1.304", "", "", "", "", "", ""]
         (self.tmp / "panes").write_text(SEP.join(pane) + "\n")
-        (self.tmp / "windows").write_text(SEP.join(["@1", "", ""]) + "\n")
+        (self.tmp / "shown").write_text(SEP.join(["p", "%1", ""]) + "\n" + SEP.join(["w", "@1", "", ""]) + "\n")
         self.agents([{"kind": "interactive", "pid": os.getpid(), "sessionId": "s1", "status": "waiting", "name": "demo-s1"}])
         (self.bin / "tmux").write_text(f"""#!/bin/sh
 case "$1" in
-  list-panes) cat {self.tmp / 'panes'};;
-  list-windows) cat {self.tmp / 'windows'};;
+  list-panes) case "$4" in p*) cat {self.tmp / 'shown'};; *) cat {self.tmp / 'panes'};; esac;;
   *) echo "$@" >> {self.tmp / 'tmux.calls'};;
 esac
 """)
