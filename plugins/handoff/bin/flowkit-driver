@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""flowkit-driver: try a launch driver before a chain depends on it.
+
+  flowkit-driver test [<name>]   asks the driver of that name (the one handoff.conf names without
+                                 one) each request flowkit has for a driver, with a harmless
+                                 program in place of claude, and says for each: passed, failed,
+                                 not answered or not asked, and what flowkit does without it
+
+A driver is `tmux` or an executable `flowkit-driver-<name>` of your own (docs/drivers.md). The
+test opens one place under a story of its own, `flowkit-driver-test-<n>`, finds it in the
+driver's list, types two lines into it, reads its screen, labels it, turns your terminal to it
+when it runs in one, and closes it. With tmux it needs a server to open the place in: run it
+inside tmux, or name one with FLOWKIT_TMUX_SOCKET.
+
+Exit: 0 every request passed or was left out by the driver · 1 one failed, or a required one was
+not answered · 2 no such driver, or nowhere to try it.
+"""
+import importlib.util
+import json
+import os
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ME = Path(__file__).resolve()
+MARK = "flowkit-driver test: this place closes by itself"
+REQUIRED = {"open": "no session is started", "list": "no session is found where it runs",
+            "type": "no line reaches a session"}
+WITHOUT = {"screen": "a launch's line has no Remote Control link, a start-up prompt is not named, and a line is typed "
+                     "without a look at the prompt box",
+           "label": "nothing beside a session says working, waiting or idle",
+           "pick": "`flowkit-tmux list` shows the sessions and cannot jump to one",
+           "close": "a finished session's place stays until you close it"}
+WAIT = 5  # seconds a typed line, or a closed place, may take
+
+
+def backend():
+    """The plugin's scripts/backend.py: the one file that reaches a session, wherever it runs."""
+    spec = importlib.util.spec_from_file_location("flowkit_backend", ME.parent.parent / "scripts" / "backend.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def probe(folder, name):
+    """The program a tried place runs in place of claude. It says that it runs (session.json, read
+    as Claude Code's list), shows a line and a prompt box, and keeps every line typed into it
+    (typed), reading its keys one by one as claude does: Enter ends a line, Ctrl-U clears what is
+    half typed, Escape is no text."""
+    folder = Path(folder)
+    saved = None
+    if sys.stdin.isatty():
+        import termios
+        import tty
+        saved = termios.tcgetattr(0)
+        tty.setcbreak(0)
+    try:
+        (folder / "session.tmp").write_text(json.dumps({"name": name, "pid": os.getpid(), "kind": "interactive",
+                                                        "status": "idle", "sessionId": "flowkit-driver-test"}))
+        os.replace(folder / "session.tmp", folder / "session.json")
+        os.write(1, f"{MARK}\n❯ ".encode())
+        line = b""
+        while True:
+            keys = os.read(0, 1024)
+            if not keys:
+                break
+            for key in keys:
+                if key in (10, 13):
+                    with (folder / "typed").open("ab") as f:
+                        f.write(line + b"\n")
+                    line = b""
+                    os.write(1, "\n❯ ".encode())
+                elif key == 21:
+                    line = b""
+                elif key != 27:
+                    line += bytes([key])
+    finally:
+        if saved:
+            import termios
+            termios.tcsetattr(0, termios.TCSADRAIN, saved)
+
+
+def until(done):
+    deadline = time.time() + WAIT
+    while time.time() < deadline:
+        if done():
+            return True
+        time.sleep(0.2)
+    return bool(done())
+
+
+def test(name):
+    b = backend()
+    at = b.driver(name)
+    name = name or b.configured()
+    if at is None:
+        print(f"no launch driver '{name}': no executable flowkit-driver-{name} on the PATH")
+        return 2
+    if at is b.BACKGROUND:
+        print("driver=background is Claude Code's own background service: nothing of a driver's is tried")
+        return 2
+    session = f"flowkit-driver-test-{os.getpid()}"
+    folder = Path(tempfile.mkdtemp(prefix="flowkit-driver-"))
+    launch = b.Launch(story=session, name=session, cwd=str(folder), rc=False, args=f"--name '{session}'",
+                      program=f"{shlex.quote(sys.executable)} {shlex.quote(str(ME))} probe {shlex.quote(str(folder))}")
+
+    def session_row():
+        try:
+            return json.loads((folder / "session.json").read_text())
+        except (OSError, ValueError):
+            return None
+    b.agents = lambda *args: [row for row in [session_row()] if row]  # Claude Code's list, for this one session
+
+    def typed():
+        try:
+            return (folder / "typed").read_text(errors="replace").splitlines()
+        except OSError:
+            return []
+
+    silent = getattr(at, "silent", set())  # what an outside driver said it has no answer to
+    said, place = [], None
+
+    def result(request, passed, why=""):
+        """One request's line: passed, failed with why, or not answered with what goes without it."""
+        if request in silent:
+            verdict, why = "not answered", ("required: " + REQUIRED[request]) if request in REQUIRED else "without it " + WITHOUT[request]
+        else:
+            verdict = "passed" if passed else "failed"
+        said.append((request, verdict))
+        print(f"{request:<7}{verdict}" + (f" · {why}" if why and verdict != "passed" else ""), flush=True)
+
+    try:
+        try:
+            launch.target = at.target()
+        except b.Refused as e:
+            print(f"{name}: {e}: run this inside it, or name a server with FLOWKIT_TMUX_SOCKET")
+            return 2
+        warned = []
+        try:
+            opened = list(at.open(launch, at.plan(launch, []), warned.append))[-1]
+            place = opened.place
+            result("open", opened.up, (warned or ["the program did not come up"])[-1])
+        except b.Refused as e:
+            result("open", False, str(e))
+        if place is None:
+            for request in ("list", "type", "screen", "label", "pick", "close"):
+                print(f"{request:<7}not asked · open gave no place")
+            return 1
+        row = session_row() or {}
+        found = at.locate(pid=row.get("pid")) if row.get("pid") else None
+        result("list", any(p["id"] == place for p in at.places()) and found is not None and found.id == place,
+               "the place is not in the list" if not any(p["id"] == place for p in at.places())
+               else "no process it names leads from the session to its place")
+        lines = [f"a line {os.getpid()}", f"after Escape {os.getpid()}"]
+        why = at.type(place, lines[0], b.LINE) or at.type(place, lines[1], b.ESCAPE)
+        result("type", not why and until(lambda: typed()[-2:] == lines),
+               why or f"what arrived: {typed()[-2:]!r}, not {lines!r}")
+        result("screen", any(MARK in text for text, _ in at.screen(place)) and at.parked(place) == "",
+               "it does not show what the program printed, a line of text and a prompt mark (\u276f), character for character")
+        result("label", at.label({place: "waiting"}, {}) is not False, "the driver failed")
+        print("       (the other places show their words again at the next tick)")
+        if sys.stdout.isatty():
+            here = at.here()
+            result("pick", at.pick(place), "the terminal did not turn")
+            if here:
+                at.pick(here)
+        else:
+            print("pick   not asked · no terminal here: run it in one to try it")
+        result("close", at.close(place) and until(lambda: all(p["id"] != place for p in at.places())),
+               "the place is still listed")
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"{name} did not answer: {e}")
+        said.append(("", "failed"))
+    finally:
+        row = session_row() or {}
+        if isinstance(row.get("pid"), int):
+            try:
+                os.kill(row["pid"], signal.SIGTERM)
+            except OSError:
+                pass
+        if place is not None:
+            try:
+                if any(p["id"] == place for p in at.places()) and not at.close(place):
+                    print(f"left: the place {place}, yours to close")
+                b.keep(lambda doc: doc["places"].pop(f"{at.name} {place}", None))
+            except (OSError, subprocess.SubprocessError):
+                pass
+        shutil.rmtree(folder, True)
+    bad = [request for request, verdict in said if verdict == "failed" or (verdict == "not answered" and request in REQUIRED)]
+    print(f"{name}: " + ("failed" if bad else "passed"))
+    return 1 if bad else 0
+
+
+def main(argv):
+    if argv[:1] == ["probe"] and len(argv) > 2:
+        named = argv[argv.index("--name") + 1] if "--name" in argv[:-1] else ""
+        return probe(argv[1], named)
+    if argv[:1] == ["test"] and len(argv) <= 2:
+        return test(argv[1] if len(argv) > 1 else "")
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
