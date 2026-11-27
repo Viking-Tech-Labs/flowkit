@@ -19,6 +19,7 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20  # the suites take 4 to 7; a hung tmux test must not hold the checks for hours
     env:
       DISABLE_AUTOUPDATER: "1"
     steps:
