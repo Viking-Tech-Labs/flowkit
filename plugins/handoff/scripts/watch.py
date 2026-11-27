@@ -250,7 +250,7 @@ def reach(arm):
 
 def tmux_target():
     """The same for a poller of 0.15.0 or older that still runs when the watch is added: it reads
-    the tmux server and session from the arm. Goes with 0.16.0."""
+    the tmux server and session from the arm. Goes with 0.17.0."""
     sock = os.environ.get("FLOWKIT_TMUX_SOCKET") or os.path.basename(os.environ.get("TMUX", "").split(",")[0])
     if not sock:
         return {"socket": "", "session": ""}

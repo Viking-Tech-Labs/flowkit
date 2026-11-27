@@ -703,7 +703,7 @@ class Trees(Launches):
         self.add(env={"TMUX": "/tmp/tmux-1/srv,1,0", "TMUX_PANE": "%3"})
         arm = self.arm()
         self.assertEqual((arm["where"], arm["tmux"]), ("srv/main", {"socket": "srv", "session": "main"}),
-                         "and, until 0.16.0, tmux's names for a poller of 0.15.0 that still runs")
+                         "and, until 0.17.0, tmux's names for a poller of 0.15.0 that still runs")
 
     def test_a_dirty_tree_gets_a_worktree_that_goes_with_the_next_arms_green(self):
         self.session()

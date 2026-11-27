@@ -218,7 +218,8 @@ state in a pane's border), your own switch (`@flowkit_hold`), and what `flowkit-
 launches: the tab's story, read once by the session as it registers and for a pane with no
 session in it, and the stamp of a launch just typed. A session that started before 0.15.0
 registered nothing: it is read from its tab as before until it starts again, and what an older
-tick kept in a pane is still honoured; both stop with 0.16.0. The file is flowkit's own: read it
+tick kept in a pane is still honoured; both stop with 0.17.0 (0.16.0 came a day after this one
+and still reads them). The file is flowkit's own: read it
 if you like, write it through nothing but a session's start.
 
 New in 0.15.1: a launch writes that file too. Before `flowkit-spawn` types a launch into a pane it
@@ -230,7 +231,7 @@ again is the new launch's. A background session's story is written under its ses
 Claude Code lists it. The tab keeps its mark as its place in the layout (which tab is a story's
 first, second, third: the launch finds a free slot through it), and a pane keeps the stamp a tick
 of 0.15.0 reads. A tab opened by 0.15.0 or older has no record in the file: it is read from its
-mark as before, until 0.16.0. `flowkit-spawn` itself reaches tmux and `claude --bg` only through
+mark as before, until 0.17.0. `flowkit-spawn` itself reaches tmux and `claude --bg` only through
 `scripts/backend.py` now; its options, its lines and its exit codes are what they were. A queued
 launch and a watch keep where to launch as one word of the launch driver's own (`--target`,
 `<server>/<session>` for tmux) in place of `--tmux-socket` and `--tmux-session`; both options

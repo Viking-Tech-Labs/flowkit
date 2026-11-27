@@ -489,7 +489,7 @@ class Tmux(Backend):
         mark is the tab's place in the layout, which plan() reads to find a story's tabs. What a
         session is filed under is in STATE since 0.15.1: a tab an older launch opened, and a
         session that started before 0.15.0 and registered nothing, are read from here until
-        0.16.0."""
+        0.17.0."""
         story, _, adhoc = tmux("display-message", "-p", "-t", self.pane(place),
                                f"#{{@flowkit_story}}{SEP}#{{@flowkit_adhoc}}").stdout.strip("\n").partition(SEP)
         return story, bool(adhoc)
@@ -500,7 +500,7 @@ class Tmux(Backend):
         Code's version). And what tmux keeps for it: `story` and `slug`, what its tab was opened
         for (`slug` is empty in the tab of the one-offs); `hold`, the user's own switch that keeps
         the tab; `born`, when a launch was last typed into it or its tab was opened; `rung` and
-        `parked`, which a tick before 0.15.0 kept here, read where STATE has none until 0.16.0;
+        `parked`, which a tick before 0.15.0 kept here, read where STATE has none until 0.17.0;
         `title`, what the pane shows as its name. `story`, `slug` and `born` are the ones of the
         last launch into the pane where STATE has it, tmux's for a tab an older launch opened."""
         fmt = SEP.join(["#{pane_pid}", "#{pane_id}", "#{session_name}", "#{window_id}", "#{window_index}",
