@@ -9,7 +9,7 @@ plain arguments; nothing here asks. A ladder.md this script did not write is nev
                                               the change as a diff, or write it; the base is the
                                               table there, or the plan's defaults (--reset, or
                                               no table yet)
-  ladder.py gate                              PreToolUse hook on Bash: a max launch asks, once
+  ladder.py gate                              PreToolUse hook on Bash: a max launch asks, while
                                               max is on (stdin: the hook input)
 """
 import difflib
@@ -152,11 +152,20 @@ def away():
     return time.time() < max(at, mtime) + AWAY_HOURS * 3600
 
 
+def max_on():
+    """Whether the gate is armed. The ladder file's `max: on` or `max: off` line says so, in the
+    plugin's table and in a ladder of the user's own alike; without the line the plugin's table
+    means off (as every table written before the line existed), and a ladder of the user's own
+    means on: a file that never heard of the line must not switch the gate off. No file: off."""
+    text, managed, _, _ = read()
+    line = re.search(r"^max: (on|off)$", text, re.M)
+    return line[1] == "on" if line else bool(text) and not managed
+
+
 def gate():
-    """Ask before a launch at effort max, only for a table this plugin wrote with max on; while
-    the away flag is set, run it at xhigh instead. Everything else passes silently."""
-    _, managed, _, max_on = read()
-    if not (managed and max_on):
+    """Ask before a launch at effort max while max is on (max_on); while the away flag is set, run
+    it at xhigh instead. Everything else passes silently."""
+    if not max_on():
         return
     try:
         data = json.load(sys.stdin)
@@ -179,14 +188,14 @@ def gate():
 def main(argv):
     cmd, args = (argv[0], argv[1:]) if argv else ("", [])
     if cmd == "show" and not args:
-        text, managed, rows, max_on = read()
+        text, managed, rows, _ = read()
         print(f"ladder: {LADDER if text else 'none'}")
         print(f"managed: {'yes' if managed else 'no' if text else '-'}")
         for k in KINDS:
             if k in rows:
                 print(f"{k}: {rows[k]}")
-        if managed:
-            print(f"max: {'on' if max_on else 'off'}")
+        if text:
+            print(f"max: {'on' if max_on() else 'off'}")
     elif cmd == "plan" and not args:
         name = plan()
         print(f"plan: {name}")

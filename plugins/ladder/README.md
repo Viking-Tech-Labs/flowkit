@@ -52,7 +52,21 @@ asks for your yes first, even in auto mode; while the `/handoff:away` flag is se
 `xhigh` instead. Set means from the moment the flag is written: handoff 0.10.0 stamps it five
 minutes ahead for the coordinators' last call, and `/handoff:close overnight spawn` launches
 within those minutes, so they count here (new in 0.1.2; 0.1.1 asked until the stamp had passed).
-It reads only a table this plugin wrote, so with a ladder of your own it never fires.
+
+New in 0.2.0: the gate reads a ladder of your own too. One line of the file, alone on its line,
+arms or disarms it: `max: on` or `max: off`.
+
+| `ladder.md` | `max: on` | `max: off` | no such line |
+|---|---|---|---|
+| this plugin's table | asks | silent | silent |
+| a ladder of your own | asks | silent | asks |
+| no file | | | silent |
+
+A ladder of your own that never heard of the line is armed: a file written before the line existed
+must not switch the gate off, and a ladder you wrote yourself is the one that may pick `max`.
+Until 0.1.2 the gate never fired for such a file, so if you have one and this plugin installed, a
+launch at effort max now asks (and runs at `xhigh` while you are away); `max: off` in the file
+brings the old behaviour back. `ladder.py show` prints which it is.
 
 ## Tests
 

@@ -71,8 +71,33 @@ class Ladder(unittest.TestCase):
         self.file.write_text("# my own ladder\n\n## Rung\n\nmax: on\n")
         self.assertEqual(self.run_("write").returncode, 3)
         self.assertEqual(self.file.read_text(), "# my own ladder\n\n## Rung\n\nmax: on\n")
-        self.assertIn("managed: no", self.run_("show").stdout)
-        self.assertIsNone(self.gate("claude --effort max -p hi"))
+        self.assertEqual(self.run_("show").stdout.splitlines()[1:], ["managed: no", "max: on"])
+
+    def test_gate_honours_max_on_in_a_ladder_of_your_own(self):
+        self.file.parent.mkdir(parents=True)
+        self.file.write_text("# my own ladder\n\n## Rung\n\nPick by kind.\n\nmax: on\n")
+        self.assertEqual(self.gate("flowkit-spawn --effort max x")["permissionDecision"], "ask")
+        self.assertIsNone(self.gate("flowkit-spawn --effort xhigh x"))
+        (self.tmp / "claude" / "away").write_text(time.strftime("%Y-%m-%d %H:%M") + "\n")
+        out = self.gate("flowkit-spawn --effort max x")
+        self.assertEqual((out["permissionDecision"], out["updatedInput"]["command"]), ("allow", "flowkit-spawn --effort xhigh x"))
+
+    def test_a_missing_max_line_switches_the_gate_off_only_in_the_plugins_own_table(self):
+        launch = "claude --effort max -p hi"
+        asks = lambda: (self.gate(launch) or {}).get("permissionDecision") == "ask"
+        self.assertFalse(asks(), "no ladder at all")
+        self.file.parent.mkdir(parents=True)
+        self.file.write_text("# my own ladder\n\n## Rung\n\nA `max` pick needs a yes. Planning: opus/max: only on request.\n")
+        self.assertTrue(asks(), "a ladder of your own that never heard of the line")
+        self.assertEqual(self.run_("show").stdout.splitlines()[1:], ["managed: no", "max: on"])
+        self.file.write_text(self.file.read_text() + "\nmax: off\n")
+        self.assertFalse(asks(), "your own ladder says off")
+        self.file.unlink()
+        self.run_("write", "max=on")
+        self.assertTrue(asks())
+        self.file.write_text(self.file.read_text().replace("\nmax: on\n", "\n"))
+        self.assertFalse(asks(), "the plugin's own table without the line: off, as it always was")
+        self.assertIn("max: off", self.run_("show").stdout)
 
     def test_gate(self):
         self.assertIsNone(self.gate("claude --effort max -p hi"))  # no table

@@ -27,4 +27,5 @@ The helper is `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ladder.py"` (`ladder.py` b
 
 The effort gate: once the user turns `max` on (`/ladder:edit`), a command that launches a Claude
 session at `--effort max` asks for their yes first, and runs at `xhigh` while `/handoff:away` is
-set. With `max` off the gate stays silent.
+set. With `max` off the gate stays silent. A ladder of the user's own is read too: `max: on` or
+`max: off` on a line of its own says which, and without the line the gate is armed.
