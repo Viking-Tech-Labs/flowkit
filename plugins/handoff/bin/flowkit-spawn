@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 # flowkit-spawn — start the next Claude Code session of a story with its prompt file, through
 # the launch driver set in ~/.config/flowkit/handoff.conf (driver=tmux or driver=background).
 #
@@ -38,6 +38,8 @@
 #   --dry-run              print the pick and the command, launch nothing
 #   --tmux-socket <name>   the tmux server (tmux -L); needed when not run inside tmux
 #   --tmux-session <name>  the tmux session there (default: the current one, else the first)
+#   --target <word>        where to launch, in the driver's own word: what a queued launch and a
+#                          watch's launch are started with, in place of the two options above
 #
 # Exit: 2 bad arguments · 3 no tmux to launch in (prints the command to run by hand) ·
 #       4 a session of that name runs · 5 --pane is busy · 6 the repo has uncommitted changes ·
@@ -53,602 +55,541 @@
 # background driver, <id> being the id `claude attach`, `logs` and `stop` take:
 #   REPORTER driver=background id=<id> name=<slug>-report rc=<url|pending>   (reporter only)
 #   SPAWNED driver=background id=<id> story=<slug> name=<name> rc=<url|pending> prompt=<file>
-set -euo pipefail
-
-# The installed release answers, whichever copy was called: a session keeps the plugin
-# directory it started with, and an older cache directory can sit before the newest on the
-# PATH. A copy older than the one installed_plugins.json names hands over to it, once.
-me="$(cd "$(dirname "$0")/.." && pwd -P)"
-newer="$(python3 - "$me" <<'EOF' 2>/dev/null || true
-import json, os, sys
-own = sys.argv[1]
-conf = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-def version(root):
-    with open(os.path.join(root, ".claude-plugin", "plugin.json")) as f:
-        return tuple(int(n) for n in json.load(f)["version"].split("."))
-try:
-    with open(os.path.join(conf, "plugins", "installed_plugins.json")) as f:
-        installed = os.path.realpath(json.load(f)["plugins"]["handoff@flowkit"][0]["installPath"])
-    if installed != own and version(installed) > version(own):
-        print(installed)
-except Exception:
-    pass
-EOF
-)"
-if [ -z "${FLOWKIT_SPAWN_REEXEC:-}" ] && [ -n "$newer" ] && [ -x "$newer/bin/flowkit-spawn" ]; then
-  FLOWKIT_SPAWN_REEXEC=1 exec "$newer/bin/flowkit-spawn" "$@"
-fi
-copy="$me/bin/flowkit-spawn${FLOWKIT_SPAWN_REEXEC:+ (the installed release, in place of the copy called)}"
-
-conf="${XDG_CONFIG_HOME:-$HOME/.config}/flowkit/handoff.conf"
-setting() { [ -f "$conf" ] && sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$conf" | tail -1 | sed 's/[[:space:]]*$//'; }
-driver="$(setting driver || true)"; driver="${driver:-tmux}"
-reporter_on="$(setting reporter || true)"
-perm="$(setting permission_mode || true)"
-
-repo="$PWD"; name=""; story=""; model=""; effort=""; submodel=""
-rc=1; single=0; pane=""; force_new=0; force=0; dry=0; prompt=""; over_cap=0; from_queue=""; from_watch=""
-socket="${FLOWKIT_TMUX_SOCKET:-}"; sess="${FLOWKIT_TMUX_SESSION:-}"
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --repo) repo="$2"; shift 2 ;;
-    --name) name="$2"; shift 2 ;;
-    --story) story="$2"; shift 2 ;;
-    --model) model="$2"; shift 2 ;;
-    --effort) effort="$2"; shift 2 ;;
-    --subagent-model) submodel="$2"; shift 2 ;;
-    --permission) perm="$2"; shift 2 ;;
-    --no-rc) rc=0; shift ;;
-    --single) single=1; shift ;;
-    --pane) pane="$2"; shift 2 ;;
-    --new) force_new=1; shift ;;
-    --force) force=1; shift ;;
-    --dry-run) dry=1; shift ;;
-    --over-cap) over_cap=1; shift ;;
-    --from-queue) from_queue="$2"; shift 2 ;;
-    --from-watch) from_watch="$2"; shift 2 ;;
-    --tmux-socket) socket="$2"; shift 2 ;;
-    --tmux-session) sess="$2"; shift 2 ;;
-    -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
-    -*) echo "unknown option: $1" >&2; exit 2 ;;
-    *) prompt="$1"; shift ;;
-  esac
-done
-# A queued launch gives back on every exit before SPAWNED, a refusal too: its entry is queued again.
-[ -z "$from_queue" ] || trap 'python3 "$me/scripts/capacity.py" launched --pid $$ >/dev/null 2>&1 || true' EXIT
-
-case "$driver" in
-  tmux|background) ;;
-  *) echo "launch driver '$driver' (set in $conf) is not available in this version; use driver=tmux or driver=background" >&2; exit 7 ;;
-esac
-
-for v in "$model" "$effort" "$submodel" "$perm"; do
-  case "$v" in *[!A-Za-z0-9._\[\]-]*) echo "not a model, effort or mode: '$v'" >&2; exit 2 ;; esac
-done
-if [ -n "$prompt" ] || [ "$single" -eq 0 ]; then
-  [ -n "$prompt" ] && [ -s "$prompt" ] || { echo "prompt file missing or empty: '$prompt'" >&2; exit 2; }
-fi
-[ -d "$repo" ] || { echo "repo path does not exist: $repo" >&2; exit 2; }
-[ -z "$prompt" ] || prompt="$(cd "$(dirname "$prompt")" && pwd -P)/$(basename "$prompt")"
-repo="$(cd "$repo" && pwd -P)"
-[ -n "$name" ] || { name="$(basename "${prompt:-$repo}")"; name="${name%.md}"; }
-case "$name" in [A-Za-z0-9]*) ;; *) echo "session name must start with a letter or digit: '$name'" >&2; exit 2 ;; esac
-case "$name" in *[!A-Za-z0-9._-]*) echo "session name takes letters, digits, '.', '_', '-': '$name'" >&2; exit 2 ;; esac
-
-base="" # what the reporter shares with the session: Remote Control and the permission mode
-[ "$rc" -eq 1 ] && base+="--remote-control "
-[ -n "$perm" ] && base+="--permission-mode $perm "
-flags="$base"
-[ -n "$model" ] && flags+="--model $model "
-[ -n "$effort" ] && flags+="--effort $effort "
-env_json=""
-[ -n "$submodel" ] && env_json+="\"CLAUDE_CODE_SUBAGENT_MODEL\":\"$submodel\","
-# `claude --bg` drops the caller's environment: carry the flowkit config dir, so the next session
-# reads the same handoff.conf and ladder.md.
-# It also works in place: with Claude's default worktree.bgIsolation a background session must
-# move into a worktree branch of its own before its first edit, and pushes and opens a draft PR
-# from there.
-iso=""
-if [ "$driver" = background ]; then
-  case "${XDG_CONFIG_HOME:-}" in /*[!A-Za-z0-9._/-]*|"") ;; /*) env_json+="\"XDG_CONFIG_HOME\":\"$XDG_CONFIG_HOME\"," ;; esac
-  iso='"worktree":{"bgIsolation":"none"}'
-fi
-settings="${env_json:+\"env\":{${env_json%,}\}}"
-settings="$settings${settings:+${iso:+,}}$iso"
-[ -n "$settings" ] && flags+="--settings '{$settings}' "
-
-# Which tmux: an explicit server, else the one this runs inside, else none (print the command).
-# tmux starts a pane a script creates with the script's PATH, not the server's. Called from a
-# session, that PATH holds the session's plugin bin/ directories, which the session started in
-# the pane would keep ahead of its own: an older release's commands would answer there. So tmux
-# is called without them.
-pane_path="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '/plugins/cache/.*/bin/*$' | paste -s -d: - || true)"
-tm() { if [ -n "$socket" ]; then PATH="${pane_path:-$PATH}" tmux -L "$socket" "$@"; else PATH="${pane_path:-$PATH}" tmux "$@"; fi; }
-here="${TMUX_PANE:-}"
-if [ "$driver" = background ]; then here=""
-elif [ -z "$socket" ] && [ -z "${TMUX:-}" ]; then
-  echo "not inside tmux; start the session by hand: cd '$repo' && claude ${flags}--name '$name'${prompt:+ \"\$(cat $prompt)\"}" >&2
-  exit 3
-fi
-if [ "$driver" = tmux ]; then
-  # A pane of another server is not "here": pane ids repeat across servers.
-  [ -n "$socket" ] && [ "$(basename "${TMUX:-x}" | cut -d, -f1)" != "$socket" ] && here=""
-  if [ -z "$sess" ]; then
-    if [ -n "$here" ]; then sess="$(tm display-message -p -t "$here" '#{session_name}')"
-    else sess="$(tm list-sessions -F '#{session_name}' 2>/dev/null | head -1 || true)"; fi
-  fi
-  [ -n "$sess" ] || { echo "no tmux session to launch in${socket:+ on server '$socket'}" >&2; exit 3; }
-fi
-
-is_shell() { case "$1" in zsh|bash|fish|sh|-zsh|-bash|-fish|-sh) return 0 ;; *) return 1 ;; esac; }
-slugify() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9][^a-z0-9]*/-/g' -e 's/^-//' | cut -c1-32 | sed -e 's/-$//'; }
-
-# The story: given, else the story tab this pane is in, else the session name. A single session
-# has none: its tabs are marked @flowkit_adhoc instead of @flowkit_story.
-key="@flowkit_story"; reporter=0
-if [ "$single" -eq 1 ]; then slug="adhoc"; key="@flowkit_adhoc"
-elif [ -n "$story" ]; then slug="$(slugify "$story")"; [ "$reporter_on" = "on" ] && reporter=1
-else
-  slug="$([ -n "$here" ] && tm show-options -wqv -t "$here" @flowkit_story || true)"
-  [ -n "$slug" ] || slug="$(slugify "$name")"
-fi
-[ -n "$slug" ] || { echo "story '$story' has no letters or digits" >&2; exit 2; }
-
-# The launch hold: a guard outside flowkit writes ~/.claude/load-hold (an ISO time, then the reason)
-# while the machine is short of memory and removes it on recovery. A launch waits for it to go,
-# checking every 30 s (FLOWKIT_HOLD_POLL), and says once, on stderr and in the story file, that it
-# is held and why. A flag older than 2 hours is stale and ignored; FLOWKIT_IGNORE_HOLD=1 skips the
-# wait. It comes before the refusals, so they look at the tree and the sessions as they are at launch.
-hold="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/load-hold"
-hold_info() { # "<age in s><tab><reason>" of the flag, nothing when there is none
-  [ -f "$hold" ] || return 0
-  python3 - "$hold" <<'EOF' 2>/dev/null || true
-import os, sys, time
+#
+# Where a session runs, and everything that is made, typed or read there, is the launch driver's:
+# the plugin's scripts/backend.py answers for it, and nothing here calls tmux or Claude Code's
+# background service itself.
+import glob
+import importlib.util
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
 from datetime import datetime
-try:
-    lines = open(sys.argv[1], errors="replace").read().splitlines()
-    at = os.stat(sys.argv[1]).st_mtime
-except OSError:
-    sys.exit()
-try:
-    at = datetime.fromisoformat(lines[0].strip().replace("Z", "+00:00")).timestamp()
-except (IndexError, ValueError):
-    pass  # no readable time: the file's own
-print(f"{max(0, int(time.time() - at))}\t{' '.join(' '.join(lines[1:]).split())[:200] or 'no reason given'}")
-EOF
-}
-story_note() { # line: appended to the story's file; a single session has none
-  [ "$single" -eq 0 ] || return 0
-  local stories="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/stories"
-  mkdir -p "$stories"; [ -f "$stories/$slug.md" ] || printf '# %s\n' "$slug" > "$stories/$slug.md"
-  printf '%s\n' "$1" >> "$stories/$slug.md"
-}
-held=0; held_at="$(date +%s)"
-while info="$(hold_info)" && [ -n "$info" ]; do
-  age="${info%%$'\t'*}"; why="${info#*$'\t'}"
-  if [ -n "${FLOWKIT_IGNORE_HOLD:-}" ]; then
-    echo "launch hold ignored, FLOWKIT_IGNORE_HOLD is set: $why" >&2; break
-  elif [ "$age" -ge 7200 ]; then
-    echo "launch hold ignored, stale: set $((age / 60)) min ago ($why)" >&2
-    [ "$dry" -eq 1 ] || story_note "> hold ignored $name · $(date '+%Y-%m-%d %H:%M') · stale, set $((age / 60)) min ago · $why"
-    break
-  elif [ "$dry" -eq 1 ]; then
-    echo "launch held: $why; a launch would wait until $hold is gone" >&2; break
-  fi
-  if [ "$held" -eq 0 ]; then
-    echo "launch held: $why; waiting until $hold is gone, checking every ${FLOWKIT_HOLD_POLL:-30} s" >&2
-    story_note "> held $name · $(date '+%Y-%m-%d %H:%M') · $why"
-    held=1
-  fi
-  sleep "${FLOWKIT_HOLD_POLL:-30}"
-done
-[ "$held" -eq 0 ] || echo "launch hold lifted after $(( ($(date +%s) - held_at) / 60 )) min; launching" >&2
 
-# Refusal 1: the new session shares this working tree; uncommitted changes mean the session
-# spawning it has not landed its work. An untracked `.claude/` is not work: EnterWorktree keeps a
-# session's worktrees under `.claude/worktrees/`, and nothing ignores them. Run again before a
-# launch is typed a second time (start). A watch's launch is checked once the gate let it through:
-# into a repository's one checkout it is queued behind the slice whose changes these are.
-clean_tree() {
-  local dirty
-  [ "$force" -eq 0 ] && [ "$single" -eq 0 ] && git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
-  dirty="$(git -C "$repo" status --porcelain 2>/dev/null | grep -v '^?? \.claude/' | head -5 || true)"
-  if [ -n "$dirty" ]; then
-    printf 'repo has uncommitted changes; commit them first (or --force):\n%s\n' "$dirty" >&2
-    exit 6
-  fi
-}
-[ -n "$from_watch" ] || clean_tree
+ME = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+CLAUDE = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "flowkit", "handoff.conf")
+CAPACITY = os.path.join(ME, "scripts", "capacity.py")
+ENV = dict(os.environ)  # what the gate and the watch are run with: where this launch goes is not theirs to inherit
+EXITS = {"outside": 3, "nowhere": 3, "busy": 5, "untrusted": 8, "start": 9, "exited": 10}  # why a driver refused
 
-# Refusal 2: a live session of that name, as `claude agents` lists it or as a pane title
-# (Claude shows its --name there behind a status glyph, e.g. "✳ billing-s3").
-# `claude agents --json` as one "<pid> <name> <cwd>" line per live session (python3, no jq).
-sessions() {
-  claude agents --json 2>/dev/null | python3 -c 'import json, sys
-for r in json.load(sys.stdin):
-    print(r.get("pid") or "-", r.get("name") or "-", r.get("cwd") or "-")' 2>/dev/null || true
-}
-agents="$(sessions)"
-running() {
-  local pid pcmd ptitle
-  if printf '%s\n' "$agents" | awk -v n="$1" '$2 == n { f = 1 } END { exit !f }'; then
-    echo "claude agents"; return 0
-  fi
-  [ "$driver" = tmux ] || return 1
-  while IFS=' ' read -r pid pcmd ptitle; do
-    ptitle="${ptitle#"${ptitle%%[[:alnum:]]*}"}"
-    if [ "$pid" != "$here" ] && ! is_shell "$pcmd" && [ "$ptitle" = "$1" ]; then echo "$pid"; return 0; fi
-  done < <(tm list-panes -a -F '#{pane_id} #{pane_current_command} #{pane_title}')
-  return 1
-}
-no_namesake() { # name: exit 4 when a session of that name runs; run again before a second launch is typed
-  local found
-  if [ "$force" -eq 0 ] && found="$(running "$1")"; then
-    echo "a session named '$1' is already running ($found); pass --force to spawn another" >&2
-    exit 4
-  fi
-}
-if [ "$single" -eq 1 ]; then
-  base="$name"; n=2
-  while running "$name" >/dev/null; do name="$base-$n"; n=$((n + 1)); done
-else no_namesake "$name"; fi
 
-idle_pane() { # first idle shell pane of a window that is not this pane
-  local pid pcmd pdead pmode
-  while IFS=' ' read -r pid pcmd pdead pmode; do
-    if [ "$pid" != "$here" ] && [ "$pdead" = "0" ] && [ "$pmode" = "0" ] && is_shell "$pcmd"; then
-      echo "$pid"; return 0
-    fi
-  done < <(tm list-panes -t "$1" -F '#{pane_id} #{pane_current_command} #{pane_dead} #{pane_in_mode}')
-  return 1
-}
-split_after_last() { # a new pane after the window's last one, so tiling keeps launch order
-  local last; last="$(tm list-panes -t "$1" -F '#{pane_id}' | tail -1)"
-  tm split-window -d -t "$last" -c "$repo" -P -F '#{pane_id}'
-  tm select-layout -t "$1" tiled >/dev/null
-}
+def say(line):
+    print(line, file=sys.stderr, flush=True)
 
-# The pane: given; else an idle shell or a free slot in the story's tabs (part order); else a
-# new tab <slug>[-<part>] after the last tab.
-created=0; win=""; new_tab=""; rpane=""; part=1; claim=""
-if [ "$driver" = background ]; then :
-elif [ -n "$pane" ]; then
-  pcmd="$(tm display-message -p -t "$pane" '#{pane_current_command}')"
-  is_shell "$pcmd" || { echo "pane $pane is running '$pcmd', not an idle shell" >&2; exit 5; }
-  # A tab opened by hand for this one pane becomes the story's next tab: the closer may close it
-  # once the story is finished, and the story's next launch finds it. A tab with other panes in
-  # it stays yours: the closer closes whole tabs.
-  read -r win npanes marked <<<"$(tm display-message -p -t "$pane" '#{window_id} #{window_panes} #{@flowkit_story}#{@flowkit_adhoc}')"
-  if [ "$single" -eq 0 ] && [ "$npanes" -eq 1 ] && [ -z "$marked" ]; then
-    parts="$(tm list-windows -t "$sess" -F "#{${key}_part} #{${key}}" | awk -v s="$slug" '$2 == s { print $1 }' | sort -n | tail -1)"
-    part=$(( ${parts:-0} + 1 )); claim="$win"
-  fi
-else
-  parts=0
-  while IFS=' ' read -r p wid npanes; do
-    parts="$p"
-    [ -z "$pane" ] || continue
-    if [ "$force_new" -eq 0 ] && ip="$(idle_pane "$wid")"; then pane="$ip"; win="$wid"
-    elif [ "$npanes" -lt 9 ]; then win="$wid"; pane="new"; fi
-  done < <(tm list-windows -t "$sess" -F "#{${key}_part} #{window_id} #{window_panes} #{${key}}" \
-    | awk -v s="$slug" '$4 == s { print $1, $2, $3 }' | sort -n)
-  if [ -z "$pane" ]; then
-    part=$((parts + 1)); new_tab="$slug"; [ "$part" -gt 1 ] && new_tab="$slug-$part"
-    pane="new"
-  fi
-fi
-# The reporter: whenever the story has none running, not only on its first tab (a chain whose
-# reporter died ran nine slices unreported). Slot 1 of a new tab, else a pane after the last.
-[ "$driver" != background ] && [ "$reporter" -eq 1 ] && ! running "$slug-report" >/dev/null && rpane="new"
 
-# The prompt under a space-free path in the store: safe to quote, and a record of what each pane
-# was started with. A prompt already there (`handoff.py save-prompt` writes `<name>.md`) is that
-# record and is launched as it is; one from outside gets a stamped copy, which `handoff.py refresh`
-# prunes after 30 days.
-store="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/spawned"; mkdir -p "$store"
-stamp="$(date +%Y%m%d-%H%M%S)"
-prompt_copy=""; prompt_arg=""; copied=""
-if [ -n "$prompt" ]; then
-  if [ "$(dirname "$prompt")" -ef "$store" ]; then prompt_copy="$store/$(basename "$prompt")"
-  else prompt_copy="$store/${name}-${stamp}.md"; cp "$prompt" "$prompt_copy"; copied="$prompt_copy"; fi
-  prompt_arg=" \"\$(cat $prompt_copy)\""
-fi
+def fail(code, line):
+    say(line)
+    sys.exit(code)
 
-# The gate (scripts/capacity.py; the README's "Capacity"): a story launch that would open a new
-# chain while the machine's slots are all used, or while `claude agents` does not answer, is not
-# launched but queued (QUEUED, exit 11), and `capacity.py drain` starts it later with the same
-# arguments. A chain's own next slice never waits for a slot. What the prompt's `Needs:` line
-# names is taken all or none for this launch before anything waits, handed to the new session
-# after SPAWNED and given back on any other exit; a successor whose needs are not all free is
-# queued too, its closer's resources given back. A broken gate never stops a launch.
-cap="$me/scripts/capacity.py"
-give_back() { python3 "$cap" launched --pid $$ >/dev/null 2>&1 || true; }
-watch_poller() { # an open watch with no poller gets one: a launch's end is one of the moments that is checked
-  compgen -G "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/flowkit/watches/*.json" >/dev/null || return 0
-  python3 "$me/scripts/watch.py" ensure >/dev/null 2>&1 || true
-}
-if [ "$single" -eq 0 ] && [ -z "$from_queue" ]; then
-  again=(--repo "$repo" --name "$name" --story "$slug")
-  [ -n "$model" ] && again+=(--model "$model")
-  [ -n "$effort" ] && again+=(--effort "$effort")
-  [ -n "$submodel" ] && again+=(--subagent-model "$submodel")
-  [ -n "$perm" ] && again+=(--permission "$perm")
-  [ "$rc" -eq 0 ] && again+=(--no-rc)
-  [ "$force_new" -eq 1 ] && again+=(--new)
-  [ "$force" -eq 1 ] && again+=(--force)
-  [ "$driver" = tmux ] && again+=(--tmux-socket "${socket:-$(basename "${TMUX%%,*}")}" --tmux-session "$sess")
-  [ -n "$from_watch" ] && again+=(--from-watch "$from_watch")
-  [ -n "$prompt_copy" ] && again+=("$prompt_copy")
-  gate=(gate --pid $$ --tree "$repo" --story "$slug" --name "$name" --prompt "$prompt_copy")
-  [ "$over_cap" -eq 1 ] && gate+=(--over-cap)
-  [ -n "$from_watch" ] && gate+=(--from-watch "$from_watch")
-  [ "$held" -eq 0 ] || gate+=(--held "$(( $(date +%s) - held_at ))")
-  [ "$dry" -eq 1 ] && gate+=(--dry-run)
-  verdict=""; code=0
-  verdict="$(python3 "$cap" "${gate[@]}" -- "${again[@]}")" || code=$?
-  if [ "$code" -eq 11 ]; then
-    echo "$verdict"
-    story_note "> queued $name · $(date '+%Y-%m-%d %H:%M') · ${verdict#QUEUED }"
-    watch_poller
-    exit 11
-  elif [ "$code" -ne 0 ]; then
-    echo "capacity gate failed (exit $code); launching without it" >&2
-  elif [ "$dry" -eq 1 ]; then
-    echo "gate:   $verdict"
-  else
-    trap give_back EXIT
-  fi
-elif [ -n "$from_queue" ]; then
-  trap give_back EXIT
-fi
-trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
-[ -z "$from_watch" ] || clean_tree
-spawned() { # after the SPAWNED line: the launch's resources go to the new session
-  trap - EXIT
-  python3 "$cap" launched --pid $$ --name "$name" >/dev/null 2>&1 || true
-  watch_poller
-}
 
-# A single session shares the tree with any Claude already running in the repo: its system
-# prompt says so.
-shared_arg=""; shared_file=""
-if [ "$single" -eq 1 ]; then
-  others="$(printf '%s\n' "$agents" | awk -v r="$repo" '{ c = substr($0, length($1 $2) + 3) }
-    c == r || index(c, r "/") == 1 { printf "%s%s", (n++ ? ", " : ""), $2 }')"
-  if [ -n "$others" ]; then
-    shared_file="$store/${name}-${stamp}-shared.md"
-    printf '%s\n' "Shared working tree: another Claude session is working in $repo right now ($others)." \
-      "Do not switch branches, commit, stash, reset, rebase, pull or otherwise rewrite the working tree unless the user says so in this session. Reading, investigating and running tests are fine." > "$shared_file"
-  fi
-fi
-# A prompt starting with `/` is a command (command-first): Claude Code runs it as the user's own,
-# and hands any text after it to the command as arguments, so the brief waits in the pick-up doc
-# and the system prompt says where.
-if [ -n "$prompt_copy" ] && [ "$(head -c 1 "$prompt_copy")" = / ]; then
-  [ -n "$shared_file" ] || shared_file="$store/${name}-${stamp}-brief.md"
-  printf '%s\n' "This session started from the slash command in its first message, run as the user's own command; the command's arguments are only what that line carries." \
-    "Its slice brief (Session, Story, Chain end, Report-to, Stop when), when it has one, is the Brief: of the WHERE TO PICK UP block in this repo's pick-up doc (grep -rl 'WHERE TO PICK UP' --include='*.md' .). Read it before the command's first step and follow it alongside the command." >> "$shared_file"
-fi
-[ -z "$shared_file" ] || shared_arg=" --append-system-prompt \"\$(cat $shared_file)\""
-
-# A start-up prompt nobody sees (the README's "Start-up prompts"): until it has been answered once,
-# Claude Code asks at a session's start whether to use Chrome by default, and a spawned pane sits
-# on that question. While .claude.json holds no answer (claudeInChromeDefaultEnabled) and this
-# claude knows --no-chrome (its --help, asked once per version), the launch passes the flag: the
-# session starts without the question and without Chrome. chrome=on in handoff.conf leaves it out,
-# and so does a .claude.json that cannot be read.
-no_chrome() {
-  local dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" version seen="" known="" help
-  [ "$(setting chrome || true)" != on ] || return 0
-  python3 - "$dir/.config.json" "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json" <<'EOF' 2>/dev/null || return 0
-import json, sys
-for path in sys.argv[1:]:
+def newer():
+    """The installed release answers, whichever copy was called: a session keeps the plugin
+    directory it started with, and an older cache directory can sit before the newest on the
+    PATH. A copy older than the one installed_plugins.json names hands over to it, once."""
+    def version(root):
+        with open(os.path.join(root, ".claude-plugin", "plugin.json")) as f:
+            return tuple(int(n) for n in json.load(f)["version"].split("."))
     try:
-        with open(path) as f:
-            if "claudeInChromeDefaultEnabled" in json.load(f):
-                sys.exit(1)
-    except FileNotFoundError:
+        with open(os.path.join(CLAUDE, "plugins", "installed_plugins.json")) as f:
+            installed = os.path.realpath(json.load(f)["plugins"]["handoff@flowkit"][0]["installPath"])
+        if installed != ME and version(installed) > version(ME):
+            return os.path.join(installed, "bin", "flowkit-spawn")
+    except Exception:
         pass
-EOF
-  version="$(claude --version 2>/dev/null || true)"; version="${version%%[[:space:]]*}"
-  case "$version" in [0-9]*) ;; *) return 0 ;; esac
-  [ ! -f "$dir/flowkit/no-chrome" ] || read -r seen known < "$dir/flowkit/no-chrome" || true
-  if [ "$seen" != "$version" ]; then
-    help="$(claude --help 2>/dev/null || true)"
-    case "$help" in *--no-chrome*) known=yes ;; *) known=no ;; esac
-    mkdir -p "$dir/flowkit" && printf '%s %s\n' "$version" "$known" > "$dir/flowkit/no-chrome" || true
-  fi
-  [ "$known" != yes ] || printf -- '--no-chrome '
-}
-chrome="$(no_chrome || true)"; base="$chrome$base"; flags="$chrome$flags"
+    return ""
 
-launch="clear; claude ${flags}--name '$name'${shared_arg}${prompt_arg}"
 
-# Background driver: `claude --bg` hands the session to Claude's background service and returns
-# its id. It refuses at once in a folder never trusted; it never waits at the prompt.
-if [ "$driver" = background ]; then
-  bg_id=""; bg_rc=""
-  listed() { # field value [--all]: does `claude agents --json` list a session with that field?
-    claude agents --json ${3:-} 2>/dev/null | python3 -c 'import json, sys
-sys.exit(0 if any(a.get(sys.argv[1]) == sys.argv[2] for a in json.load(sys.stdin)) else 1)' "$1" "$2" 2>/dev/null
-  }
-  bg_start() { # command session-name: sets bg_id and bg_rc, or exits 8 or 9
-    local out
-    if ! out="$(cd "$repo" && eval "claude --bg $1" 2>&1)"; then
-      case "$out" in *"not trusted"*) printf '%s\n' "$out" >&2; exit 8 ;; esac
-      printf 'claude --bg failed:\n%s\n' "$out" >&2; exit 9
-    fi
-    bg_id="$(printf '%s\n' "$out" | sed -n 's/^backgrounded · \([0-9a-f]*\).*/\1/p' | head -1)"
-    [ -n "$bg_id" ] || { printf 'claude --bg printed no session id:\n%s\n' "$out" >&2; exit 9; }
-    # Confirmed when `claude agents` lists it; the Remote Control link shows in its log.
-    local up=0
-    for _ in $(seq 1 15); do
-      listed id "$bg_id" && { up=1; break; }
-      sleep 1
-    done
-    [ "$up" -eq 1 ] || echo "warning: background session '$2' ($bg_id) is not listed by claude agents after 15s; check claude logs $bg_id" >&2
-    bg_rc=off
-    if [ "$rc" -eq 1 ]; then
-      bg_rc=pending
-      for _ in $(seq 1 30); do
-        url="$(claude logs "$bg_id" 2>/dev/null | grep -o 'https://claude.ai/code/session_[A-Za-z0-9]*' | head -1 || true)"
-        [ -n "$url" ] && { bg_rc="$url"; break; }
-        sleep 1
-      done
-    fi
-  }
-  # The reporter: one per story, kept between closes. A stopped one is woken by the next ring
-  # (handoff.py), so only a story that never had one gets a new one.
-  start_reporter=0
-  [ "$reporter" -eq 1 ] && ! listed name "$slug-report" --all && start_reporter=1
-  if [ "$dry" -eq 1 ]; then
-    echo "copy:   $copy"
-    echo "driver: background"
-    echo "story:  $slug$([ "$start_reporter" -eq 1 ] && echo " (starts $slug-report first)")"
-    echo "repo:   $repo"
-    echo "prompt: ${prompt_copy:-none}"
-    [ -n "${others:-}" ] && echo "shared: $others"
-    echo "run:    cd '$repo' && claude --bg ${flags}--name '$name'${shared_arg}${prompt_arg}"
-    [ -z "$copied" ] || rm -f "$copied"; [ -z "$shared_file" ] || rm -f "$shared_file"
-    exit 0
-  fi
-  story_note "> launched $name · $(date '+%Y-%m-%d %H:%M')${from_watch:+ · launched-by: watch $from_watch}"
-  if [ "$start_reporter" -eq 1 ]; then
-    stories="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/stories"; mkdir -p "$stories"
-    [ -f "$stories/$slug.md" ] || printf '# %s\n' "$slug" > "$stories/$slug.md"
-    rprompt="$store/${slug}-report-${stamp}.md"
-    sed -e "s/<slug>/$slug/g" "$(dirname "$0")/../scripts/reporter.md" > "$rprompt"
-    bg_start "${base}--settings '{$iso}' --model sonnet --name '$slug-report' \"\$(cat $rprompt)\"" "$slug-report"
-    echo "REPORTER driver=background id=$bg_id name=$slug-report rc=$bg_rc"
-  fi
-  bg_start "${flags}--name '$name'${shared_arg}${prompt_arg}" "$name"
-  echo "SPAWNED driver=background id=$bg_id story=$slug name=$name rc=$bg_rc prompt=${prompt_copy:--}"
-  spawned
-  exit 0
-fi
+def backend():
+    """The plugin's scripts/backend.py: the one file that reaches a session, wherever it runs."""
+    spec = importlib.util.spec_from_file_location("flowkit_backend", os.path.join(ME, "scripts", "backend.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-if [ "$dry" -eq 1 ]; then
-  echo "copy:   $copy"
-  rwhere="in slot 1"; [ -n "$new_tab" ] || rwhere="in a pane after the last"
-  echo "story:  $slug${rpane:+ (starts $slug-report $rwhere)}"
-  echo "tab:    ${new_tab:+new tab $new_tab after the last one}${win:+$(tm display-message -p -t "$win" '#{window_name}')}${claim:+ (becomes tab $part of the story)}"
-  echo "pane:   ${pane/#new/<new, tiled after the last pane>}"
-  echo "repo:   $repo"
-  echo "prompt: ${prompt_copy:-none}"
-  [ -n "${others:-}" ] && echo "shared: $others"
-  echo "send:   cd '$repo' && $launch"
-  [ -z "$copied" ] || rm -f "$copied"; [ -z "$shared_file" ] || rm -f "$shared_file"
-  exit 0
-fi
-story_note "> launched $name · $(date '+%Y-%m-%d %H:%M')${from_watch:+ · launched-by: watch $from_watch}"
 
-# Marks a window as the story's tab. The @flowkit_born stamp comes first, in the same command: the
-# story closer (the tick's `flowkit-tmux marks`) runs at a status-line redraw where no timer runs
-# the tick, and opening a window is one, so it lists the panes within milliseconds and must never
-# see a story tab of bare shells without a stamp. Each pane's top border names its slot, its
-# session and the state the tick sets.
-mark_tab() { # window
-  tm set-option -w -t "$1" @flowkit_born "$(date +%s)" \
-    \; set-option -w -t "$1" "$key" "$slug" \; set-option -w -t "$1" "${key}_part" "$part" \
-    \; set-option -w -t "$1" pane-border-status top \
-    \; set-option -w -t "$1" pane-border-format \
-    ' #{pane_index} #{s/^[^a-zA-Z0-9]+//:pane_title}#{?#{@flowkit_state}, · #{?#{==:#{@flowkit_state},waiting},#[reverse] NEEDS YOU #[noreverse],#{@flowkit_state}},} '
-}
-if [ -n "$new_tab" ]; then
-  idx=$(( $(tm list-windows -t "$sess" -F '#{window_index}' | sort -n | tail -1) + 1 ))
-  win="$(tm new-window -d -t "$sess:$idx" -n "$new_tab" -c "$repo" -P -F '#{window_id}')"
-  mark_tab "$win"
-  first="$(tm list-panes -t "$win" -F '#{pane_id}' | head -1)"
-  if [ "$rpane" = "new" ]; then rpane="$first"; pane="$(split_after_last "$win")"
-  else pane="$first"; fi
-  created=1
-elif [ "$pane" = "new" ]; then
-  [ "$rpane" = "new" ] && rpane="$(split_after_last "$win")"
-  pane="$(split_after_last "$win")"
-  created=1
-else
-  [ -n "$claim" ] && mark_tab "$claim"
-  [ "$rpane" = "new" ] && rpane="$(split_after_last "$win")"
-fi
+def setting(key):
+    """A `key=value` line of handoff.conf, its last one."""
+    found = ""
+    try:
+        with open(CONF, errors="replace") as f:
+            for line in f:
+                m = re.match(rf"\s*{re.escape(key)}\s*=\s*(.*)", line.rstrip("\n"))
+                if m:
+                    found = m.group(1).rstrip()
+    except OSError:
+        pass
+    return found
 
-# Types the launch into a pane, then waits up to 15 s until `claude agents` lists a session of
-# that name under the pane's shell and Remote Control has printed its link, 30 s more for the
-# link alone. Sets rcurl to the link, "pending" or "off", and try to 1 or 2: a pane that is a
-# bare shell again within the 15 s with no session of the name listed means claude exited at
-# start-up, so the launch is typed once more into that pane, after refusals 1 and 2 pass again;
-# a second exit is exit 10, the output left in the pane. A pane still running something unlisted
-# at 15 s (a prompt, a slow start) gets the warning, never a second launch; when its screen ends
-# on a dialog (`flowkit-tmux dialog`) the warning, the story file and `parked` carry the dialog's
-# first line. A dialog is never answered here: what it asks is the user's to decide. Never types
-# /remote-control: with the flag passed that opens the Remote Control panel, which holds back
-# background-task results while open.
-type_launch() { # pane command
-  # the story closer leaves a starting pane alone; a pane used again is not parked at its last session's prompt
-  tm set-option -p -t "$1" @flowkit_born "$(date +%s)" \; set-option -p -u -t "$1" @flowkit_parked
-  tm send-keys -t "$1" C-u # anything half-typed would prefix the command
-  tm send-keys -t "$1" "cd '$repo' && $2" Enter
-}
-start() { # pane command session-name
-  local up=0 seen=0 i=0 screen shell_pid pid pcmd
-  shell_pid="$(tm display-message -p -t "$1" '#{pane_pid}')"
-  rcurl=""; try=1
-  type_launch "$1" "$2"
-  while [ "$i" -lt 15 ]; do
-    i=$((i + 1)); sleep 1
-    screen="$(tm capture-pane -p -J -S -80 -t "$1" 2>/dev/null || true)"
-    for pid in $(sessions | awk -v n="$3" '$2 == n && $1 != "-" { print $1 }'); do
-      [ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$shell_pid" ] && up=1
-    done
-    rcurl="$(printf '%s' "$screen" | grep -o 'https://claude.ai/code/session_[A-Za-z0-9]*' | head -1 || true)"
-    [ "$up" -eq 1 ] && { [ "$rc" -eq 0 ] || [ -n "$rcurl" ]; } && break
-    [ "$up" -eq 0 ] || continue
-    # The shell again, once claude was seen running or from the third second on (right after
-    # Enter the pane can still read as the shell), and the launch no longer on the screen (a
-    # shell slow to start has it typed ahead, unread; `clear` wipes it once it runs).
-    pcmd="$(tm display-message -p -t "$1" '#{pane_current_command}')"
-    if ! is_shell "$pcmd"; then seen=1; continue; fi
-    { [ "$seen" -eq 1 ] || [ "$i" -ge 3 ]; } || continue
-    tm capture-pane -p -J -t "$1" 2>/dev/null | grep -qF -- "--name '$3'" && continue
-    if [ "$try" -eq 2 ]; then
-      echo "session '$3' exited twice at start-up in pane $1; its output is in the pane" >&2
-      exit 10
-    fi
-    agents="$(sessions)"; no_namesake "$3"; clean_tree
-    echo "warning: session '$3' exited at start-up in $1; typed again" >&2
-    try=2; i=0; seen=0
-    type_launch "$1" "$2"
-  done
-  if [ "$up" -eq 1 ] && [ "$rc" -eq 1 ] && [ -z "$rcurl" ]; then
-    for _ in $(seq 1 30); do
-      sleep 1
-      rcurl="$(tm capture-pane -p -J -S -80 -t "$1" 2>/dev/null | grep -o 'https://claude.ai/code/session_[A-Za-z0-9]*' | head -1 || true)"
-      [ -n "$rcurl" ] && break
-    done
-  fi
-  parked=""
-  if [ "$up" -eq 0 ]; then
-    parked="$(tm capture-pane -p -t "$1" 2>/dev/null | "$me/bin/flowkit-tmux" dialog 2>/dev/null || true)"
-    if [ -n "$parked" ]; then
-      echo "warning: session '$3' is parked at a start-up prompt in $1 ($parked); answer it in the pane" >&2
-      story_note "> parked $3 · $(date '+%Y-%m-%d %H:%M') · $parked"
-    else
-      echo "warning: no session '$3' came up in $1 within 15s; check the pane (a folder trust prompt?)" >&2
-    fi
-  fi
-  if [ "$rc" -eq 0 ]; then rcurl=off; else rcurl="${rcurl:-pending}"; fi
-}
 
-# The reporter collects the story's closes from its story file and answers "what is going on".
-# Its line is printed before the session starts: an exit 10 there still says a reporter runs.
-tab="$(tm display-message -p -t "$pane" '#{window_name}')"
-if [ -n "$rpane" ]; then
-  stories="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/stories"; mkdir -p "$stories"
-  [ -f "$stories/$slug.md" ] || printf '# %s\n' "$slug" > "$stories/$slug.md"
-  rprompt="$store/${slug}-report-${stamp}.md"
-  sed -e "s/<slug>/$slug/g" "$(dirname "$0")/../scripts/reporter.md" > "$rprompt"
-  start "$rpane" "clear; claude ${base}--model sonnet --name '$slug-report' \"\$(cat $rprompt)\"" "$slug-report"
-  echo "REPORTER pane=$(tm display-message -p -t "$rpane" '#{pane_index}') id=$rpane tab=$tab name=$slug-report rc=$rcurl try=$try${parked:+ parked=$parked}"
-fi
-start "$pane" "$launch" "$name"
-echo "SPAWNED pane=$(tm display-message -p -t "$pane" '#{pane_index}') id=$pane tab=$tab story=$slug name=$name rc=$rcurl prompt=${prompt_copy:--} created=$created try=$try${parked:+ parked=$parked}"
-spawned
+def slugify(text):
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower())
+    slug = (slug[1:] if slug.startswith("-") else slug)[:32]
+    return slug[:-1] if slug.endswith("-") else slug
+
+
+def now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def hold_info(hold):
+    """(age in s, reason) of the flag, None when there is none."""
+    if not os.path.isfile(hold):
+        return None
+    try:
+        with open(hold, errors="replace") as f:
+            lines = f.read().splitlines()
+        at = os.stat(hold).st_mtime
+    except OSError:
+        return None
+    try:
+        at = datetime.fromisoformat(lines[0].strip().replace("Z", "+00:00")).timestamp()
+    except (IndexError, ValueError):
+        pass  # no readable time: the file's own
+    return max(0, int(time.time() - at)), " ".join(" ".join(lines[1:]).split())[:200] or "no reason given"
+
+
+def no_chrome(b):
+    """A start-up prompt nobody sees (the README's "Start-up prompts"): until it has been answered
+    once, Claude Code asks at a session's start whether to use Chrome by default, and a spawned pane
+    sits on that question. While .claude.json holds no answer (claudeInChromeDefaultEnabled) and
+    this claude knows --no-chrome (its --help, asked once per version), the launch passes the flag:
+    the session starts without the question and without Chrome. chrome=on in handoff.conf leaves it
+    out, and so does a .claude.json that cannot be read."""
+    if setting("chrome") == "on":
+        return ""
+    for path in (os.path.join(CLAUDE, ".config.json"),
+                 os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~"), ".claude.json")):
+        try:
+            with open(path) as f:
+                if "claudeInChromeDefaultEnabled" in json.load(f):
+                    return ""
+        except FileNotFoundError:
+            pass
+        except Exception:
+            return ""
+    version = (b.claude("--version").split() or [""])[0]
+    if not version[:1].isdigit():
+        return ""
+    seen = known = ""
+    asked = os.path.join(CLAUDE, "flowkit", "no-chrome")
+    try:
+        with open(asked) as f:
+            seen, known = (f.readline().split(None, 1) + ["", ""])[:2]
+            known = known.strip()
+    except OSError:
+        pass
+    if seen != version:
+        known = "yes" if "--no-chrome" in b.claude("--help") else "no"
+        try:
+            os.makedirs(os.path.dirname(asked), exist_ok=True)
+            with open(asked, "w") as f:
+                f.write(f"{version} {known}\n")
+        except OSError:
+            pass
+    return "--no-chrome " if known == "yes" else ""
+
+
+def main(argv):
+    b = backend()
+    driver = setting("driver") or "tmux"
+    reporter_on, perm = setting("reporter"), setting("permission_mode")
+
+    repo, name, story, model, effort, submodel = os.getcwd(), "", "", "", "", ""
+    rc, single, pane, force_new, force, dry, prompt, over_cap, from_queue, from_watch = True, False, "", False, False, False, "", False, "", ""
+    valued = {"--repo", "--name", "--story", "--model", "--effort", "--subagent-model", "--permission", "--pane",
+              "--from-queue", "--from-watch", "--tmux-socket", "--tmux-session", "--target"}
+    args = list(argv)
+    while args:
+        arg = args.pop(0)
+        if arg in valued:
+            if not args:
+                fail(2, f"option needs a value: {arg}")
+            value = args.pop(0)
+            if arg == "--repo": repo = value
+            elif arg == "--name": name = value
+            elif arg == "--story": story = value
+            elif arg == "--model": model = value
+            elif arg == "--effort": effort = value
+            elif arg == "--subagent-model": submodel = value
+            elif arg == "--permission": perm = value
+            elif arg == "--pane": pane = value
+            elif arg == "--from-queue": from_queue = value
+            elif arg == "--from-watch": from_watch = value
+            elif arg == "--tmux-socket": os.environ["FLOWKIT_TMUX_SOCKET"] = value
+            elif arg == "--tmux-session": os.environ["FLOWKIT_TMUX_SESSION"] = value
+            elif arg == "--target": os.environ["FLOWKIT_TARGET"] = value
+        elif arg == "--no-rc": rc = False
+        elif arg == "--single": single = True
+        elif arg == "--new": force_new = True
+        elif arg == "--force": force = True
+        elif arg == "--dry-run": dry = True
+        elif arg == "--over-cap": over_cap = True
+        elif arg in ("-h", "--help"):
+            with open(os.path.abspath(__file__)) as f:
+                for line in f.read().splitlines()[1:]:
+                    if not line.startswith("#"):
+                        break
+                    print(line)
+            return 0
+        elif arg.startswith("-"):
+            fail(2, f"unknown option: {arg}")
+        else:
+            prompt = arg
+
+    def capacity(*more, **how):
+        return subprocess.run([sys.executable, CAPACITY, *more], env=ENV, **how)
+
+    def give_back():
+        capacity("launched", "--pid", str(os.getpid()), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # A queued launch gives back on every exit before SPAWNED, a refusal too: its entry is queued again.
+    owed = [bool(from_queue)]
+    try:
+        return launch(b, driver, reporter_on, perm, repo, name, story, model, effort, submodel, rc, single, pane, force_new,
+                      force, dry, prompt, over_cap, from_queue, from_watch, capacity, owed)
+    finally:
+        if owed[0]:
+            give_back()
+
+
+def launch(b, driver, reporter_on, perm, repo, name, story, model, effort, submodel, rc, single, pane, force_new, force, dry,
+           prompt, over_cap, from_queue, from_watch, capacity, owed):
+    at = b.BACKENDS.get(driver)
+    if at is None:
+        fail(7, f"launch driver '{driver}' (set in {CONF}) is not available in this version; use driver=tmux or driver=background")
+
+    for v in (model, effort, submodel, perm):
+        if re.search(r"[^A-Za-z0-9._\[\]-]", v):
+            fail(2, f"not a model, effort or mode: '{v}'")
+    if prompt or not single:
+        if not (prompt and os.path.exists(prompt) and os.path.getsize(prompt) > 0):
+            fail(2, f"prompt file missing or empty: '{prompt}'")
+    if not os.path.isdir(repo):
+        fail(2, f"repo path does not exist: {repo}")
+    if prompt:
+        prompt = os.path.join(os.path.realpath(os.path.dirname(prompt) or "."), os.path.basename(prompt))
+    repo = os.path.realpath(repo)
+    if not name:
+        name = os.path.basename(prompt or repo)
+        name = name[:-3] if name.endswith(".md") else name
+    if not re.match(r"[A-Za-z0-9]", name):
+        fail(2, f"session name must start with a letter or digit: '{name}'")
+    if re.search(r"[^A-Za-z0-9._-]", name):
+        fail(2, f"session name takes letters, digits, '.', '_', '-': '{name}'")
+
+    base = ""  # what the reporter shares with the session: Remote Control and the permission mode
+    if rc:
+        base += "--remote-control "
+    if perm:
+        base += f"--permission-mode {perm} "
+    flags = base
+    if model:
+        flags += f"--model {model} "
+    if effort:
+        flags += f"--effort {effort} "
+    env_json = f'"CLAUDE_CODE_SUBAGENT_MODEL":"{submodel}",' if submodel else ""
+    # `claude --bg` drops the caller's environment: carry the flowkit config dir, so the next session
+    # reads the same handoff.conf and ladder.md.
+    # It also works in place: with Claude's default worktree.bgIsolation a background session must
+    # move into a worktree branch of its own before its first edit, and pushes and opens a draft PR
+    # from there.
+    iso = ""
+    if driver == "background":
+        xdg = os.environ.get("XDG_CONFIG_HOME", "")
+        if xdg.startswith("/") and not re.search(r"[^A-Za-z0-9._/-]", xdg):
+            env_json += f'"XDG_CONFIG_HOME":"{xdg}",'
+        iso = '"worktree":{"bgIsolation":"none"}'
+    settings = f'"env":{{{env_json[:-1]}}}' if env_json else ""
+    settings += ("," if settings and iso else "") + iso
+    if settings:
+        flags += f"--settings '{{{settings}}}' "
+
+    # Where the launch goes: named by the caller, else where this runs, else nowhere (print the command).
+    try:
+        target = at.target()
+    except b.Refused as e:
+        if e.why == "outside":
+            by_hand = f' "$(cat {prompt})"' if prompt else ""
+            fail(3, f"{e}; start the session by hand: cd '{repo}' && claude {flags}--name '{name}'{by_hand}")
+        fail(EXITS.get(e.why, 1), str(e))
+    here = at.here()
+
+    # The story: given, else the story this pane was opened for, else the session name. A single
+    # session has none: it goes with the one-offs.
+    reporter = ""
+    if single:
+        slug = "adhoc"
+    elif story:
+        slug = slugify(story)
+        reporter = f"{slug}-report" if reporter_on == "on" else ""
+    else:
+        slug = (at.story(here) if here else "") or slugify(name)
+    if not slug:
+        fail(2, f"story '{story}' has no letters or digits")
+
+    def story_note(line):
+        """A line appended to the story's file; a single session has none."""
+        if single:
+            return
+        stories = os.path.join(CLAUDE, "stories")
+        os.makedirs(stories, exist_ok=True)
+        path = os.path.join(stories, f"{slug}.md")
+        if not os.path.isfile(path):
+            with open(path, "w") as f:
+                f.write(f"# {slug}\n")
+        with open(path, "a") as f:
+            f.write(line + "\n")
+
+    # The launch hold: a guard outside flowkit writes ~/.claude/load-hold (an ISO time, then the reason)
+    # while the machine is short of memory and removes it on recovery. A launch waits for it to go,
+    # checking every 30 s (FLOWKIT_HOLD_POLL), and says once, on stderr and in the story file, that it
+    # is held and why. A flag older than 2 hours is stale and ignored; FLOWKIT_IGNORE_HOLD=1 skips the
+    # wait. It comes before the refusals, so they look at the tree and the sessions as they are at launch.
+    hold = os.path.join(CLAUDE, "load-hold")
+    poll = os.environ.get("FLOWKIT_HOLD_POLL") or "30"
+    held, held_at = False, int(time.time())
+    while True:
+        info = hold_info(hold)
+        if not info:
+            break
+        age, why = info
+        if os.environ.get("FLOWKIT_IGNORE_HOLD"):
+            say(f"launch hold ignored, FLOWKIT_IGNORE_HOLD is set: {why}")
+            break
+        if age >= 7200:
+            say(f"launch hold ignored, stale: set {age // 60} min ago ({why})")
+            if not dry:
+                story_note(f"> hold ignored {name} · {now()} · stale, set {age // 60} min ago · {why}")
+            break
+        if dry:
+            say(f"launch held: {why}; a launch would wait until {hold} is gone")
+            break
+        if not held:
+            say(f"launch held: {why}; waiting until {hold} is gone, checking every {poll} s")
+            story_note(f"> held {name} · {now()} · {why}")
+            held = True
+        time.sleep(float(poll))
+    if held:
+        say(f"launch hold lifted after {(int(time.time()) - held_at) // 60} min; launching")
+
+    # Refusal 1: the new session shares this working tree; uncommitted changes mean the session
+    # spawning it has not landed its work. An untracked `.claude/` is not work: EnterWorktree keeps a
+    # session's worktrees under `.claude/worktrees/`, and nothing ignores them. Run again before a
+    # launch is typed a second time. A watch's launch is checked once the gate let it through:
+    # into a repository's one checkout it is queued behind the slice whose changes these are.
+    def clean_tree():
+        if force or single:
+            return
+        git = ["git", "-C", repo]
+        if subprocess.run([*git, "rev-parse", "--is-inside-work-tree"], capture_output=True).returncode:
+            return
+        status = subprocess.run([*git, "status", "--porcelain"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        dirty = [line for line in status.stdout.splitlines() if not line.startswith("?? .claude/")][:5]
+        if dirty:
+            fail(6, "repo has uncommitted changes; commit them first (or --force):\n" + "\n".join(dirty))
+    if not from_watch:
+        clean_tree()
+
+    # Refusal 2: a live session of that name, as `claude agents` lists it or as its place shows it
+    # (Claude shows its --name in a pane's title behind a status glyph, e.g. "✳ billing-s3").
+    def sessions():
+        try:
+            return [row for row in b.agents() if isinstance(row, dict)]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return []
+    listed = [sessions()]
+
+    def no_namesake(who):
+        """Exit 4 when a session of that name runs; run again before a second launch is typed."""
+        found = "" if force else b.running(at, who, listed[0])
+        if found:
+            fail(4, f"a session named '{who}' is already running ({found}); pass --force to spawn another")
+    if single:
+        first, n = name, 2
+        while b.running(at, name, listed[0]):
+            name, n = f"{first}-{n}", n + 1
+    else:
+        no_namesake(name)
+
+    # The place: the driver's pick, nothing made yet. The reporter: whenever the story has none.
+    asked = b.Launch(story=slug, name=name, cwd=repo, adhoc=single, rc=rc, reporter=reporter, place=pane, fresh=force_new,
+                     target=target)
+    try:
+        plan = at.plan(asked, listed[0])
+    except b.Refused as e:
+        fail(EXITS.get(e.why, 1), str(e))
+
+    # The prompt under a space-free path in the store: safe to quote, and a record of what each pane
+    # was started with. A prompt already there (`handoff.py save-prompt` writes `<name>.md`) is that
+    # record and is launched as it is; one from outside gets a stamped copy, which `handoff.py refresh`
+    # prunes after 30 days.
+    store = os.path.join(CLAUDE, "spawned")
+    os.makedirs(store, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    prompt_copy = prompt_arg = copied = ""
+    if prompt:
+        if os.path.samefile(os.path.dirname(prompt), store):
+            prompt_copy = os.path.join(store, os.path.basename(prompt))
+        else:
+            prompt_copy = copied = os.path.join(store, f"{name}-{stamp}.md")
+            shutil.copyfile(prompt, prompt_copy)
+        prompt_arg = f' "$(cat {prompt_copy})"'
+
+    # The gate (scripts/capacity.py; the README's "Capacity"): a story launch that would open a new
+    # chain while the machine's slots are all used, or while `claude agents` does not answer, is not
+    # launched but queued (QUEUED, exit 11), and `capacity.py drain` starts it later with the same
+    # arguments. A chain's own next slice never waits for a slot. What the prompt's `Needs:` line
+    # names is taken all or none for this launch before anything waits, handed to the new session
+    # after SPAWNED and given back on any other exit; a successor whose needs are not all free is
+    # queued too, its closer's resources given back. A broken gate never stops a launch.
+    def watch_poller():
+        """An open watch with no poller gets one: a launch's end is one of the moments that is checked."""
+        if glob.glob(os.path.join(CLAUDE, "flowkit", "watches", "*.json")):
+            subprocess.run([sys.executable, os.path.join(ME, "scripts", "watch.py"), "ensure"], env=ENV,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not single and not from_queue:
+        again = ["--repo", repo, "--name", name, "--story", slug]
+        again += ["--model", model] if model else []
+        again += ["--effort", effort] if effort else []
+        again += ["--subagent-model", submodel] if submodel else []
+        again += ["--permission", perm] if perm else []
+        again += [] if rc else ["--no-rc"]
+        again += ["--new"] if force_new else []
+        again += ["--force"] if force else []
+        again += ["--target", target] if target else []
+        again += ["--from-watch", from_watch] if from_watch else []
+        again += [prompt_copy] if prompt_copy else []
+        gate = ["gate", "--pid", str(os.getpid()), "--tree", repo, "--story", slug, "--name", name, "--prompt", prompt_copy]
+        gate += ["--over-cap"] if over_cap else []
+        gate += ["--from-watch", from_watch] if from_watch else []
+        gate += ["--held", str(int(time.time()) - held_at)] if held else []
+        gate += ["--dry-run"] if dry else []
+        asked_gate = capacity(*gate, "--", *again, stdout=subprocess.PIPE, text=True)
+        verdict, code = asked_gate.stdout.rstrip("\n"), asked_gate.returncode
+        if code == 11:
+            print(verdict, flush=True)
+            why = verdict[len("QUEUED "):] if verdict.startswith("QUEUED ") else verdict
+            story_note(f"> queued {name} · {now()} · {why}")
+            watch_poller()
+            return 11
+        if code:
+            say(f"capacity gate failed (exit {code}); launching without it")
+        elif dry:
+            print(f"gate:   {verdict}", flush=True)
+        else:
+            owed[0] = True
+    if from_watch:
+        clean_tree()
+
+    # A single session shares the tree with any Claude already running in the repo: its system
+    # prompt says so.
+    shared_file = others = ""
+    if single:
+        others = ", ".join(row.get("name") or "-" for row in listed[0]
+                           if (row.get("cwd") or "-") == repo or (row.get("cwd") or "-").startswith(repo + "/"))
+        if others:
+            shared_file = os.path.join(store, f"{name}-{stamp}-shared.md")
+            with open(shared_file, "w") as f:
+                f.write(f"Shared working tree: another Claude session is working in {repo} right now ({others}).\n"
+                        "Do not switch branches, commit, stash, reset, rebase, pull or otherwise rewrite the working tree "
+                        "unless the user says so in this session. Reading, investigating and running tests are fine.\n")
+    # A prompt starting with `/` is a command (command-first): Claude Code runs it as the user's own,
+    # and hands any text after it to the command as arguments, so the brief waits in the pick-up doc
+    # and the system prompt says where.
+    if prompt_copy:
+        with open(prompt_copy, "rb") as f:
+            command_first = f.read(1) == b"/"
+        if command_first:
+            shared_file = shared_file or os.path.join(store, f"{name}-{stamp}-brief.md")
+            with open(shared_file, "a") as f:
+                f.write("This session started from the slash command in its first message, run as the user's own command; "
+                        "the command's arguments are only what that line carries.\n"
+                        "Its slice brief (Session, Story, Chain end, Report-to, Stop when), when it has one, is the Brief: "
+                        "of the WHERE TO PICK UP block in this repo's pick-up doc (grep -rl 'WHERE TO PICK UP' "
+                        "--include='*.md' .). Read it before the command's first step and follow it alongside the command.\n")
+    shared_arg = f' --append-system-prompt "$(cat {shared_file})"' if shared_file else ""
+
+    chrome = no_chrome(b)
+    base, flags = chrome + base, chrome + flags
+    asked.args = f"{flags}--name '{name}'{shared_arg}{prompt_arg}"
+
+    if dry:
+        told = {"copy": os.path.join(ME, "bin", "flowkit-spawn") + (
+                    " (the installed release, in place of the copy called)" if os.environ.get("FLOWKIT_SPAWN_REEXEC") else ""),
+                "story": slug + (f" (starts {reporter} {plan.reporter})" if plan.reporter else ""),
+                "repo": repo, "prompt": prompt_copy or "none", **({"shared": others} if others else {})}
+        try:
+            told.update(plan.show(asked))
+        except b.Refused as e:
+            fail(EXITS.get(e.why, 1), str(e))
+        for label in ("copy", "driver", "story", "tab", "pane", "repo", "prompt", "shared", "send", "run"):
+            if label in told:
+                print(f"{label}:".ljust(8) + told[label])
+        for path in (copied, shared_file):
+            if path and os.path.exists(path):
+                os.remove(path)
+        return 0
+    story_note(f"> launched {name} · {now()}" + (f" · launched-by: watch {from_watch}" if from_watch else ""))
+
+    # The reporter collects the story's closes from its story file and answers "what is going on".
+    if plan.reporter:
+        os.makedirs(os.path.join(CLAUDE, "stories"), exist_ok=True)
+        if not os.path.isfile(os.path.join(CLAUDE, "stories", f"{slug}.md")):
+            with open(os.path.join(CLAUDE, "stories", f"{slug}.md"), "w") as f:
+                f.write(f"# {slug}\n")
+        brief = os.path.join(store, f"{reporter}-{stamp}.md")
+        with open(os.path.join(ME, "scripts", "reporter.md")) as f, open(brief, "w") as out:
+            out.write(f.read().replace("<slug>", slug))
+        asked.reporter_args = base + (f"--settings '{{{iso}}}' " if iso else "") + f"--model sonnet --name '{reporter}' \"$(cat {brief})\""
+
+    def again_ok(who):
+        """Refusals 1 and 2, before a launch is typed a second time."""
+        listed[0] = sessions()
+        no_namesake(who)
+        clean_tree()
+
+    def dialog(screen):
+        """The first line of the dialog a screen ends on, as `flowkit-tmux dialog` reads it."""
+        try:
+            return subprocess.run([os.path.join(ME, "bin", "flowkit-tmux"), "dialog"], input=screen, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, text=True).stdout.rstrip("\n")
+        except OSError:
+            return ""
+
+    try:
+        for opened in at.open(asked, plan, say, again_ok, dialog):
+            if opened.parked:
+                story_note(f"> parked {opened.name} · {now()} · {opened.parked}")
+            tail = (f" try={opened.tried}" + (f" parked={opened.parked}" if opened.parked else "")) if opened.tried else ""
+            if opened.name == name:
+                made = f" created={opened.created}" if opened.tried else ""
+                print(f"SPAWNED {opened.where} story={slug} name={name} rc={opened.rc} prompt={prompt_copy or '-'}{made}{tail}",
+                      flush=True)
+            else:
+                print(f"REPORTER {opened.where} name={opened.name} rc={opened.rc}{tail}", flush=True)
+    except b.Refused as e:
+        fail(EXITS.get(e.why, 1), str(e))
+    # after the SPAWNED line: the launch's resources go to the new session
+    owed[0] = False
+    capacity("launched", "--pid", str(os.getpid()), "--name", name, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    watch_poller()
+    return 0
+
+
+if __name__ == "__main__":
+    handed = newer()
+    if not os.environ.get("FLOWKIT_SPAWN_REEXEC") and handed and os.access(handed, os.X_OK):
+        os.execve(handed, [handed, *sys.argv[1:]], {**os.environ, "FLOWKIT_SPAWN_REEXEC": "1"})
+    for number, code in ((signal.SIGHUP, 129), (signal.SIGINT, 130), (signal.SIGTERM, 143)):
+        signal.signal(number, lambda *_, code=code: sys.exit(code))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, subprocess.SubprocessError) as e:
+        say(f"flowkit-spawn: {e}")
+        sys.exit(1)

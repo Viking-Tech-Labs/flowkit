@@ -277,7 +277,7 @@ def parked(pane_list, listed, now):
     agents`, a picker, a `-p` job) is none."""
     out, changes = [], {}
     places = backend().kept()["places"]
-    for key in places:
+    for key in places if pane_list else ():  # no pane at all is tmux not answering: nothing is known to be gone
         if key.startswith("tmux ") and key[5:] not in {p["id"] for p in pane_list}:
             changes[key] = None  # the pane is gone
     for p in pane_list:
@@ -290,20 +290,24 @@ def parked(pane_list, listed, now):
             seen = ""  # seen before the last launch into this pane: that was another session's dialog
         if line and not seen:
             changes[key] = int(now)
-        elif key in places and not line:
-            changes[key] = None
+        elif "parked" in places.get(key, {}) and not line:
+            changes[key] = False
         if line and any(at.isdigit() and now - int(at) > PARKED for at in (seen, born)):
             out.append((p, line, int(seen) if seen.isdigit() else int(now)))
     return out, changes
 
 
 def stamp(changes):
-    """Keeps when each parked pane's dialog was first seen."""
+    """Keeps when each parked pane's dialog was first seen, beside what the launch into the pane
+    wrote (False: the dialog went, the pane did not); nothing is kept of a pane that is gone."""
     def change(doc):
         for key, at in changes.items():
-            doc["places"].pop(key, None)
+            known = doc["places"].pop(key, None) or {}
+            known.pop("parked", None)
             if at:
-                doc["places"][key] = {"parked": at}
+                known["parked"] = at
+            if known and at is not None:
+                doc["places"][key] = known
     if changes:
         ask(backend().keep, change)
 

@@ -25,6 +25,22 @@ asks one of the two backends here, TMUX and BACKGROUND, which answer the same re
   label(states, groups)       the word the user sees beside each place and each group of places
   close(place)                the place goes, with what runs in it
   pick(place, client)         the user's terminal turns to it
+  target()                    where a launch from this process goes, as one word of the backend's
+                              own: a process started apart from it (a queued launch, a watch's
+                              poller) hands the word back in FLOWKIT_TARGET and reaches the same
+                              place. "" for a backend that needs none
+  plan(launch, listed)        what open() would do with a Launch, nothing started yet: `reporter`
+                              says where the story's reporter would start ("" when the story has
+                              one), `show(launch)` gives its own lines of a dry run. `listed` is
+                              Claude Code's list as the caller last read it
+  open(launch, plan, say, again, dialog)
+                              starts the session, the story's reporter before it where the plan
+                              says so, and gives each as an Opened once it is up or its wait is
+                              over. `say` takes a warning's line; `again(name)` is asked before a
+                              launch is typed a second time and raises when it must not be;
+                              `dialog(text)` says which dialog a screen ends on
+
+plan() and open() raise Refused where nothing is started: `why` says which case it is.
 
 A request a backend has no answer to gets the empty one (no screen, no story, nothing parked), so
 a caller asks without knowing which it holds. A program that is missing or hangs raises OSError
@@ -36,7 +52,9 @@ waiting or idle.
 
 What flowkit knows of a session and no backend has to keep for it is in one file, STATE: kept()
 reads it, keep(change) changes it under its lock, register() writes a session's own entry at its
-start, note() adds to one, registered() finds the entry of a place.
+start, note() adds to one, registered() finds the entry of a place. A launch writes there what a
+place was opened for before a session runs in it (launched()), and the session takes that over as
+it registers.
 
 This file imports nothing of the plugin, so a command copied out of it loads it by path.
 """
@@ -48,6 +66,7 @@ import re
 import shutil
 import subprocess
 import time
+import types
 from pathlib import Path
 
 Place = collections.namedtuple("Place", "id copy row")
@@ -68,6 +87,10 @@ STOPPING = 10  # seconds a stopped background session's process may take to go
 GRACE = 3  # seconds from the process going to the resume after ESCAPE: measured on Claude Code 2.1.302, a resume
 #            within a second of the stop starts a copy under a new id, one after 2 s continues
 
+STARTING = 15  # seconds a launch waits for its session to be listed
+LINKING = 30  # seconds more for the Remote Control link alone
+SLOTS = 9  # sessions tiled in one tab
+
 SEP = "\x1f"
 STATE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "flowkit" / "sessions.json"
 GONE = 86400  # seconds an entry outlives its session's process: a stopped session that starts again registers again
@@ -76,14 +99,31 @@ PROMPT_LINE = re.compile(r"^[│|\s]*[>❯]\s?(.*?)[\s│|]*$")
 # what `capture-pane -e` adds to a row: a change of attributes (its codes are group 1), a link, any other sequence
 SEQUENCE = re.compile(r"\x1b\[([\d;:]*)m|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[^@-~]*[@-~]")
 COLOUR = re.compile(r"\b[345]8;(?:5;\d*|2;\d*;\d*;\d*)")  # a colour's own numbers are no attributes
+LINK = re.compile(r"https://claude.ai/code/session_[A-Za-z0-9]*")  # a session's Remote Control link
+SHELLS = ("zsh", "bash", "fish", "sh", "-zsh", "-bash", "-fish", "-sh")  # what a pane with nothing started in it runs
 DIALOG = re.compile(r"enter to (?:confirm|select|continue)|esc to (?!interrupt)\w+|^\s*(?:[❯>]\s*)?\d+\.\s", re.I | re.M)
 
 
-def tmux(*args):
-    sock = os.environ.get("FLOWKIT_TMUX_SOCKET")
+def aimed():
+    """The tmux server and session a caller outside tmux names: FLOWKIT_TMUX_SOCKET and
+    FLOWKIT_TMUX_SESSION, else the two halves of FLOWKIT_TARGET, the word Tmux.target() gave."""
+    sock, _, sess = os.environ.get("FLOWKIT_TARGET", "").partition("/")
+    return os.environ.get("FLOWKIT_TMUX_SOCKET") or sock, os.environ.get("FLOWKIT_TMUX_SESSION") or sess
+
+
+def tmux(*args, env=None):
+    sock = aimed()[0]
     return subprocess.run(
-        ["tmux", *(["-L", sock] if sock else []), *args], capture_output=True, text=True, timeout=10
+        ["tmux", *(["-L", sock] if sock else []), *args], capture_output=True, text=True, timeout=10, env=env
     )
+
+
+def claude(*args):
+    """What `claude <args>` prints, "" where it is missing or hangs."""
+    try:
+        return subprocess.run(["claude", *args], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
 def agents(*args):
@@ -137,12 +177,61 @@ class Typed(str):
     said = ""
 
 
+class Refused(Exception):
+    """A launch that is not started; the text says it in the backend's own words. `why`: outside
+    (this process runs outside the backend and names no target), nowhere (the target has nothing
+    to launch in), busy (the place asked for runs something), untrusted (Claude Code was never
+    started in the folder), start (the session's program refused the start), exited (it exited at
+    its start, twice), failed (the backend's program refused a step)."""
+
+    def __init__(self, why, said=""):
+        super().__init__(said)
+        self.why = why
+
+
+class Launch(types.SimpleNamespace):
+    """What plan() and open() are asked for. `story`: the group the session joins, a story's slug
+    or, with `adhoc`, the shared one of the one-offs; `name`, the session's; `cwd`; `args`: what
+    follows `claude` on its command line, as shell text; `rc`: a Remote Control link is waited
+    for; `reporter` and `reporter_args`: the name of the story's reporter, started first where the
+    story has none, and its arguments; `place`: this place, an idle one, instead of the group's
+    next; `fresh`: never a place that is there already; `target`: the word target() gave."""
+    args = reporter = reporter_args = place = target = ""
+    adhoc = fresh = False
+    rc = True
+
+
+class Opened(types.SimpleNamespace):
+    """A session open() started. `name`; `place`; `where`: the place in the backend's own words,
+    for the launcher's line; `up`: Claude Code lists it; `rc`: its Remote Control link, pending or
+    off. Where the launch was typed into a place: `created` (1 when the place was made for it),
+    `tried` (1, or 2 when it was typed a second time) and `parked` (the first line of the start-up
+    dialog it sits at)."""
+    created = tried = 0
+    parked = ""
+
+
+def running(backend, name, listed):
+    """Where a session of that name runs: "claude agents" when Claude Code lists it, the id of a
+    place that shows the name as its title when it does not, "" when nothing does. The place this
+    process runs in is never it."""
+    if any(isinstance(a, dict) and a.get("name") == name for a in listed):
+        return "claude agents"
+    here = backend.here()
+    for place in backend.places():
+        title = re.sub(r"^[^0-9A-Za-z]+", "", (place.get("title") or "").strip())
+        if place["id"] != (here.id if here else "") and place.get("cmd") not in SHELLS and title == name:
+            return place["id"]
+    return ""
+
+
 def kept():
     """What the file holds: {"sessions": {session id: entry}, "places": {"<backend> <place id>":
     entry}}, both empty without a file. A session's entry: `backend` and `place` (where it runs),
     `story` (the one it was started for), `adhoc` (a one-off outside any story), `pid`, `at` (its
     last write), and what was noted for it. A place's entry is what is known of a place that has
-    no session yet."""
+    no session yet: `story`, `adhoc` and `born` (when the launch was typed) from the launch into
+    it, `parked` (when a start-up dialog was first seen there)."""
     try:
         doc = json.loads(STATE.read_text())
     except (OSError, ValueError):
@@ -184,7 +273,8 @@ def register(sid, backend, place, story="", adhoc=False, pid=None, inside=()):
     session's whose process is one of `inside`, the processes this one was started from (a
     `claude -p` a session runs), and it registers nothing. What was noted for the session stays.
     Another session's entry at the same place goes, since that session has left it, and so does
-    any entry whose process went more than a day ago."""
+    any entry whose process went more than a day ago. What a launch wrote for the place is the
+    session's from here on: its story and its launch stamp, in place of the ones given."""
     now = time.time()
 
     def change(doc):
@@ -200,6 +290,9 @@ def register(sid, backend, place, story="", adhoc=False, pid=None, inside=()):
                 del entries[other]
         entries[sid] = {**entries.get(sid, {}), "backend": backend, "place": place, "story": story, "adhoc": adhoc,
                         "pid": pid, "at": int(now)}
+        record = doc["places"].pop(f"{backend} {place}", None) or {}
+        if "story" in record:
+            entries[sid].update(story=record["story"] or "", adhoc=bool(record.get("adhoc")), born=record.get("born"))
     return keep(change)["sessions"].get(sid)
 
 
@@ -208,6 +301,18 @@ def note(sid, **fields):
     def change(doc):
         doc["sessions"][sid] = {**doc["sessions"].get(sid, {}), **fields, "at": int(time.time())}
     keep(change)
+
+
+def launched(backend, place, story, adhoc=False):
+    """A launch into a place, written before its session runs: what the place was opened for and
+    when. It replaces what was known of the place, a start-up dialog seen for its last session
+    too. A file that cannot be written stops no launch."""
+    def change(doc):
+        doc["places"][f"{backend} {place}"] = {"story": "" if adhoc else story, "adhoc": bool(adhoc), "born": int(time.time())}
+    try:
+        keep(change)
+    except OSError:
+        pass
 
 
 def registered(backend, place):
@@ -265,6 +370,15 @@ class Backend:
     def pick(self, place, client=""):
         return False
 
+    def target(self):
+        return ""
+
+    def plan(self, launch, listed=None):
+        raise Refused("nowhere", "nothing to launch in")
+
+    def open(self, launch, plan, say=None, again=None, dialog=None):
+        raise Refused("nowhere", "nothing to launch in")
+
 
 class Tmux(Backend):
     """An interactive session in a tmux pane; FLOWKIT_TMUX_SOCKET names another server than the
@@ -301,7 +415,11 @@ class Tmux(Backend):
         return self.finder()(pid)
 
     def here(self):
-        pane = os.environ.get("TMUX_PANE")
+        """None too when another server is named than the one this process runs in: pane ids
+        repeat across servers."""
+        pane, sock = os.environ.get("TMUX_PANE"), aimed()[0]
+        if sock and os.path.basename(os.environ.get("TMUX") or "x").split(",")[0] != sock:
+            return None
         return Place(pane, False, None) if pane else None
 
     def screen(self, place):
@@ -354,6 +472,11 @@ class Tmux(Backend):
         return tmux("send-keys", "-t", self.pane(place), "Escape").returncode == 0
 
     def story(self, place):
+        """What the last launch into the pane wrote while no session has registered there since,
+        else the story of the session registered there, else what an older launch left."""
+        record = kept()["places"].get(f"{self.name} {self.pane(place)}") or {}
+        if "story" in record:
+            return record["story"] or ""
         entry = registered(self.name, self.pane(place))
         return entry.get("story") or "" if entry else self.marked(place)[0]
 
@@ -362,9 +485,11 @@ class Tmux(Backend):
         return max(seen) if seen else None
 
     def marked(self, place):
-        """What the tab a pane sits in was opened for, as the launch marked it: (story, adhoc). A
-        session reads it once, as it registers. One that started before 0.15.0 registered nothing
-        and is read from here until it starts again; that reading goes with 0.16.0."""
+        """What the tab a pane sits in was opened for, as the launch marked it: (story, adhoc). The
+        mark is the tab's place in the layout, which plan() reads to find a story's tabs. What a
+        session is filed under is in STATE since 0.15.1: a tab an older launch opened, and a
+        session that started before 0.15.0 and registered nothing, are read from here until
+        0.16.0."""
         story, _, adhoc = tmux("display-message", "-p", "-t", self.pane(place),
                                f"#{{@flowkit_story}}{SEP}#{{@flowkit_adhoc}}").stdout.strip("\n").partition(SEP)
         return story, bool(adhoc)
@@ -375,14 +500,28 @@ class Tmux(Backend):
         Code's version). And what tmux keeps for it: `story` and `slug`, what its tab was opened
         for (`slug` is empty in the tab of the one-offs); `hold`, the user's own switch that keeps
         the tab; `born`, when a launch was last typed into it or its tab was opened; `rung` and
-        `parked`, which a tick before 0.15.0 kept here, read where STATE has none until 0.16.0."""
+        `parked`, which a tick before 0.15.0 kept here, read where STATE has none until 0.16.0;
+        `title`, what the pane shows as its name. `story`, `slug` and `born` are the ones of the
+        last launch into the pane where STATE has it, tmux's for a tab an older launch opened."""
         fmt = SEP.join(["#{pane_pid}", "#{pane_id}", "#{session_name}", "#{window_id}", "#{window_index}",
                         "#{window_name}", "#{pane_index}", "#{pane_current_command}",
                         "#{@flowkit_story}#{@flowkit_adhoc}", "#{@flowkit_story}", "#{@flowkit_hold}#{@cc_hold}",
-                        "#{@flowkit_born}", "#{@flowkit_rung}", "#{@flowkit_parked}"])
+                        "#{@flowkit_born}", "#{@flowkit_rung}", "#{@flowkit_parked}", "#{pane_title}"])
         keys = ("pid", "id", "sess", "wid", "widx", "wname", "pidx", "cmd", "story", "slug", "hold", "born", "rung",
-                "parked")
-        return [dict(zip(keys, line.split(SEP))) for line in tmux("list-panes", "-a", "-F", fmt).stdout.splitlines() if line]
+                "parked", "title")
+        found = [dict(zip(keys, line.split(SEP))) for line in tmux("list-panes", "-a", "-F", fmt).stdout.splitlines() if line]
+        doc = kept()
+        sessions = {e.get("place"): e for e in doc["sessions"].values() if e.get("backend") == self.name}
+        for pane in found:
+            record = doc["places"].get(f"{self.name} {pane['id']}") or {}
+            if "story" in record:
+                pane["slug"] = record["story"] or ""
+                pane["story"] = pane["slug"] or ("adhoc" if record.get("adhoc") else "")
+            born = [int(at) for at in (record.get("born"), (sessions.get(pane["id"]) or {}).get("born"), pane.get("born"))
+                    if str(at or "").isdigit()]
+            if born:
+                pane["born"] = str(max(born))
+        return found
 
     def label(self, states, groups):
         """`states`: {pane: its word} for each pane that shows one in its border; `groups`: {tab:
@@ -415,6 +554,221 @@ class Tmux(Backend):
     def session(self):
         """The tmux session the terminal this runs in is attached to."""
         return tmux("display-message", "-p", "#{session_name}").stdout.strip()
+
+    @staticmethod
+    def ask(*args):
+        """tmux for a launch: what it printed, Refused when it refuses. tmux starts a pane a
+        process creates with that process's PATH, not the server's. Called from a session, that
+        PATH holds the session's plugin bin/ directories, which the session started in the pane
+        would keep ahead of its own: an older release's commands would answer there. So a launch
+        calls tmux without them."""
+        path = os.environ.get("PATH", "")
+        clean = os.pathsep.join(p for p in path.split(os.pathsep) if not re.search(r"/plugins/cache/.*/bin/*$", p))
+        done = tmux(*args, env={**os.environ, "PATH": clean or path})
+        if done.returncode:
+            raise Refused("failed", done.stderr.strip() or f"tmux {args[0]} failed")
+        return done.stdout.rstrip("\n")
+
+    def target(self):
+        """`<server>/<session>`: the server as `tmux -L` names it and the session in it whose tabs a
+        launch joins. The ones a caller names (aimed()), else the session of the pane this runs
+        in, else the server's first."""
+        sock, sess = aimed()
+        if not sock and not os.environ.get("TMUX"):
+            raise Refused("outside", "not inside tmux")
+        if not sess:
+            here = self.here()
+            sess = self.ask("display-message", "-p", "-t", here.id, "#{session_name}") if here else \
+                (tmux("list-sessions", "-F", "#{session_name}").stdout.splitlines() or [""])[0]
+        if not sess:
+            raise Refused("nowhere", "no tmux session to launch in" + (f" on server '{sock}'" if sock else ""))
+        return f"{sock or os.path.basename(os.environ.get('TMUX', '').split(',')[0])}/{sess}"
+
+    def plan(self, launch, listed=None):
+        """The pane: the one given; else an idle shell or a free slot in the story's tabs, in the
+        order of their parts; else a new tab `<story>[-<part>]` after the last tab. The reporter:
+        whenever the story has none running, in slot 1 of a new tab, else in a pane after the
+        last. `pane` is "new" for one still to be made."""
+        key = "@flowkit_adhoc" if launch.adhoc else "@flowkit_story"
+        sess, here = launch.target.partition("/")[2], self.here()
+        plan = types.SimpleNamespace(sess=sess, key=key, pane=launch.place, win="", tab="", part=1, claim="", reporter="")
+        if launch.place:
+            cmd = self.ask("display-message", "-p", "-t", launch.place, "#{pane_current_command}")
+            if cmd not in SHELLS:
+                raise Refused("busy", f"pane {launch.place} is running '{cmd}', not an idle shell")
+            # A tab opened by hand for this one pane becomes the story's next tab: the closer may close it
+            # once the story is finished, and the story's next launch finds it. A tab with other panes in
+            # it stays the user's: the closer closes whole tabs.
+            plan.win, panes, marked = (self.ask("display-message", "-p", "-t", launch.place,
+                                                "#{window_id} #{window_panes} #{@flowkit_story}#{@flowkit_adhoc}").split(None, 2) + ["", ""])[:3]
+            if not launch.adhoc and panes == "1" and not marked:
+                parts = [f.split() for f in self.ask("list-windows", "-t", sess, "-F", f"#{{{key}_part}} #{{{key}}}").splitlines()]
+                plan.part = max((int(f[0]) for f in parts if len(f) > 1 and f[1] == launch.story and f[0].isdigit()), default=0) + 1
+                plan.claim = plan.win
+        else:
+            tabs = [f.split() for f in tmux("list-windows", "-t", sess, "-F",
+                                            f"#{{{key}_part}} #{{window_id}} #{{window_panes}} #{{{key}}}").stdout.splitlines()]
+            parts = 0
+            for part, win, panes in sorted((int(f[0]), f[1], int(f[2])) for f in tabs if len(f) > 3 and f[3] == launch.story
+                                           and f[0].isdigit() and f[2].isdigit()):
+                parts = part
+                if plan.pane:
+                    continue
+                idle = "" if launch.fresh else self.idle(win, here)
+                if idle:
+                    plan.pane, plan.win = idle, win
+                elif panes < SLOTS:
+                    plan.pane, plan.win = "new", win
+            if not plan.pane:
+                plan.part = parts + 1
+                plan.tab = launch.story if plan.part == 1 else f"{launch.story}-{plan.part}"
+                plan.pane = "new"
+        if launch.reporter and not running(self, launch.reporter, listed or []):
+            plan.reporter = "in slot 1" if plan.tab else "in a pane after the last"
+
+        def show(launch):
+            tab = f"new tab {plan.tab} after the last one" if plan.tab else self.ask("display-message", "-p", "-t", plan.win, "#{window_name}")
+            return [("tab", tab + (f" (becomes tab {plan.part} of the story)" if plan.claim else "")),
+                    ("pane", "<new, tiled after the last pane>" if plan.pane == "new" else plan.pane),
+                    ("send", f"cd '{launch.cwd}' && clear; claude {launch.args}")]
+        plan.show = show
+        return plan
+
+    @staticmethod
+    def idle(win, here):
+        """The first idle shell pane of a window that is not the pane this runs in."""
+        for line in tmux("list-panes", "-t", win, "-F", "#{pane_id} #{pane_current_command} #{pane_dead} #{pane_in_mode}").stdout.splitlines():
+            pane, cmd, dead, mode = (line.split() + ["", "", "", ""])[:4]
+            if pane != (here.id if here else "") and dead == "0" and mode == "0" and cmd in SHELLS:
+                return pane
+        return ""
+
+    def split(self, win, cwd):
+        """A new pane after the window's last one, so tiling keeps launch order."""
+        last = self.ask("list-panes", "-t", win, "-F", "#{pane_id}").splitlines()[-1]
+        pane = self.ask("split-window", "-d", "-t", last, "-c", cwd, "-P", "-F", "#{pane_id}")
+        self.ask("select-layout", "-t", win, "tiled")
+        return pane
+
+    def mark(self, win, plan, launch):
+        """Marks a window as the story's tab. The launch stamp comes first, in the same command: the
+        story closer runs at a status-line redraw where no timer runs the tick, and opening a window
+        is one, so it lists the panes within milliseconds and must never see a story tab of bare
+        shells without a stamp. Each pane's top border names its slot, its session and the state
+        the tick sets."""
+        self.ask("set-option", "-w", "-t", win, "@flowkit_born", str(int(time.time())),
+                 ";", "set-option", "-w", "-t", win, plan.key, launch.story,
+                 ";", "set-option", "-w", "-t", win, f"{plan.key}_part", str(plan.part),
+                 ";", "set-option", "-w", "-t", win, "pane-border-status", "top",
+                 ";", "set-option", "-w", "-t", win, "pane-border-format",
+                 " #{pane_index} #{s/^[^a-zA-Z0-9]+//:pane_title}#{?#{@flowkit_state}, · #{?#{==:#{@flowkit_state},waiting},"
+                 "#[reverse] NEEDS YOU #[noreverse],#{@flowkit_state}},} ")
+
+    def open(self, launch, plan, say=None, again=None, dialog=None):
+        """Makes the panes the plan names, then starts the reporter and the session in them, one
+        after the other. A pane made here is the story's from that moment (launched()), before
+        anything is typed into it."""
+        pane, win, reporter, created = plan.pane, plan.win, "", 0
+        if plan.tab:
+            last = max((int(i) for i in self.ask("list-windows", "-t", plan.sess, "-F", "#{window_index}").split() if i.isdigit()),
+                       default=0)
+            win = self.ask("new-window", "-d", "-t", f"{plan.sess}:{last + 1}", "-n", plan.tab, "-c", launch.cwd, "-P", "-F",
+                           "#{window_id}")
+            self.mark(win, plan, launch)
+            pane = self.ask("list-panes", "-t", win, "-F", "#{pane_id}").splitlines()[0]
+            if plan.reporter:
+                reporter, pane = pane, self.split(win, launch.cwd)
+            created = 1
+        elif pane == "new":
+            reporter = self.split(win, launch.cwd) if plan.reporter else ""
+            pane, created = self.split(win, launch.cwd), 1
+        else:
+            if plan.claim:
+                self.mark(plan.claim, plan, launch)
+            reporter = self.split(win, launch.cwd) if plan.reporter else ""
+        for made in ([reporter] if reporter else []) + ([pane] if created else []):
+            launched(self.name, made, launch.story, launch.adhoc)
+        # The reporter's answer comes before the session starts: a session that exits twice still
+        # leaves a caller knowing that a reporter runs.
+        tab = self.ask("display-message", "-p", "-t", pane, "#{window_name}")
+        if reporter:
+            yield self.start(reporter, launch.reporter, launch.reporter_args, tab, launch, 0, say, again, dialog)
+        yield self.start(pane, launch.name, launch.args, tab, launch, created, say, again, dialog)
+
+    def typed(self, pane, args, launch):
+        """The launch, typed into the pane's shell. The stamp in the pane is for a tick of 0.15.0,
+        which reads the launch from there; what an older tick kept of the pane's last session
+        goes with it."""
+        launched(self.name, pane, launch.story, launch.adhoc)
+        self.ask("set-option", "-p", "-t", pane, "@flowkit_born", str(int(time.time())),
+                 ";", "set-option", "-p", "-u", "-t", pane, "@flowkit_parked")
+        self.ask("send-keys", "-t", pane, "C-u")  # anything half-typed would prefix the command
+        self.ask("send-keys", "-t", pane, f"cd '{launch.cwd}' && clear; claude {args}", "Enter")
+
+    def start(self, pane, name, args, tab, launch, created, say, again, dialog):
+        """Types the launch into a pane, then waits up to 15 s until Claude Code lists a session of
+        that name under the pane's shell and Remote Control has printed its link, 30 s more for the
+        link alone. A pane that is a bare shell again within the 15 s with no session of the name
+        listed means claude exited at start-up, so the launch is typed once more into that pane,
+        once `again` let it; a second exit is Refused, the output left in the pane. A pane still
+        running something unlisted at 15 s (a prompt, a slow start) gets the warning, never a
+        second launch; when its screen ends on a dialog the warning and `parked` carry the
+        dialog's first line. A dialog is never answered here: what it asks is the user's to
+        decide. Never types /remote-control: with the flag passed that opens the Remote Control
+        panel, which holds back background-task results while open."""
+        def shown(*more):
+            return tmux("capture-pane", "-p", "-J", *more, "-t", pane).stdout
+
+        shell = self.ask("display-message", "-p", "-t", pane, "#{pane_pid}")
+        link, tried, up, seen, i = None, 1, False, False, 0
+        self.typed(pane, args, launch)
+        while i < STARTING:
+            i += 1
+            time.sleep(1)
+            screen = shown("-S", "-80")
+            try:
+                listed, above = agents(), parents()
+            except (OSError, ValueError, subprocess.SubprocessError):
+                listed, above = [], {}
+            up = up or any(isinstance(a, dict) and a.get("name") == name and a.get("pid")
+                           and str(above.get(a["pid"])) == shell for a in listed)
+            link = LINK.search(screen)
+            if up and (link or not launch.rc):
+                break
+            if up:
+                continue
+            # The shell again, once claude was seen running or from the third second on (right after
+            # Enter the pane can still read as the shell), and the launch no longer on the screen (a
+            # shell slow to start has it typed ahead, unread; `clear` wipes it once it runs).
+            if self.ask("display-message", "-p", "-t", pane, "#{pane_current_command}") not in SHELLS:
+                seen = True
+                continue
+            if not (seen or i >= 3) or f"--name '{name}'" in shown():
+                continue
+            if tried == 2:
+                raise Refused("exited", f"session '{name}' exited twice at start-up in pane {pane}; its output is in the pane")
+            if again:
+                again(name)
+            if say:
+                say(f"warning: session '{name}' exited at start-up in {pane}; typed again")
+            tried, i, seen = 2, 0, False
+            self.typed(pane, args, launch)
+        if up and launch.rc and not link:
+            for _ in range(LINKING):
+                time.sleep(1)
+                link = LINK.search(shown("-S", "-80"))
+                if link:
+                    break
+        parked = ""
+        if not up:
+            parked = dialog(tmux("capture-pane", "-p", "-t", pane).stdout) if dialog else ""
+            if say and parked:
+                say(f"warning: session '{name}' is parked at a start-up prompt in {pane} ({parked}); answer it in the pane")
+            elif say:
+                say(f"warning: no session '{name}' came up in {pane} within 15s; check the pane (a folder trust prompt?)")
+        index = self.ask("display-message", "-p", "-t", pane, "#{pane_index}")
+        return Opened(name=name, place=pane, where=f"pane={index} id={pane} tab={tab}", up=up, created=created, tried=tried,
+                      rc=(link.group(0) if link else "pending") if launch.rc else "off", parked=parked)
 
 
 class Background(Backend):
@@ -459,5 +813,62 @@ class Background(Backend):
         answer.said = (sent.stdout or "") + (sent.stderr or "")
         return answer
 
+    def plan(self, launch, listed=None):
+        """The reporter: one per story, kept between closes. A stopped one is woken by the next
+        ring, so only a story that never had one gets a new one."""
+        try:
+            known = agents("--all")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            known = []
+        first = bool(launch.reporter) and not any(isinstance(a, dict) and a.get("name") == launch.reporter for a in known)
+        return types.SimpleNamespace(reporter="first" if first else "", show=lambda launch: [
+            ("driver", self.name), ("run", f"cd '{launch.cwd}' && claude --bg {launch.args}")])
+
+    def open(self, launch, plan, say=None, again=None, dialog=None):
+        if plan.reporter:
+            yield self.start(launch.reporter, launch.reporter_args, launch, say)
+        yield self.start(launch.name, launch.args, launch, say)
+
+    def start(self, name, args, launch, say):
+        """`claude --bg` hands the session to Claude's background service and prints its id. It
+        refuses at once in a folder never trusted; it never waits at the prompt. Confirmed when
+        Claude Code lists it, which is also when its story is written under its session id; the
+        Remote Control link shows in its log."""
+        done = subprocess.run(["bash", "-c", f"claude --bg {args}"], cwd=launch.cwd, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True)
+        said = done.stdout.rstrip("\n")
+        if done.returncode:
+            raise Refused(*(("untrusted", said) if "not trusted" in said else ("start", f"claude --bg failed:\n{said}")))
+        found = re.search(r"^backgrounded · ([0-9a-f]+)", said, re.M)
+        if not found:
+            raise Refused("start", f"claude --bg printed no session id:\n{said}")
+        short, row = found.group(1), None
+        for _ in range(STARTING):
+            try:
+                row = next((a for a in agents() if isinstance(a, dict) and a.get("id") == short), None)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                row = None
+            if row:
+                break
+            time.sleep(1)
+        if row and row.get("sessionId"):
+            try:
+                register(row["sessionId"], self.name, row["sessionId"], "" if launch.adhoc else launch.story, launch.adhoc,
+                         row.get("pid"))
+            except OSError:
+                pass
+        elif not row and say:
+            say(f"warning: background session '{name}' ({short}) is not listed by claude agents after 15s; "
+                f"check claude logs {short}")
+        link = None
+        for _ in range(LINKING if launch.rc else 0):
+            link = LINK.search(claude("logs", short))
+            if link:
+                break
+            time.sleep(1)
+        return Opened(name=name, place=short, where=f"driver={self.name} id={short}", up=bool(row),
+                      rc=(link.group(0) if link else "pending") if launch.rc else "off")
+
 
 TMUX, BACKGROUND = Tmux(), Background()
+BACKENDS = {TMUX.name: TMUX, BACKGROUND.name: BACKGROUND}  # by the name `driver=` takes in handoff.conf

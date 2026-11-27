@@ -352,7 +352,28 @@ class Parked(Labels):
         self.assertAlmostEqual(self.seen(), self.now, delta=5)
         self.pane_list.pop()
         self.tick()
+        self.assertAlmostEqual(self.seen(), self.now, delta=5, msg="no pane listed at all: tmux did not answer, nothing has gone")
+        self.pane("901", 2, "zsh")
+        self.tick()
         self.assertIsNone(self.seen(), "a pane that is gone keeps no stamp")
+
+    def test_a_dialog_s_stamp_is_kept_beside_what_the_launch_wrote(self):
+        self.window("@1", "")  # the tab has no mark: the launch's record says whose pane it is
+        self.pane("900", 1, "2.1.328")
+        self.b.launched("tmux", "%1", "st")
+        self.b.keep(lambda doc: doc["places"]["tmux %1"].update(born=self.now - 61))
+        self.screens["%1"] = TRUST
+        self.assertIn("⚑ 1 needs you", self.tick()[0], "launched a minute ago, by the file's stamp")
+        self.assertEqual(json.loads(self.file.read_text())["panes"][0]["story"], "st")
+        self.assertEqual(self.b.kept()["places"]["tmux %1"], {"story": "st", "adhoc": False, "born": self.now - 61, "parked": self.seen()})
+        self.screens["%1"] = ""
+        self.tick()
+        self.assertEqual(self.b.kept()["places"]["tmux %1"], {"story": "st", "adhoc": False, "born": self.now - 61},
+                         "the dialog went, the launch's record stays until a session takes it")
+        self.pane_list.pop()
+        self.pane("901", 2, "zsh")
+        self.tick()
+        self.assertEqual(self.b.kept()["places"], {}, "nothing is kept of a pane that is gone")
 
     def test_what_a_tick_before_0_15_0_kept_in_the_pane_still_counts(self):
         self.pane("900", 1, "2.1.328", parked=str(self.now - 61))
@@ -522,6 +543,15 @@ class Closer(Labels):
         self.assertEqual(self.closes(), [])
         for p in self.pane_list:
             p[13] = str(int(time.time() - self.ft.SPAWN_GRACE - 1))
+        self.assertEqual(self.closes(), ["%1", "%2"])
+
+    def test_a_launch_the_file_alone_knows_of_keeps_its_tab_too(self):
+        self.note("# st", "Next: spawned s2")
+        self.shell(1)
+        self.shell(2)
+        self.b.launched("tmux", "%2", "st")
+        self.assertEqual(self.closes(), [], "no stamp in tmux: the launch's record in the file is read")
+        self.b.keep(lambda doc: doc["places"]["tmux %2"].update(born=int(time.time() - self.ft.SPAWN_GRACE - 1)))
         self.assertEqual(self.closes(), ["%1", "%2"])
 
     def test_a_shell_just_reused_in_a_finished_tab_keeps_the_story(self):

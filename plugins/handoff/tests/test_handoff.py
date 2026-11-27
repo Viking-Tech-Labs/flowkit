@@ -501,6 +501,43 @@ class Handoff(unittest.TestCase):
                          "the launch clears the stamp of the pane's last session")
 
     @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+    def test_spawn_writes_what_the_pane_was_opened_for(self):
+        pane, out, _ = self.spawn_in_tmux(exits=0)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        kept = json.loads((self.tmp / "claude" / "flowkit" / "sessions.json").read_text())
+        record = kept["places"][f"tmux {pane}"]
+        self.assertEqual((record["story"], record["adhoc"], kept["sessions"]), ("s2", False, {}))
+        self.assertAlmostEqual(record["born"], time.time(), delta=60)
+
+    def test_a_launch_queued_by_0_15_0_and_one_queued_today_go_to_the_same_place(self):
+        """A queue entry of 0.15.0 or older replays with the tmux server and session by name, one of
+        today with the driver's own word: the same pick, asked of the same server and session."""
+        repo = self.spawn_repo()
+        (self.tmp / "flowkit" / "handoff.conf").write_text("driver=tmux\nreporter=on\n")
+        prompt = self.tmp / "claude" / "spawned" / "st-s2.md"
+        prompt.parent.mkdir()
+        prompt.write_text("hi\n")
+        env = {k: v for k, v in self.env.items() if k not in ("TMUX", "TMUX_PANE")}
+
+        def replay(*where):
+            self.calls.unlink(missing_ok=True)
+            out = subprocess.run([str(SPAWN_BIN), "--dry-run", "--repo", str(repo), "--name", "st-s2", "--story", "st", *where,
+                                  str(prompt)], capture_output=True, text=True, env=env)
+            self.assertEqual((out.returncode, out.stderr), (0, ""))
+            return out.stdout, self.calls.read_text().splitlines()
+
+        old, new = replay("--tmux-socket", "srv", "--tmux-session", "main"), replay("--target", "srv/main")
+        self.assertEqual(old, new)
+        self.assertIn("story:  st (starts st-report in slot 1)\ntab:    new tab st after the last one\n", new[0])
+        self.assertTrue(new[1] and all(call.startswith("tmux -L srv ") for call in new[1]), new[1])
+        self.assertTrue([call for call in new[1] if " list-windows -t main " in call], new[1])
+        none = subprocess.run([str(SPAWN_BIN), "--dry-run", "--repo", str(repo), "--name", "st-s2", str(prompt)],
+                              capture_output=True, text=True, env=env)
+        self.assertEqual((none.returncode, none.stdout), (3, ""), "neither named nor inside tmux")
+        self.assertRegex(none.stderr, r"^not inside tmux; start the session by hand: cd '\S+' && claude --remote-control "
+                         r"--name 'st-s2' \"\$\(cat \S+/st-s2\.md\)\"\n$")
+
+    @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
     def test_spawn_keeps_the_caller_s_plugin_directories_off_the_new_pane_s_path(self):
         """tmux starts a pane a script creates with the script's PATH: a spawn from a session would
         hand that session's plugin bin/ directories, an older release's among them, to the next."""
@@ -659,8 +696,8 @@ class Handoff(unittest.TestCase):
         self.assertRegex(out.stdout, r"^QUEUED #1, ~\d\d:\d\d · id=1 · slots 1/1\n$")
         self.assertEqual(self.capacity_state()[:2], ({}, []), "a queued launch holds nothing")
         entry = json.loads((self.tmp / "claude" / "capacity" / "queue" / "1.json").read_text())
-        self.assertIn("--tmux-socket", entry["argv"])
-        self.assertEqual(entry["argv"][entry["argv"].index("--tmux-session") + 1], "main")
+        self.assertEqual(entry["argv"][entry["argv"].index("--target") + 1], f"{sock}/main")
+        self.assertNotIn("--tmux-socket", entry["argv"])
         self.assertEqual(list((fake).glob("live-*")), [], "nothing launched")
         close = f"## other-s1 · 2026-11-13 15:00\nSession: {sid}\n\nDONE\n- landed\n"
         rec = subprocess.run(["python3", str(HANDOFF), "record", "other"], input=close, capture_output=True, text=True, env=env)

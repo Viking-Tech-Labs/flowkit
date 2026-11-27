@@ -38,12 +38,13 @@ class Case(unittest.TestCase):
         (d / "bin").mkdir()
         self.stub("tmux", f'echo "tmux $*" >> {d}/calls\n[ "$1" = -L ] && shift 2\ncase "$1" in\n'
                           f"list-panes) cat {d}/panes;;\ncapture-pane) cat {d}/screen;;\ndisplay-message) cat {d}/story;;\n"
+                          f"list-windows) cat {d}/windows;;\n"
                           f"list-clients) cat {d}/clients;;\nsend-keys) [ -f {d}/refuse ] && exit 1;;\nesac\nexit 0\n")
         self.stub("ps", f"cat {d}/ps\n")
         self.stub("claude", f'case "$1" in\nagents) echo "claude $*" >> {d}/calls; cat {d}/agents.json;;\n'
                             f'stop) echo "claude $*" >> {d}/calls; [ -f {d}/stopped.json ] && mv {d}/stopped.json {d}/agents.json;;\n'
                             f'*) echo "claude $* (in $(pwd -P))" >> {d}/calls; [ -f {d}/refuse ] && exit 1;;\nesac\nexit 0\n')
-        for name in ("panes", "screen", "story", "clients", "ps"):
+        for name in ("panes", "screen", "story", "clients", "ps", "windows"):
             (d / name).write_text("")
         self.agents([])
         self.env = {"PATH": f"{d / 'bin'}:/usr/bin:/bin"}
@@ -375,7 +376,7 @@ class Both(Case):
     def test_the_two_backends_answer_the_same_requests(self):
         requests = sorted(name for name, value in vars(self.b.Backend).items() if inspect.isfunction(value))
         self.assertEqual(requests, ["available", "bottom", "close", "draft", "escape", "here", "label", "last_input",
-                                    "locate", "parked", "pick", "places", "screen", "story", "type"])
+                                    "locate", "open", "parked", "pick", "places", "plan", "screen", "story", "target", "type"])
         for backend in (self.b.TMUX, self.b.BACKGROUND):
             for name in requests:
                 self.assertEqual(inspect.signature(getattr(backend, name)), inspect.signature(getattr(self.b.Backend(), name)),
@@ -394,9 +395,11 @@ class Both(Case):
             self.assertNotIn("@", inspect.getsource(backend.story), "a session's story is what it registered")
 
     def test_handoff_py_and_the_commands_reach_a_session_only_through_this_file(self):
-        for path in ("scripts/handoff.py", "bin/flowkit-away", "bin/flowkit-tmux"):
+        for path in ("scripts/handoff.py", "bin/flowkit-away", "bin/flowkit-tmux", "bin/flowkit-spawn"):
             found = re.findall(r'\[\s*"(?:tmux|claude)"|(?<![.\w])tmux\(|send-keys|capture-pane|list-panes|list-clients|'
-                               r'show-options|@flowkit_|@cc_hold|"--bg"|"--resume"', (PLUGIN / path).read_text())
+                               r'show-options|@flowkit_|@cc_hold|"--bg"|"--resume"|new-window|split-window|list-windows|'
+                               r'select-layout|list-sessions|display-message|set-option|claude --bg \$',
+                               (PLUGIN / path).read_text())
             self.assertEqual(found, [], path)
 
 
@@ -462,6 +465,176 @@ class State(Case):
         writers = [subprocess.Popen([sys.executable, "-c", code, str(BACKEND), str(self.b.STATE), str(n)]) for n in range(4)]
         self.assertEqual([w.wait() for w in writers], [0] * 4)
         self.assertEqual(len(self.sessions()), 100)
+
+
+class Launching(Case):
+    """Where a launch goes and what it writes before its session runs: what the place was opened
+    for and when, taken over by the session as it registers."""
+
+    def setUp(self):
+        super().setUp()
+        self.t, self.g = self.b.TMUX, self.b.BACKGROUND
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+
+    def asked(self, **more):
+        return self.b.Launch(**{"story": "st", "name": "st-s2", "cwd": "/r", "args": "--name 'st-s2'", "target": "srv/main", **more})
+
+    def record(self, pane="%7"):
+        return self.b.kept()["places"].get(f"tmux {pane}")
+
+    def panes(self, *rows):
+        (self.tmp / "panes").write_text("".join(SEP.join(row) + "\n" for row in rows))
+
+    def test_the_target_is_the_server_and_session_this_runs_in_or_the_one_a_caller_names(self):
+        self.assertEqual(self.g.target(), "", "the background needs none")
+        with self.assertRaises(self.b.Refused) as outside:
+            self.t.target()
+        self.assertEqual((outside.exception.why, str(outside.exception)), ("outside", "not inside tmux"))
+        (self.tmp / "story").write_text("work\n")
+        with mock.patch.dict(os.environ, {"TMUX": "/tmp/tmux-1/default,1,0", "TMUX_PANE": "%7"}):
+            self.assertEqual(self.t.target(), "default/work")
+            self.assertEqual(self.calls(), ["tmux display-message -p -t %7 #{session_name}"])
+            with mock.patch.dict(os.environ, {"FLOWKIT_TARGET": "srv/main"}):
+                self.assertEqual((self.t.target(), self.calls()), ("srv/main", []), "kept by a queued launch or a watch")
+                self.assertIsNone(self.t.here(), "a pane of another server is not here: pane ids repeat")
+                self.t.escape("%3")
+                self.assertEqual(self.calls(), ["tmux -L srv send-keys -t %3 Escape"])
+                with mock.patch.dict(os.environ, {"FLOWKIT_TMUX_SOCKET": "old", "FLOWKIT_TMUX_SESSION": "one"}):
+                    self.assertEqual(self.t.target(), "old/one", "tmux's own names, as a launch of 0.15.0 was queued with")
+        with mock.patch.dict(os.environ, {"FLOWKIT_TMUX_SOCKET": "srv"}), self.assertRaises(self.b.Refused) as nowhere:
+            self.t.target()
+        self.assertEqual((nowhere.exception.why, str(nowhere.exception)), ("nowhere", "no tmux session to launch in on server 'srv'"))
+
+    def test_the_plan_is_an_idle_shell_a_free_slot_or_a_new_tab_of_the_story(self):
+        tabs = "#{@flowkit_story_part} #{window_id} #{window_panes} #{@flowkit_story}"
+        plan = self.t.plan(self.asked(reporter="st-report"), [])
+        self.assertEqual((plan.tab, plan.pane, plan.part, plan.reporter), ("st", "new", 1, "in slot 1"))
+        self.assertEqual(self.calls()[0], f"tmux list-windows -t main -F {tabs}")
+        self.assertEqual(plan.show(self.asked()), [("tab", "new tab st after the last one"), ("pane", "<new, tiled after the last pane>"),
+                                                   ("send", "cd '/r' && clear; claude --name 'st-s2'")])
+        (self.tmp / "windows").write_text("2 @4 3 st\n1 @3 9 st\n1 @9 1 other\n @1 1\n")
+        (self.tmp / "panes").write_text("%4 2.1.328 0 0\n%5 zsh 0 1\n%6 zsh 0 0\n")
+        plan = self.t.plan(self.asked(reporter="st-report"), [{"name": "st-report"}])
+        self.assertEqual((plan.tab, plan.pane, plan.win, plan.reporter), ("", "%6", "@3", ""), "the first idle shell, by part")
+        (self.tmp / "panes").write_text("%4 2.1.328 0 0\n")
+        plan = self.t.plan(self.asked(), [])
+        self.assertEqual((plan.pane, plan.win), ("new", "@4"), "part 1 is full: a slot in part 2")
+        (self.tmp / "windows").write_text("2 @4 9 st\n1 @3 9 st\n")
+        plan = self.t.plan(self.asked(), [])
+        self.assertEqual((plan.tab, plan.pane, plan.part), ("st-3", "new", 3))
+        (self.tmp / "story").write_text("vim\n")
+        with self.assertRaises(self.b.Refused) as busy:
+            self.t.plan(self.asked(place="%9"), [])
+        self.assertEqual((busy.exception.why, str(busy.exception)), ("busy", "pane %9 is running 'vim', not an idle shell"))
+
+    def test_a_session_of_that_name_runs_where_claude_lists_it_or_a_pane_shows_it(self):
+        row = ["900", "%1", "work", "@1", "1", "w", "1", "2.1.328", "", "", "", "", "", "", "✳ st-s2"]
+        self.panes(row, [*row[:1], "%2", *row[2:7], "zsh", *row[8:14], "st-s3"])
+        self.assertEqual(self.b.running(self.t, "st-s2", [{"name": "st-s2"}]), "claude agents")
+        self.assertEqual(self.b.running(self.t, "st-s2", []), "%1", "not listed yet: its pane's title")
+        self.assertEqual(self.b.running(self.t, "st-s3", []), "", "a shell that kept a title runs nothing")
+        with mock.patch.dict(os.environ, {"TMUX_PANE": "%1"}):
+            self.assertEqual(self.b.running(self.t, "st-s2", []), "", "never the pane this runs in")
+        self.assertEqual(self.b.running(self.g, "st-s2", []), "")
+
+    def test_a_launch_writes_what_the_pane_was_opened_for_before_it_types(self):
+        self.t.typed("%7", "--name 'st-s2'", self.asked())
+        record = self.record()
+        self.assertEqual((record["story"], record["adhoc"]), ("st", False))
+        self.assertAlmostEqual(record["born"], time.time(), delta=5)
+        self.assertEqual(self.calls()[-2:], ["tmux send-keys -t %7 C-u",
+                                             "tmux send-keys -t %7 cd '/r' && clear; claude --name 'st-s2' Enter"])
+        self.assertEqual((self.t.story("%7"), self.calls()), ("st", []), "the file answers, tmux is not asked")
+        self.b.keep(lambda doc: doc["places"]["tmux %7"].update(parked=5))
+        self.t.typed("%7", "--name 'look'", self.asked(story="adhoc", adhoc=True))
+        self.assertEqual({k: v for k, v in self.record().items() if k != "born"}, {"story": "", "adhoc": True},
+                         "a one-off has no story, and the dialog seen for the pane's last session is not this one's")
+
+    def test_the_session_takes_the_record_over_as_it_registers(self):
+        self.b.launched("tmux", "%7", "st")
+        born = self.record()["born"]
+        entry = self.b.register(SID, "tmux", "%7", "what-its-tab-says", pid=os.getpid())
+        self.assertEqual((entry["story"], entry["adhoc"], entry["born"]), ("st", False, born))
+        self.assertIsNone(self.record(), "the record is the session's now")
+        self.assertEqual(self.b.register(SID, "tmux", "%7", "st", pid=os.getpid())["born"], born, "a resume keeps its launch stamp")
+        self.b.launched("tmux", "%8", "adhoc", True)
+        entry = self.b.register("one-off", "tmux", "%8", "", pid=os.getpid())
+        self.assertEqual((entry["story"], entry["adhoc"]), ("", True))
+
+    def test_a_launch_whose_session_never_came_up_still_says_whose_pane_it_is(self):
+        self.panes(["900", "%1", "work", "@1", "1", "w", "1", "zsh", "", "", "", "", "", "", "zsh"])
+        self.b.launched("tmux", "%1", "st")
+        pane = self.t.places()[0]
+        self.assertEqual((pane["story"], pane["slug"], pane["title"]), ("st", "st", "zsh"), "its tab has no mark at all")
+        self.assertAlmostEqual(int(pane["born"]), time.time(), delta=5)
+        self.b.launched("tmux", "%1", "adhoc", True)
+        pane = self.t.places()[0]
+        self.assertEqual((pane["story"], pane["slug"]), ("adhoc", ""))
+
+    def test_a_pane_used_again_is_the_new_launchs(self):
+        self.panes(["900", "%7", "work", "@1", "1", "w", "1", "zsh", "old", "old", "", "100", "", "", ""])
+        self.b.register("left", "tmux", "%7", "old", pid=os.getpid())
+        self.b.keep(lambda doc: doc["sessions"]["left"].update(born=200))
+        self.assertEqual(self.t.places()[0]["born"], "200", "the stamp its session took over")
+        self.b.launched("tmux", "%7", "new")
+        pane = self.t.places()[0]
+        self.assertEqual((self.t.story("%7"), pane["story"], pane["slug"]), ("new", "new", "new"))
+        self.assertEqual(int(pane["born"]), self.record()["born"])
+        entry = self.b.register(SID, "tmux", "%7", "old", pid=os.getpid())
+        self.assertEqual((entry["story"], list(self.b.kept()["sessions"])), ("new", [SID]), "the session that left is gone")
+
+    def test_a_tab_an_older_launch_marked_is_read_from_tmux(self):
+        row = ["900", "%1", "work", "@1", "1", "my-story", "2", "zsh", "my-story", "my-story", "", "1700000000", "", ""]
+        self.panes(row)
+        pane = self.t.places()[0]
+        self.assertEqual((pane["story"], pane["slug"], pane["born"]), ("my-story", "my-story", "1700000000"))
+        (self.tmp / "story").write_text(f"my-story{SEP}\n")
+        self.assertEqual(self.t.story("%1"), "my-story")
+        self.b.register(SID, "tmux", "%1", *self.t.marked("%1"), pid=os.getpid())
+        self.assertEqual(self.b.kept()["sessions"][SID]["story"], "my-story", "a session starting there takes the tab's")
+
+    def bg(self, said="backgrounded · abc123", code=0):
+        d = self.tmp
+        self.stub("claude", f'case "$1" in\nagents) cat {d}/agents.json;;\n'
+                            f'--bg) echo "claude $* (in $(pwd -P))" >> {d}/calls; echo "{said}"; exit {code};;\n'
+                            f'logs) echo "connect: https://claude.ai/code/session_AB12 (open)";;\nesac\nexit 0\n')
+
+    def test_a_background_launch_writes_the_story_under_the_session_s_id(self):
+        self.bg()
+        self.agents([{"id": "abc123", "sessionId": SID, "pid": os.getpid(), "kind": "background", "name": "st-s2"}])
+        asked, said = self.asked(cwd=str(self.repo), reporter="st-report"), []
+        plan = self.g.plan(asked, [])
+        self.assertEqual((plan.reporter, plan.show(asked)),
+                         ("first", [("driver", "background"), ("run", f"cd '{self.repo}' && claude --bg --name 'st-s2'")]))
+        asked.reporter_args = "--name 'st-report'"
+        opened = list(self.g.open(asked, plan, said.append))
+        link = "https://claude.ai/code/session_AB12"
+        self.assertEqual([(o.name, o.where, o.up, o.rc, o.tried) for o in opened],
+                         [("st-report", "driver=background id=abc123", True, link, 0),
+                          ("st-s2", "driver=background id=abc123", True, link, 0)])
+        self.assertEqual((said, self.calls()), ([], [f"claude --bg --name st-report (in {self.repo.resolve()})",
+                                                     f"claude --bg --name st-s2 (in {self.repo.resolve()})"]))
+        entry = self.b.kept()["sessions"][SID]
+        self.assertEqual((entry["backend"], entry["place"], entry["story"], entry["adhoc"]), ("background", SID, "st", False))
+        self.assertEqual(self.g.story(self.b.Place(SID, False, None)), "st")
+        self.agents([{"id": "abc123", "name": "st-report"}])
+        self.assertEqual(self.g.plan(asked, []).reporter, "", "a stopped reporter is woken, not started again")
+
+    def test_a_background_launch_that_is_not_listed_or_refused_says_so(self):
+        self.bg()
+        said = []
+        (opened,) = self.g.open(self.asked(cwd=str(self.repo), rc=False), self.g.plan(self.asked(), []), said.append)
+        self.assertEqual((opened.up, opened.rc, self.b.kept()["sessions"]), (False, "off", {}))
+        self.assertEqual(said, ["warning: background session 'st-s2' (abc123) is not listed by claude agents after 15s; "
+                                "check claude logs abc123"])
+        for stub, why, text in ((("workspace not trusted", 1), "untrusted", "workspace not trusted"),
+                                (("boom", 1), "start", "claude --bg failed:\nboom"),
+                                (("started", 0), "start", "claude --bg printed no session id:\nstarted")):
+            self.bg(*stub)
+            with self.assertRaises(self.b.Refused) as refused:
+                list(self.g.open(self.asked(cwd=str(self.repo)), self.g.plan(self.asked(), []), said.append))
+            self.assertEqual((refused.exception.why, str(refused.exception)), (why, text))
 
 
 if __name__ == "__main__":
