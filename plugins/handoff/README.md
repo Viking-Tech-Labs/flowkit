@@ -704,6 +704,12 @@ audit simulator    = xcrun simctl (install|launch)|maestro test   # optional: th
 stop simulator     = /Users/me/bin/stop-simulators                # optional: what stops it once it sat free
 ```
 
+New in 0.13.0, `/handoff:setup` writes a starter file by asking two things: how many chains at
+once, and what the repository you are in has only one of. It runs `flowkit-capacity init --slots
+<n> [--repo <path> --resource '<name>=<what a session does with it>' ...]`, which prints the file
+it wrote and leaves a file that exists exactly as it is; everything past `slots` and the
+`resource` lines is yours to add by hand.
+
 Resource names are machine-wide: two repos that both declare `simulator` share one lease. So are
 `audit` patterns (Python regular expressions, searched in a Bash command) and `stop` commands (a
 second, different one for the same name is refused with one stderr line).

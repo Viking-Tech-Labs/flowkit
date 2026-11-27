@@ -115,6 +115,36 @@ class Capacity(unittest.TestCase):
         self.assertEqual(cfg["repos"], {})
         self.assertEqual(capacity.declared(cfg), set())
 
+    def test_init_writes_a_starter_file_and_leaves_an_existing_one(self):
+        repo = self.tmp / "app"
+        repo.mkdir()
+        for args in (["--slots", "0"], ["--resource", "simulator=install a build"],
+                     ["--repo", str(repo), "--resource", "two words=install a build"],
+                     ["--repo", str(repo), "--resource", "simulator="],
+                     ["--repo", str(repo), "--resource", "simulator=a build # the newest"]):
+            out = self.cli("init", *args)
+            self.assertEqual((out.returncode, out.stdout), (2, ""), args)
+            self.assertTrue(out.stderr.startswith("capacity init: "), out.stderr)
+        self.assertFalse(self.conf.exists(), "an answer that would not read back writes nothing")
+        out = self.cli("init", "--slots", "4", "--repo", str(repo), "--resource",
+                       "simulator=install a build, run a device check", "--resource", "backend = start the local stack")
+        self.assertEqual((out.returncode, out.stderr), (0, ""))
+        self.assertEqual(out.stdout.splitlines()[0], f"capacity.conf: wrote {self.conf}")
+        self.assertEqual(out.stdout.split("\n", 1)[1], self.conf.read_text(), "it prints the file it wrote")
+        cfg = capacity.load_config()
+        self.assertEqual((cfg["slots"], cfg["repos"]), (4, {str(repo): {"resources": {
+            "simulator": "install a build, run a device check", "backend": "start the local stack"}}}))
+        text = self.conf.read_text()
+        out = self.cli("init", "--slots", "9", "--repo", str(repo), "--resource", "emulator=boot it")
+        self.assertEqual((out.returncode, out.stdout.strip()), (0, f"capacity.conf: {self.conf} exists, left as it is"))
+        self.assertEqual(self.conf.read_text(), text)
+
+    def test_init_with_no_answers_writes_the_defaults(self):
+        self.assertEqual(self.cli("init").returncode, 0)
+        self.assertIn("\nslots = 3\n", self.conf.read_text())
+        self.assertEqual(capacity.load_config(), {**capacity.DEFAULTS, "weights": {}, "unmarked": "", "repos": {},
+                                                  "stops": {}})
+
     def test_machine_keys_only(self):
         self.conf.write_text("slots = 5   # more\nslice_minutes = 40\ncoordinator_growth = 250k\n")
         cfg = capacity.load_config(self.conf)

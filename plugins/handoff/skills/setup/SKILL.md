@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, whether a session an API error stopped carries on while the user is away, whether one a usage limit stopped is continued after the reset, whether the user gets reminders of what waits on them while away from the computer, what a chain's last slice leaves behind (the branch, a Draft MR, the MR ready, merged), and whether a helper session reports its verdict back to the session that launched it. Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
+description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, whether a session an API error stopped carries on while the user is away, whether one a usage limit stopped is continued after the reset, whether the user gets reminders of what waits on them while away from the computer, what a chain's last slice leaves behind (the branch, a Draft MR, the MR ready, merged), whether a helper session reports its verdict back to the session that launched it, and a starter capacity file (how many chains at once, what a repository has only one of). Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
 disable-model-invocation: true
 ---
 
@@ -68,6 +68,34 @@ How `/handoff:close spawn` and `/handoff:spawn` start the next session, the `dri
    `'worktree.bgIsolation="none"'`. Nothing chosen: write nothing.
 4. Say what is left to the user: push notifications for sessions that need them are the
    `/config` toggles plus the Claude app signed in on the phone.
+
+## Capacity
+
+`flowkit-spawn` holds every story launch to a number of chains at once, and leases the things a
+repository has only one of (the plugin README's "Capacity"). The numbers live in
+`${XDG_CONFIG_HOME:-~/.config}/flowkit/capacity.conf`; with no file a machine runs 3 chains and
+declares no resources. This part writes a starter file from two answers. The helper is
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/capacity.py"` (`capacity.py` below).
+
+1. If that file exists, say so, name it and change nothing: its lines are the user's. Stop this
+   part.
+2. Ask with AskUserQuestion, both questions in one call. Without the AskUserQuestion tool, write
+   nothing: print the command of step 3 with the defaults, and stop.
+   - How many chains this machine runs at once: 2, 3 (recommended, what it runs with no file) or
+     4; a number of their own through Other.
+   - What this repository has only one of that a session uses (multiSelect): an iOS simulator,
+     an Android emulator, a local backend, nothing; a dev-server port or anything else through
+     Other. Skip this question outside a git repository.
+3. Write it: `capacity.py init --slots <n>`, and for each thing they chose `--repo "$PWD"` once
+   and a `--resource '<name>=<what a session does with it>'` each. The name is one word
+   (`simulator`, `emulator`, `backend`); the text is one line a session reads before it takes
+   the resource, such as `install a build, run a device check, hand over a test` or `start the
+   local stack; release once it is stopped`. Relay what it prints: the file, line by line. It
+   never changes a file that exists.
+4. Say what the file can hold beyond the starter, for the user to add by hand from the README's
+   "Capacity": other repositories' sections, a repo's own `slots`, `checkouts = 1`, an `audit`
+   pattern and a `stop` command per resource, weights per kind of work. And that a slice asks
+   for a resource in its prompt's header, `Needs: simulator`.
 
 ## Closing finished story tabs
 

@@ -177,6 +177,32 @@ def main_checkout(tree):
     return os.path.dirname(os.path.realpath(os.path.join(tree, out.stdout.strip())))
 
 
+def starter(slots, repo, resources):
+    """`init`: the capacity.conf `/handoff:setup` writes from the user's answers, as (exit code,
+    lines to print). A file that exists is left as it is, and an answer that would not read back
+    writes nothing."""
+    path = config_path()
+    if path.exists():
+        return 0, [f"capacity.conf: {path} exists, left as it is"]
+    if slots < 1:
+        return 2, ["capacity init: --slots is a whole number, 1 or more"]
+    lines = ["# flowkit capacity: how many chains this machine runs at once, and what a repo has only one of.",
+             "# Every key: the handoff plugin's README, \"Capacity\".",
+             f"slots = {slots}"]
+    if resources:
+        if not repo:
+            return 2, ["capacity init: --resource needs --repo, the repository that has it"]
+        lines += ["", f"[{main_checkout(repo)}]"]
+        for item in resources:
+            name, _, what = (x.strip() for x in item.partition("="))
+            if not RESOURCE.match(f"resource {name} = x") or not what or "#" in what or "\n" in what:
+                return 2, [f"capacity init: not `<name>=<what a session does with it>`: {item}"]
+            lines.append(f"resource {name} = {what}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+    return 0, [f"capacity.conf: wrote {path}", *lines]
+
+
 def repo_section(cfg, tree):
     """The `[<repo path>]` section tree's main checkout falls under, or None."""
     return cfg["repos"].get(main_checkout(tree))
@@ -2016,8 +2042,17 @@ def main(argv=None):
     p.add_argument("text")
     sub.add_parser("audit", help="the PreToolUse hook: log a resource command from a session without the lease")
     sub.add_parser("idle", help="the minute pass: stop a resource with a `stop` line that sat free for its minutes")
+    p = sub.add_parser("init", help="write a starter capacity.conf, as /handoff:setup does; an existing file is left as it is")
+    p.add_argument("--slots", type=int, default=DEFAULTS["slots"], help="chains at once on this machine")
+    p.add_argument("--repo", help="the repository the resources belong to")
+    p.add_argument("--resource", action="append", default=[], metavar="NAME=WHAT",
+                   help="something the repo has only one of, and what a session does with it")
     args = parser.parse_args(argv)
 
+    if args.cmd == "init":
+        code, lines = starter(args.slots, args.repo, args.resource)
+        print("\n".join(lines), file=sys.stderr if code else sys.stdout)
+        return code
     if args.cmd == "audit":
         try:
             if config_path().exists():
