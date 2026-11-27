@@ -221,6 +221,21 @@ registered nothing: it is read from its tab as before until it starts again, and
 tick kept in a pane is still honoured; both stop with 0.16.0. The file is flowkit's own: read it
 if you like, write it through nothing but a session's start.
 
+New in 0.15.1: a launch writes that file too. Before `flowkit-spawn` types a launch into a pane it
+writes, under the pane, the story the pane was opened for and when the launch was typed; the
+session takes both over as it registers, so the tab words, `autoclose` and the two minutes a
+starting pane is left alone no longer depend on what the tab is marked with. A launch whose
+session never comes up leaves its record, and the pane still counts as the story's; a pane used
+again is the new launch's. A background session's story is written under its session id once
+Claude Code lists it. The tab keeps its mark as its place in the layout (which tab is a story's
+first, second, third: the launch finds a free slot through it), and a pane keeps the stamp a tick
+of 0.15.0 reads. A tab opened by 0.15.0 or older has no record in the file: it is read from its
+mark as before, until 0.16.0. `flowkit-spawn` itself reaches tmux and `claude --bg` only through
+`scripts/backend.py` now; its options, its lines and its exit codes are what they were. A queued
+launch and a watch keep where to launch as one word of the launch driver's own (`--target`,
+`<server>/<session>` for tmux) in place of `--tmux-socket` and `--tmux-session`; both options
+stay, and a launch queued or a watch added by 0.15.0 still starts with them.
+
 `~/.local/bin/flowkit-tick` is a copy with no version in its path, like `flowkit-tmux`,
 `flowkit-away` and `flowkit-usage` beside it: moved forward at every session start once the timer
 or the kit is installed, and finding the plugin's scripts through the newest handoff in
@@ -942,8 +957,8 @@ after the refusals and before anything is typed:
 
 **The queue drains itself.** `capacity.py drain` launches, under the lock and oldest first,
 every queued launch whose slot and needs are free, unless a load hold is set, as a detached
-`flowkit-spawn --from-queue <id>` with the arguments it was queued with (its tmux server and
-session included; output in `capacity/launched/<id>.log`). It runs on every recorded close
+`flowkit-spawn --from-queue <id>` with the arguments it was queued with (where it was to launch
+included, as `--target`; output in `capacity/launched/<id>.log`). It runs on every recorded close
 (`handoff.py record`, which counts the closing session as gone though it is still busy), every
 release, every launch that ends, and the tick (`flowkit-tick`, detached, at
 most every `FLOWKIT_CAPACITY_POLL` seconds, 15 by default). An empty queue costs one directory
