@@ -65,6 +65,12 @@ class Handoff(unittest.TestCase):
     def away(self, *args):
         return subprocess.run(["python3", str(AWAY_BIN), *args], capture_output=True, text=True, env=self.env)
 
+    def mark(self, sid):
+        """Where the hooks keep a session's state, the typed stamp in it."""
+        path = self.tmp / "claude" / "flowkit" / "context" / f"{sid}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
     def gate(self, sid=None):
         data = {"tool_name": "AskUserQuestion", **({"session_id": sid} if sid else {})}
         out = self.handoff("question-gate", stdin=json.dumps(data)).stdout
@@ -833,7 +839,7 @@ class Handoff(unittest.TestCase):
         self.agents([self.asks("demo-coord", "sa"), self.asks("demo-s2", "sb")])
         then = self.nudging_tmux()
         self.set_flag(time.time() - 60, by="coord-b")
-        mark, nudged = self.tmp / "flowkit-context-sa.json", self.tmp / "claude" / "flowkit" / "away-nudged"
+        mark, nudged = self.mark("sa"), self.tmp / "claude" / "flowkit" / "away-nudged"
         mark.write_text(json.dumps({"prompted": True, "typed": time.time() - 60}))
         then.write_text(json.dumps([self.asks("demo-coord", "sa"), self.asks("demo-s2", "sb", "idle")]))
         nudge = lambda: self.handoff("away-nudge").stdout.splitlines()
@@ -858,7 +864,7 @@ class Handoff(unittest.TestCase):
         then = self.nudging_tmux()
         self.usage_answer()
         self.env["FLOWKIT_RETRY_MINUTE"] = "0.2"  # the waiter's minute
-        mark, nudged = self.tmp / "flowkit-context-sb.json", self.tmp / "claude" / "flowkit" / "away-nudged"
+        mark, nudged = self.mark("sb"), self.tmp / "claude" / "flowkit" / "away-nudged"
         self.handoff("away", "--by", "coord-a")
         self.assertFalse(self.escaped(0.6), "not before the flag takes effect")
         mark.write_text(json.dumps({"prompted": True, "typed": time.time()}))
@@ -1098,7 +1104,7 @@ class Handoff(unittest.TestCase):
 
     def test_the_gate_lets_a_session_ask_within_five_minutes_of_a_prompt_the_user_typed(self):
         self.set_flag(time.time() - 60, by="coord-a")
-        mark = self.tmp / "flowkit-context-s1.json"
+        mark = self.mark("s1")
         denied = lambda: (self.gate("s1") or {}).get("permissionDecision") == "deny"
         self.context(10, "Repo: /Users/me/repo   Session: demo-s1\n\nToday: …")
         self.assertTrue(denied(), "a session's first prompt is its launch brief")
@@ -1126,6 +1132,32 @@ class Handoff(unittest.TestCase):
         self.assertFalse(denied(), "an answered question counts too")
         self.flag.unlink()
         self.assertIsNone(self.gate("s2"))
+
+    def test_a_mark_an_older_release_left_in_the_temp_folder_is_read_until_the_session_writes_its_own(self):
+        """Before 0.14.0 the hooks kept a session's state in the temp folder; a session that started
+        then is still answering there."""
+        self.set_flag(time.time() - 60, by="coord-a")
+        old = self.tmp / "flowkit-context-s1.json"  # TMPDIR is the test's folder
+        old.write_text(json.dumps({"prompted": True, "typed": time.time() - 30}))
+        denied = lambda: (self.gate("s1") or {}).get("permissionDecision") == "deny"
+        self.assertFalse(denied(), "typed half a minute ago, as the old mark says")
+        self.context(10, "go with 2")
+        new = json.loads(self.mark("s1").read_text())
+        self.assertTrue(new["prompted"] and time.time() - new["typed"] < 30, "carried over, then stamped here")
+        old.write_text(json.dumps({"prompted": True, "typed": time.time() - 301}))
+        self.assertFalse(denied(), "its own mark counts once it is there")
+        self.mark("s1").write_text("not json")
+        old.write_text("[]")
+        self.assertTrue(denied(), "neither can be read: nobody typed")
+
+    def test_refresh_prunes_the_hook_state_of_sessions_a_month_gone(self):
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp)
+        old = time.time() - 31 * 86400
+        for sid, at in (("gone", old), ("here", None)):
+            self.mark(sid).write_text("{}")
+            os.utime(self.mark(sid), (at, at) if at else None)
+        self.assertEqual(self.handoff("refresh", str(PLUGIN)).stdout, "")
+        self.assertEqual([f.name for f in self.mark("x").parent.iterdir()], ["here.json"])
 
     def test_every_session_hears_the_set_and_the_clear_once(self):
         self.usage_answer()

@@ -63,7 +63,8 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py statusline diff|install <root>      the status line that records context and cost
   handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
   handoff.py refresh <root>                      update an installed status line and tmux kit, prune the
-                                                 prompt copies older than 30 days (SessionStart)
+                                                 prompt copies and the sessions' hook state older than 30
+                                                 days (SessionStart)
 """
 import contextlib
 import difflib
@@ -442,8 +443,28 @@ def away_nudge(wait=False):
 
 def mark_file(sid):
     """A session's hook state: the context steps, whether it had a prompt, when the user last typed
-    to it, the away flag it last heard of."""
-    return Path(tempfile.gettempdir()) / f"flowkit-context-{sid}.json"
+    to it, the away flag it last heard of. Under flowkit/context/, where a hook, the tick and a
+    timer all find it whatever temp folder each was given."""
+    return CLAUDE / "flowkit" / "context" / f"{sid}.json"
+
+
+def mark_read(sid):
+    """What a session's mark holds, {} without one. A session that started before 0.14.0 keeps its
+    mark in the temp folder until it is resumed: read there when this one is missing."""
+    for path in (mark_file(sid), Path(tempfile.gettempdir()) / f"flowkit-context-{sid}.json"):
+        try:
+            seen = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(seen, dict):
+            return seen
+    return {}
+
+
+def mark_write(sid, seen):
+    mark = mark_file(sid)
+    mark.parent.mkdir(parents=True, exist_ok=True)
+    mark.write_text(json.dumps(seen))
 
 
 def typed_by_user(prompt, first):
@@ -457,8 +478,8 @@ def typed_by_user(prompt, first):
 def present(sid):
     """The user typed to this session, or answered its question, in the last PRESENT minutes."""
     try:
-        return time.time() - json.loads(mark_file(sid).read_text()).get("typed", 0) < PRESENT * 60
-    except (OSError, ValueError, AttributeError, TypeError):
+        return time.time() - mark_read(sid).get("typed", 0) < PRESENT * 60
+    except TypeError:
         return False
 
 
@@ -562,14 +583,10 @@ def context_hook():
     if data.get("agent_id") or not SAFE.match(sid):
         return
     prompt = data.get("hook_event_name") == "UserPromptSubmit"
-    mark = mark_file(sid)
-    try:
-        seen = json.loads(mark.read_text())
-    except (OSError, ValueError):
-        seen = {}
+    seen = mark_read(sid)
     told = dict(seen)
     if data.get("hook_event_name") == "PostToolUse":  # an answered question: the user is there
-        mark.write_text(json.dumps({**seen, "typed": time.time()}))
+        mark_write(sid, {**seen, "typed": time.time()})
         return
     if prompt:
         seen.pop("quiet", None)
@@ -596,7 +613,7 @@ def context_hook():
             line = (f"Context ~{pct}%. Repo work: /handoff:close at a stopping point. A hub or coordinator: "
                     "a paste-ready `/compact Keep: …` line under FOR ME.")
     if seen != told:
-        mark.write_text(json.dumps(seen))
+        mark_write(sid, seen)
     if news or line:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit" if prompt else "PostToolBatch",
@@ -2204,6 +2221,17 @@ def tmux_kit(action, root):
     print(f"tmux-kit: installed; a running tmux picks it up with: tmux source-file {home_short(conf)}")
 
 
+def prune_marks():
+    """A session's hook state (`mark_file`) goes PRUNE_DAYS after its last prompt."""
+    cutoff = time.time() - PRUNE_DAYS * 86400
+    try:
+        for f in (CLAUDE / "flowkit" / "context").iterdir():
+            if f.suffix == ".json" and f.stat().st_mtime < cutoff:
+                f.unlink()
+    except OSError:
+        pass
+
+
 def prune_spawned():
     """Drop the copies flowkit-spawn keeps of each prompt from outside the store (and of each
     reporter prompt) once they are PRUNE_DAYS old. A saved prompt stays: a story file's launch
@@ -2223,9 +2251,10 @@ def prune_spawned():
 
 def refresh(root):
     """Keep an installed status line and tmux kit at the plugin's version, and prune the old prompt
-    copies. The kit only goes forward: a session on an older plugin leaves a newer kit alone. Its
-    output reaches context, so it says nothing unless something went."""
+    copies and hook state. The kit only goes forward: a session on an older plugin leaves a newer
+    kit alone. Its output reaches context, so it says nothing unless something went."""
     prune_spawned()
+    prune_marks()
     source = Path(root) / "scripts" / "statusline.py"
     try:
         if STATUSLINE.is_file() and STATUSLINE.read_bytes() != source.read_bytes():
