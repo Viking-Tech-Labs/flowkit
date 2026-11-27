@@ -1005,7 +1005,7 @@ esac
         self.assertEqual(nudge(), ["nudged demo-coord (tmux %7)"], "five minutes after the last prompt typed to it")
         self.assertEqual(nudged.read_text(), self.flag.read_text())
         self.assertEqual(nudge(), [], "once per flag")
-        self.set_flag(time.time() - 120, by="coord-b")
+        self.set_flag(time.time() - 180, by="coord-b")  # two minutes from the first flag: never its stamp again
         (self.tmp / "agents.json").write_text("{")
         self.assertEqual(nudge(), ["cannot read `claude agents --json`: no session nudged"],
                          "who is present is unknown: the nudge of everybody, as it was")

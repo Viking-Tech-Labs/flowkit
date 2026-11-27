@@ -632,6 +632,7 @@ class Launches(Watch):
         self.until(lambda: f"\n## {name} · " in self.story(), f"the section of {name}", 30)
         self.until(lambda: (self.arm(name) or {"state": ""})["state"] != "closing"
                    and ((self.arm(name) or {}).get("fix") or {"state": ""})["state"] != "launching", f"the end of {name}'s wrapper", 30)
+        self.until(lambda: self.arm(name) is not None or self.ops(name)[-1:] == ["done"], f"{name}'s done, logged after its file goes", 30)
         return self.story().split(f"\n## {name} · ")[-1].split("\n## ")[0].rstrip("\n").splitlines()
 
     def fix_closes(self, tree, at):
