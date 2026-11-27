@@ -1,0 +1,35 @@
+name: Idea
+description: Something flowkit could do, or do differently.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This repository is public, and so is this issue the moment you post it.** Leave out
+        employer, client and colleague names, tracker accounts, machine paths and credentials,
+        and cut logs down to the lines that matter. Use placeholders such as `gitlab.com/g/p` and
+        `/Users/me/repo`.
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do by hand today
+      description: The step you repeat, or the thing that goes wrong, in your own flow.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like instead
+    validations:
+      required: true
+  - type: input
+    id: plugin
+    attributes:
+      label: Plugin it belongs to, if you know
+  - type: checkboxes
+    id: public
+    attributes:
+      label: Public repository
+      options:
+        - label: No employer or client names, no raw logs or paths.
+          required: true

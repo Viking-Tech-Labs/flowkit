@@ -1,0 +1,42 @@
+name: Bug
+description: Something in a flowkit plugin does not work as its README or skill says.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This repository is public, and so is this issue the moment you post it.** Leave out
+        employer, client and colleague names, tracker accounts, machine paths and credentials,
+        and cut logs down to the lines that matter. Use placeholders such as `gitlab.com/g/p` and
+        `/Users/me/repo`.
+  - type: input
+    id: plugin
+    attributes:
+      label: Plugin and version
+      description: From `claude plugin list`, e.g. `handoff 0.11.0`.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest steps that show it, with placeholder names and paths.
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Claude Code version (`claude --version`), tmux or background sessions.
+  - type: checkboxes
+    id: public
+    attributes:
+      label: Public repository
+      options:
+        - label: No employer or client names, no raw logs or paths.
+          required: true
