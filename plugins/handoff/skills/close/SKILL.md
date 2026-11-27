@@ -181,6 +181,11 @@ other session still uses them, and ends with what is ready for the user to try i
         DONE gets one line: the session's name, `claude attach <name>` to open it, its Remote
         Control link. A `REPORTER driver=background` line before it means the story's reporter
         was started too. Step 10 writes `Next: started <name>`.
+      - `SPAWNED driver=<name> id=<id> … rc=<url|pending> … try=<1|2>`, with any other name:
+        started through an outside driver (`docs/drivers.md`). DONE gets one line: the
+        session's name, the driver and the id, which is the place in that driver's own words,
+        and its Remote Control link; `try=2` and `parked=<line>` mean what they mean for a pane,
+        the place standing in for the pane. Step 10 writes `Next: started <name>`.
       - exit 11, `QUEUED #<n>, ~<HH:MM> · id=<id> · <why>`: the capacity gate queued the
         launch (the machine's slots are all used by other chains, or a resource in its `Needs:`
         is held); it starts by itself when a slot or the resource frees, and this close's own

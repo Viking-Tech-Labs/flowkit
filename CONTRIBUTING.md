@@ -32,6 +32,28 @@ The full run takes several minutes; a few `handoff` tests time things, so
 run it on a quiet machine and run a single failure again before blaming the code. The `tests`
 workflow runs the same script on macOS and Linux for every branch push and pull request.
 
+## Writing a driver
+
+The `handoff` plugin starts sessions in tmux or in Claude Code's background service, and through
+any executable named `flowkit-driver-<name>` for everything else (another multiplexer, a terminal
+with a remote-control command). [`docs/drivers.md`](docs/drivers.md) is the contract: three
+required requests (`open`, `list`, `type`), four optional ones (`screen`, `label`, `close`,
+`pick`), and what flowkit does without each. It is experimental until a driver from outside this
+repository passes.
+
+- Start from `plugins/handoff/bin/flowkit-driver-screen`, the reference driver for GNU screen: copy
+  it to `~/.local/bin/flowkit-driver-<name>` and replace the `screen` calls.
+- Try it with `plugins/handoff/bin/flowkit-driver test <name>`: it asks every request with a
+  harmless program in place of claude and exits non-zero when a required one fails. Then set
+  `driver=<name>` in `~/.config/flowkit/handoff.conf` and launch one session with
+  `flowkit-spawn --dry-run` first.
+- A driver lives with its author: this repository ships the reference alone. What is welcome here
+  is what your driver could not do with the requests as they are: an issue, with the request and
+  what your program offers in its place.
+- A change to the requests themselves touches `plugins/handoff/scripts/backend.py` (the class
+  `Driver`), `docs/drivers.md`, `flowkit-driver` and the tests in
+  `plugins/handoff/tests/test_backend.py` (`OutsideDriver`) and `test_driver.py`, together.
+
 ## How a release is made
 
 An update reaches users only when a plugin's `version` changes. A maintainer releases with:

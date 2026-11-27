@@ -29,7 +29,8 @@ session should do, passed into its prompt as written.
 
 `/handoff:close spawn` saves the next prompt and starts that session through `flowkit-spawn`
 (`bin/`, on the PATH of Claude's Bash tool), with Remote Control on so you can follow it from
-your phone. Two drivers, set once with `/handoff:setup`. The tmux driver:
+your phone. Two drivers are built in and set once with `/handoff:setup`; a third kind is an
+executable of your own (see "An outside driver" below). The tmux driver:
 
 - each story gets its own tab, named after the story; its sessions are tiled in launch order, up
   to 9, then a second tab `<story>-2`;
@@ -50,7 +51,7 @@ your phone. Two drivers, set once with `/handoff:setup`. The tmux driver:
   else in a pane split after the last one of the session's window (slot 2 of a one-pane window
   handed over with `--pane`). Each close's record says `reporter: rung`, `waiting` or `none`.
 
-Both drivers first honour a **launch hold**: while `~/.claude/load-hold` exists, `flowkit-spawn`
+Every driver first honours a **launch hold**: while `~/.claude/load-hold` exists, `flowkit-spawn`
 waits before anything else, checking every 30 seconds, and launches once the file is gone. Any
 guard of your own can write it (a memory watchdog, say): two lines, an ISO time (`2026-11-13T16:30:00+01:00`)
 then the reason. The launch says once, on stderr and as `> held <name> · <time> · <reason>` in the
@@ -92,12 +93,34 @@ folder"):
 - `claude --bg` does not pass on your shell's environment; the next session gets
   `XDG_CONFIG_HOME` from the one that started it, so both read the same settings.
 
+An outside driver (`driver=<name>`, new in 0.16.0 and experimental) starts the session through an
+executable of your own, `flowkit-driver-<name>`, for another multiplexer or terminal than tmux:
+
+- the executable answers three requests (open a place for a story's session, list its places, type
+  into one) and up to four more (show a place's screen, label it, close it, turn your terminal to
+  it); [`docs/drivers.md`](../../docs/drivers.md) has them, and what flowkit does without each
+  optional one;
+- everything above that is flowkit's and the same as with tmux: the refusals, the reporter, the
+  wait until `claude agents` lists the session, one more try when claude exits at start-up (a place
+  is opened once more; exit 10 at the second exit), the story file, the gate. The launch's line is
+  `SPAWNED driver=<name> id=<the place, in the driver's words> …`;
+- the sessions in the driver's places are then the ones a close rings, the tick labels, continues
+  after an API error or a usage limit and, with `autoclose=on`, closes; the tmux kit is not used;
+- `flowkit-driver test <name>` tries a driver with a harmless program in place of claude and says,
+  request by request, what passed, what failed and what the driver leaves out;
+- `flowkit-driver-screen` ships as the reference: `driver=screen` runs each session in a GNU screen
+  session of its own (`screen -ls` lists them, `screen -r <id>` opens one). The screen macOS ships
+  cannot show flowkit a window's text faithfully, so that driver leaves the screen out: a launch's
+  line says `rc=pending` and a line is typed without a look at the prompt box;
+- a name with no executable ends a launch with exit 7 and the file it looked for. `/handoff:setup`
+  offers the two built-in drivers; write this line into the file yourself.
+
 The settings are plain `key=value` lines in `~/.config/flowkit/handoff.conf`, outside the plugin
 so an update or an uninstall keeps them, and readable by the scripts that run outside Claude:
 
 | Key | Default | Means |
 |---|---|---|
-| `driver` | `tmux` | How the next session starts: `tmux` (a tab per story) or `background` (`claude --bg`). |
+| `driver` | `tmux` | How the next session starts: `tmux` (a tab per story), `background` (`claude --bg`), or the name of an outside driver, an executable `flowkit-driver-<name>` (`screen` ships with the plugin; [`docs/drivers.md`](../../docs/drivers.md)). |
 | `reporter` | `off` | `on` starts a `<story>-report` session whenever a story's launch finds none running (in the background with that driver): it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done; the story's `Chain end:` line is the yardstick of its LEFT and of the report's first line. Each close rings it: `handoff.py record` types `closed <session>` into its pane, or wakes the background one with it. |
 | `permission_mode` | empty | The `--permission-mode` of spawned sessions; empty keeps your default. A chain that runs while you are away needs a mode that does not stop to ask. |
 | `autoclose` | `off` | `on` lets the tick close a finished story's tab on its own (see "The tmux kit"). `/handoff:setup` offers it. |

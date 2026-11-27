@@ -57,6 +57,8 @@ file:
    with `try=2` (claude exited at start-up once, stderr said `warning: session '<name>' exited at
    start-up in <pane>; typed again`, and the second launch came up) add "launched at the second
    try". `SPAWNED driver=background …` gives its id and link, and `claude attach <name>` opens it.
+   `SPAWNED driver=<another name> id=<id> …` is a launch through an outside driver
+   (`docs/drivers.md`): the id is the place in that driver's own words.
    `parked=<line>` at the line's end means the pane sits at the start-up prompt that begins with
    that line: tell the user the prompt, the tab and the slot; it is theirs to answer, never yours.
    A `warning: no session … came up` means it most likely waits at a folder-trust prompt: tell the

@@ -53,6 +53,10 @@ How `/handoff:close spawn` and `/handoff:spawn` start the next session, the `dri
   reporter is woken again by the next close. A folder never opened in Claude refuses a launch
   until the user runs `claude` there once and accepts the trust prompt.
 
+A `spawn-driver` that is neither is an outside driver the user set by hand (an executable
+`flowkit-driver-<name>`, `docs/drivers.md` in the flowkit repository): say which one it is and
+leave this part alone, unless the user asks to go back to one of the two.
+
 1. Ask with AskUserQuestion which driver, the current one marked; recommend `tmux` when `$TMUX`
    is set, else `background`. Without the AskUserQuestion tool, change nothing: print the current
    driver and the command below, and stop.
