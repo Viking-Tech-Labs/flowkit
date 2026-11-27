@@ -21,7 +21,7 @@ Then tell the user, plainly and in this order:
   is in effect, and the session takes the recommended option, marked "(auto)" for them to review.
   A session they typed to (or whose question they answered) in the last five minutes may still
   ask, so a conversation in progress is not cut off. At that time the sessions already sitting on
-  a question are told the same, once (the tmux status bar's tick runs it); one waiting on a
+  a question are told the same, once (by a process the flag starts, in tmux or not); one waiting on a
   permission prompt, or on a question outside tmux, still waits for them (answer it from the
   phone), since nothing here approves on their behalf. Every session hears of the flag, who set it
   and when, at its next turn.

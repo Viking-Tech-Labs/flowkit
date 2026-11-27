@@ -51,7 +51,10 @@ Before you leave a chain running, type `/handoff:away` (or close the last slice 
 with `/handoff:close overnight spawn`). It takes effect five minutes later, after a last call to
 any idle coordinator: from then on no session asks you anything; each takes the recommended option
 and marks it "(auto)". It also prints how much of your plan's usage is left. The computer is kept
-awake, but a closed laptop lid still puts it to sleep and pauses the chain. Optional switches in
+awake, but a closed laptop lid still puts it to sleep and pauses the chain. What goes on between
+prompts (the queue of waiting launches, the watches, the reminders) is one pass every 15 seconds:
+on macOS `/handoff:setup` installs a timer for it, so it runs with tmux detached or without tmux;
+elsewhere the tmux kit's status bar runs it, while a tmux client is attached. Optional switches in
 `/handoff:setup`: `autoretry=on` carries on after an API error, `limitresume` (on by default)
 continues a session a usage limit stopped once the limit resets, `remind=on` pushes what waits on
 you, `idle_release=on` (macOS) clears a forgotten away flag at your first prompt back at the

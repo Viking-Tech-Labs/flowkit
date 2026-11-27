@@ -16,8 +16,9 @@ The helper is `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py"` (`handoff.py`
    launch settings".
 2. Show the user what it printed, and the kit itself: read
    `${CLAUDE_PLUGIN_ROOT}/tmux/tmux.conf` and show it whole. Say in plain words what changes:
-   - three files are copied: the kit conf to `~/.config/flowkit/tmux.conf`, its cheat sheet next
-     to it, and the `flowkit-tmux` helper to `~/.local/bin/` (a stable path, because the
+   - the files it lists are copied: the kit conf to `~/.config/flowkit/tmux.conf`, its cheat sheet
+     next to it, and the helpers to `~/.local/bin/` (`flowkit-tick` for the status bar,
+     `flowkit-tmux` for the keys, `flowkit-away`, `flowkit-usage`; a stable path, because the
      plugin's own directory moves with every version). They are kept at the plugin's version at
      every session start, so changes of their own go in the user's tmux.conf, below the line;
    - one line, `source-file ~/.config/flowkit/tmux.conf`, is appended to their tmux.conf, with
@@ -33,7 +34,12 @@ The helper is `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py"` (`handoff.py`
    tmux picks the kit up with the `tmux source-file` command it prints, which the user runs (it
    reloads every client of their tmux). On a no, write nothing.
 
-To undo it, the user deletes the `source-file` line (or restores the backup).
+The count in the status bar and the words on the tabs come from the tick (the plugin README's "The
+tick"). Without a timer the status bar runs it, so it stops while no tmux client is attached; on
+macOS `/handoff:setup` offers the timer that keeps it going. Say so once.
+
+To undo it, the user deletes the `source-file` line (or restores the backup); `/handoff:setup
+remove` takes the kit, the helpers and the timer away in one go.
 
 ## The launch settings
 

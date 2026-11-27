@@ -17,7 +17,7 @@ called `handoff` keeps working beside this one.
 | `/handoff:awake` | Marks you out but reachable from a phone (`~/.claude/awake`, for 12 hours or until `/handoff:back`): the computer is kept awake between turns as while away, and sessions still ask you. It clears an away flag. |
 | `/handoff:back` | Clears both flags, so sessions ask you again, and lists the sessions waiting on you right now. |
 | `/handoff:spawn [single] <prompt>` | Starts any session with a prompt the way a close's `spawn` does: in its story's tab, or with `single` as a one-off in a shared `adhoc` tab ("open a fresh session in that repo"); with `report_to=on` the new session reports its verdict back here (below). |
-| `/handoff:setup` | Offers the status line below, as a diff of your settings, and writes it only on your yes; asks which launch driver spawned sessions use, and for background sessions offers two settings of yours; offers the `handoff.conf` keys below (tabs closing on their own, continuing after an API error, clearing away at the keyboard, where a chain ends, a helper reporting back). |
+| `/handoff:setup` | Offers the status line below, as a diff of your settings, and writes it only on your yes; asks which launch driver spawned sessions use, and for background sessions offers two settings of yours; offers the `handoff.conf` keys below (tabs closing on their own, continuing after an API error, clearing away at the keyboard, where a chain ends, a helper reporting back); on macOS offers the timer that runs the tick (see "The tick"). `/handoff:setup remove` takes away what the setups installed. |
 | `/handoff:setup-tmux` | Offers the tmux kit below and the one line that loads it from your tmux.conf, and writes only on your yes; explains the launch settings. |
 
 Modes, combined freely: `quick` skips the docs sweep; `prompt-only` prints only the next prompt
@@ -100,11 +100,11 @@ so an update or an uninstall keeps them, and readable by the scripts that run ou
 | `driver` | `tmux` | How the next session starts: `tmux` (a tab per story) or `background` (`claude --bg`). |
 | `reporter` | `off` | `on` starts a `<story>-report` session whenever a story's launch finds none running (in the background with that driver): it collects the story's closes and writes one final report, with one merged FOR ME list, when the story is done; the story's `Chain end:` line is the yardstick of its LEFT and of the report's first line. Each close rings it: `handoff.py record` types `closed <session>` into its pane, or wakes the background one with it. |
 | `permission_mode` | empty | The `--permission-mode` of spawned sessions; empty keeps your default. A chain that runs while you are away needs a mode that does not stop to ask. |
-| `autoclose` | `off` | `on` lets the tmux kit's status-bar tick close a finished story's tab on its own (see "The tmux kit"). `/handoff:setup` offers it. |
+| `autoclose` | `off` | `on` lets the tick close a finished story's tab on its own (see "The tmux kit"). `/handoff:setup` offers it. |
 | `autoretry` | `off` | `on` lets a session an API error stopped carry on by itself while you are away (see "API errors"). `/handoff:setup` offers it. |
 | `limitresume` | `on` | `off` leaves a session that a usage limit stopped where it is; by default it is continued after the limit resets (see "Usage limits"). |
 | `chrome` | empty | `on` never passes `--no-chrome` to a spawned session. Empty passes it only while Claude Code's Chrome question has never been answered on this machine (see "Start-up prompts"). |
-| `remind` | `off` | `on` lets the tmux kit's tick push what waits on you while you are neither away nor at the computer (see "Reminders"). `/handoff:setup` offers it. |
+| `remind` | `off` | `on` lets the tick push what waits on you while you are neither away nor at the computer (see "Reminders"). `/handoff:setup` offers it. |
 | `notify` | empty | A shell command that gets a reminder's line on its stdin when no reporter could push it (see "Reminders"); empty falls back to a macOS notification. |
 | `chain_end` | `mr-ready` | What a story's chain ends with, proposed when its first prompt is drafted (see "Where a chain ends"): `branch`, `draft-mr`, `mr-ready` or `merge`. `/handoff:setup` offers it. |
 | `report_to` | `off` | `on` writes `Report-to: <the launching session>` into the brief of a helper (`/handoff:spawn` with a prompt, or a close's review or investigation beside the chain), so its close sends the verdict back (see "A helper reports back"); a name sends every helper's verdict to that session. `/handoff:setup` offers it. |
@@ -120,9 +120,9 @@ they are.
 and adds: mouse on, tabs and panes counted from 1, **⚑ n need you** in the status bar with ⚑n on
 each tab that has sessions waiting on you, a one-word state after each story or adhoc tab's
 name (`3:my-story · running`), `prefix a` to list every Claude session and jump to one, and `prefix H` for the one-page cheat sheet (`tmux/cheatsheet.md`). The conf calls the
-helper at `~/.local/bin/flowkit-tmux`, a copy kept at the plugin's version by a session-start
+helpers in `~/.local/bin/` (`flowkit-tick` for the status bar, `flowkit-tmux` for the keys), copies kept at the plugin's version by a session-start
 hook, because the plugin's own directory moves with every version; the hook does nothing until
-you install the kit. Since 0.8.1 the copy only goes forward (a session on an older plugin leaves a newer kit alone; `~/.config/flowkit/kit-version` names the version it came from) and finds the plugin's scripts through the newest handoff in `installed_plugins.json`; `~/.local/scripts/capacity.py` does the same for a 0.8.0 tick, whose drain looked there. The tick answers from a 10-second cache, since tmux reruns a `#()` job at
+you install the kit or the timer. Since 0.8.1 the copy only goes forward (a session on an older plugin leaves a newer kit alone; `~/.config/flowkit/kit-version` names the version it came from) and finds the plugin's scripts through the newest handoff in `installed_plugins.json`; `~/.local/scripts/capacity.py` does the same for a 0.8.0 tick, whose drain looked there. The status bar prints the line the tick kept (see "The tick"), since tmux reruns a `#()` job at
 every redraw that falls in a new second, not every 15 seconds. Put your own changes below the `source-file` line: a setting there wins.
 Sessions started in the background have no pane and are not counted; `prefix a` lists them.
 
@@ -162,6 +162,63 @@ or one with `coord` at the start or after a `-`), a session in the adhoc tab or 
 story mark, a held tab, or a session that is busy, waits on you, is in error or whose transcript
 moved in the last 5 minutes. `flowkit-tmux closable` is a dry run: it prints the panes the tick
 would close and closes nothing.
+
+## The tick
+
+Some of the plugin's work happens while nobody types, in a pass every 15 seconds that
+
+- drains the capacity queue and stops a resource left free ("Capacity");
+- starts again a watch poller or a usage-limit waiter whose process went ("Watches", "Usage
+  limits");
+- brings Remote Control back after the account of a login changed ("Two logins on one config
+  folder");
+- sends the reminders, with `remind=on` ("Reminders");
+- in tmux, marks the panes and tabs and, with `autoclose=on`, closes what is finished ("The tmux
+  kit").
+
+That pass is `flowkit-tick`, and each job in it runs on its own: one that fails, or whose program
+is not installed, stops no other. Two things can run it:
+
+- **A timer, on macOS**, new in 0.14.0. `/handoff:setup` offers it: a LaunchAgent,
+  `~/Library/LaunchAgents/flowkit.tick.plist`, that runs `~/.local/bin/flowkit-tick --timer` every
+  15 seconds from login on, with tmux attached, detached or not installed at all, so a chain on
+  the `background` driver gets its queue drained and its reminders too. launchd starts a job with
+  almost no environment, so the setup writes yours into the file: the `PATH` it ran with (your
+  `claude`, `tmux` and code host's command are found through it) and `CLAUDE_CONFIG_DIR`,
+  `XDG_CONFIG_HOME` and `LANG` where your shell sets them. The timer ticks the one config folder
+  the setup ran in; run the setup again after you change any of those and it shows the difference.
+  Two limits of a job launchd starts. It has none of your shell's other variables: a token your
+  code host's command reads from the environment has to be in that command's own config. And it
+  is not your terminal: macOS may ask once, for `python3`, before the tick's work reads a
+  repository under Desktop, Documents or Downloads.
+- **The tmux status bar, anywhere.** Where no timed pass ran in the last minute (Linux, or macOS
+  without the timer), the kit's status-bar job runs the pass itself, at most every 10 seconds, as
+  it did before 0.14.0. It stops while no tmux client is attached.
+
+With a timer the status bar only prints the line the last pass kept. `flowkit-tick status` says
+who keeps the tick, when its last pass ran and what failed in it, and exits 1 when none ran in the
+last minute.
+
+The tick's lock and what it keeps are `~/.claude/flowkit/tick.lock` and `tick.json`, and the hooks
+keep each session's state (the context steps it was told, when you last typed to it) in
+`~/.claude/flowkit/context/<session id>.json`, dropped 30 days after its last prompt. Before
+0.14.0 all of these were in the temp folder, which a timer and a terminal do not always share.
+What an older version left there is ignored, except that a session started before the update is
+still read from there until it is resumed. A tmux.conf the kit wrote before 0.14.0 runs
+`flowkit-tmux waiting` in its status bar, which hands over to `flowkit-tick bar`: its line and its
+tick go on, and it needs no change.
+
+`~/.local/bin/flowkit-tick` is a copy with no version in its path, like `flowkit-tmux`,
+`flowkit-away` and `flowkit-usage` beside it: moved forward at every session start once the timer
+or the kit is installed, and finding the plugin's scripts through the newest handoff in
+`installed_plugins.json`.
+
+**Taking it away.** `/handoff:setup remove` (`handoff.py setup remove`; `--dry-run` shows it
+first) unloads and deletes the timer and deletes the four commands in `~/.local/bin`, the kit's
+files in `~/.config/flowkit/` and the `source-file` line in your tmux.conf (a backup beside it).
+Your settings stay: `handoff.conf`, `capacity.conf`, a ladder, the status line. Do it before you
+uninstall the plugin: a timer left behind runs a tick that finds no plugin. The timer alone, by
+hand: `launchctl bootout gui/$(id -u)/flowkit.tick; rm ~/Library/LaunchAgents/flowkit.tick.plist`.
 
 ## Being away
 
@@ -372,7 +429,7 @@ On by default, whether you are away or not: the hook starts one waiter per sessi
   outside tmux, where nothing can be typed: `> limit <session> · <time> · not continued: …`. The
   tab keeps its `limit` word until you prompt the session.
 
-The tmux kit's tick starts a waiter again when its process died, at most once a minute. A session
+The tick starts a waiter again when its process died, at most once a minute. A session
 without Remote Control is left to Claude Code's own wait when your settings turn that on
 (`autoContinueAtUsageLimit: true`) and the reset is less than 24 hours away.
 
@@ -402,7 +459,7 @@ link back yourself.
   (`account`), so one login never answers for the other, nor for the account before a `/login`.
 - A usage-limit record keeps the login its session stopped on: `config` (its `CLAUDE_CONFIG_DIR`,
   `null` when it had none) and `account`. Its waiter asks for usage as that login, also when the
-  tick started it from the tmux server's environment, and refuses a reading that names another
+  tick started it from the tmux server's environment or the timer's, and refuses a reading that names another
   account.
 - **An account change counts as a reset.** A `/login` moves every session of that login to the
   new account. A waiter notices when the ids in its record's account file change and the session
@@ -455,7 +512,7 @@ every report carries. A prompt that shows no such hints is not recognised.
   line>); answer it in the pane` instead of the plain warning, `parked=<first line>` at the end of
   the `SPAWNED` line, and `> parked <name> · <time> · <first line>` in the story file. The close
   that launched it puts the prompt, the tab and the slot under FOR ME.
-- The tmux kit's tick: a pane that runs claude with no session listed for it, its screen ending
+- The tick, in tmux: a pane that runs claude with no session listed for it, its screen ending
   on a dialog for a minute (since `flowkit-spawn` typed the launch, or since the tick first saw
   the dialog), is marked like a session that waits on you: `NEEDS YOU` on the pane's border, the
   tab's `needs you`, a count in **⚑ n need you**, and a row in `prefix a` with the dialog's first
@@ -464,7 +521,7 @@ every report carries. A prompt that shows no such hints is not recognised.
 - `~/.claude/flowkit/parked.json` lists those panes while they wait: `at` (when the tick last
   wrote it) and `panes`, each with `pane`, `tab`, `index`, `story` (empty outside a story tab),
   `line` and `since`. The tick writes it again at every run and removes it with the last pane; a
-  file older than 5 minutes is a tick that stopped (no tmux client attached) and is read as
+  file older than 5 minutes is a tick that stopped (no timer, no tmux client attached) and is read as
   empty. The [`board`](../board/README.md) turns the story's card to NEEDS YOU from it.
 
 **What is prevented.** One prompt can be skipped without deciding anything for you. Until you
@@ -491,7 +548,7 @@ Claude Code pushes to your phone when a session waits on you, but some things th
 it cannot see: a pane parked at a start-up prompt has no session yet, a session a usage limit
 stopped that flowkit cannot continue (outside tmux, or three continues that ended on the limit
 again) looks idle, and a test-queue item turning ready is a line in a file. With `remind=on` the
-tmux kit's tick runs `handoff.py remind` at most once a minute, which
+tick runs `handoff.py remind` at most once a minute, which
 
 - stays silent while you are away (the flag in effect, "Being away": you asked for silence) and
   while you are at the computer: keyboard or mouse input in the last 10 minutes (macOS's HID idle
@@ -797,7 +854,7 @@ read high until the chains started that way reach their next slice.
 | `flowkit-capacity release [names]` | Gives back what this session holds, all of it without names. |
 | `flowkit-capacity hold simulator --for me --minutes 60` | Your test hold: no slice takes it until the minutes run out or `release --for me`; run it again to renew. |
 | `flowkit-capacity drain` | Launches what the queue holds that can start now (it also runs on its own, see below). |
-| `flowkit-capacity idle` | The minute pass: stops a resource with a `stop` line that sat free for its minutes (the tmux tick runs it, see "A free resource is stopped"). |
+| `flowkit-capacity idle` | The minute pass: stops a resource with a `stop` line that sat free for its minutes (the tick runs it, see "A free resource is stopped"). |
 | `flowkit-capacity waves a=/Users/me/app:2:simulator b=/Users/me/lib [--story s --write]` | Plans a batch (`NAME=TREE[:SLICES[:NEEDS[:KIND]]]`, needs joined by `+`, in launch order; `b=/Users/me/lib:1::review` names a kind and no need): each item's wave, start and ready times, and one plan line. See "Waves" below. |
 | `flowkit-capacity testq <story> [set\|drop <item>] [--state …] [--eta HH:MM] [--mr …] [--device …] [--gate …] [--launch name]` | The story's test queue, `<story>.tests.md`, one line at a time under the lock, each change logged as `test`. The file goes once its last line does. `--gate` sets what the item waits for before it merges ("The test queue's fields" below). `--launch` ties a line to a queued launch: its drain sets it `running` with its ready time. |
 | `flowkit-capacity limit /Users/me/app -1 [--hours 12]` | The repo runs one slot fewer (never under one) for the hours given; `0` ends it. Logged as `limit`. |
@@ -813,8 +870,8 @@ nothing. Give the resource a `stop <resource> = <command>` line and it is stoppe
 for `stop_minutes` (20):
 
 - The clock starts when a lease on the resource ends, and a pass of its own keeps it:
-  `flowkit-capacity idle`, which the tmux status tick starts detached at most once a minute while
-  the file has a `stop` line (without tmux, run it from cron). It costs one file read with no such
+  `flowkit-capacity idle`, which the tick starts detached at most once a minute while
+  the file has a `stop` line (with neither the timer nor tmux, run it from cron). It costs one file read with no such
   line, and no `claude agents` call while no such resource is leased or counting. A lease shorter
   than a minute between two passes is not seen. A resource nobody leased has no clock: one you
   started by hand, and one that was stopped and that you start again, is left alone until a
@@ -875,10 +932,10 @@ every queued launch whose slot and needs are free, unless a load hold is set, as
 `flowkit-spawn --from-queue <id>` with the arguments it was queued with (its tmux server and
 session included; output in `capacity/launched/<id>.log`). It runs on every recorded close
 (`handoff.py record`, which counts the closing session as gone though it is still busy), every
-release, every launch that ends, and the tmux status tick (`flowkit-tmux waiting`, detached, at
+release, every launch that ends, and the tick (`flowkit-tick`, detached, at
 most every `FLOWKIT_CAPACITY_POLL` seconds, 15 by default). An empty queue costs one directory
-read. With the background driver and no tmux there is no tick: the queue drains on those events
-only.
+read. With the background driver, no timer and no tmux there is no tick: the queue drains on those
+events only.
 
 **A queued launch that fails is queued again.** A drained `flowkit-spawn` that ends with no session
 (a refusal such as uncommitted changes in the tree, a tmux window it could not open, a process
@@ -1018,7 +1075,7 @@ the summary).
 and gone when no watch is open. It asks each watch once a minute, 30 seconds at most per ask,
 under no capacity lock, with `CLAUDE_PID`, `TMUX_PANE` and `CLAUDE_CODE_*` taken out of its
 environment so that nothing it starts passes for a session, and keeps the computer awake
-(`caffeinate`, where there is one) while a watch is pending. The tmux tick, every recorded close and every `flowkit-spawn` that ends start
+(`caffeinate`, where there is one) while a watch is pending. The tick, every recorded close and every `flowkit-spawn` that ends start
 it again when it is gone or its heartbeat is older than three minutes.
 
 **What an answer does.** Pending does nothing. Everything that ends a watch is a section of the

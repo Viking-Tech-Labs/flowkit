@@ -1,13 +1,18 @@
 ---
 name: setup
-description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, whether a session an API error stopped carries on while the user is away, whether one a usage limit stopped is continued after the reset, whether the user gets reminders of what waits on them while away from the computer, what a chain's last slice leaves behind (the branch, a Draft MR, the MR ready, merged), whether a helper session reports its verdict back to the session that launched it, and a starter capacity file (how many chains at once, what a repository has only one of). Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
+description: Offer the handoff status line, which shows each session's model, context used and cost, and records them so closes and ladders can read them, choose how spawned sessions start (tmux or Claude's background sessions), whether finished story tabs close on their own, whether a session an API error stopped carries on while the user is away, whether one a usage limit stopped is continued after the reset, whether the user gets reminders of what waits on them while away from the computer, what a chain's last slice leaves behind (the branch, a Draft MR, the MR ready, merged), whether a helper session reports its verdict back to the session that launched it, a starter capacity file (how many chains at once, what a repository has only one of), and on macOS a timer that keeps the queue, the watches and the reminders going with tmux detached or absent; `/handoff:setup remove` takes away what the setups installed. Shows each change to the user's settings as a diff and writes it only on a yes. Use when the user types /handoff:setup, asks how a close knows the context or cost of a session, or wants spawned sessions to run without tmux.
+argument-hint: [remove]
 disable-model-invocation: true
 ---
+
+Arguments: `$ARGUMENTS`
 
 Set up what the handoff plugin needs from the user's own settings. A plugin cannot change those
 settings itself; this skill shows the change and makes it only when the user says yes.
 
 The helper is `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py"` (`handoff.py` below).
+
+When the arguments are `remove`, do only "Removing what the setups installed", at the end.
 
 ## The status line
 
@@ -69,6 +74,36 @@ How `/handoff:close spawn` and `/handoff:spawn` start the next session, the `dri
 4. Say what is left to the user: push notifications for sessions that need them are the
    `/config` toggles plus the Claude app signed in on the phone.
 
+## The timer
+
+Some of the plugin's work happens between prompts, in a pass every 15 seconds (the plugin README's
+"The tick"): the capacity queue drains, a watch poller or a usage-limit waiter that died starts
+again, the reminders go out, the tmux tabs get their words. Without a timer the tmux kit's status
+bar runs that pass, so it stops while no tmux client is attached and never runs for someone on the
+`background` driver without tmux. On macOS a LaunchAgent runs it instead.
+
+1. Run `handoff.py timer diff "${CLAUDE_PLUGIN_ROOT}"`. If it says `installed`, say so and go on
+   to the next part. If it says `not on this system`, relay that line and go on: there is nothing
+   to install.
+2. Show the user what it printed, and say in plain words what changes: four commands are copied to
+   `~/.local/bin/` (`flowkit-tick`, `flowkit-tmux`, `flowkit-away`, `flowkit-usage`, kept at the
+   plugin's version at every session start), and `~/Library/LaunchAgents/flowkit.tick.plist` is
+   written and loaded. It runs `flowkit-tick --timer` every 15 seconds from login on, with this
+   session's `PATH` and, where they are set, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME` and `LANG`
+   written into it, and it ticks the config folder this session runs in. `installed with other
+   values` means the file on disk carries another PATH or other folders (the diff shows which):
+   installing writes this session's. `written, not loaded` means the file is right and launchd
+   does not run it: installing loads it.
+3. Ask with AskUserQuestion: install (recommended), or leave it. Without the AskUserQuestion tool
+   (a headless run), write nothing: print what step 1 printed and the command that would install
+   it, and stop.
+4. On a yes, run `handoff.py timer install "${CLAUDE_PLUGIN_ROOT}"` and relay its lines; then run
+   `~/.local/bin/flowkit-tick status`, which says `kept by the timer` once the first pass is
+   through (a few seconds). When launchctl refuses (a sandboxed shell may), the error names the
+   `launchctl bootstrap` command: hand it to the user to run in a terminal. On a no, write nothing.
+
+To undo it: `/handoff:setup remove`.
+
 ## Capacity
 
 `flowkit-spawn` holds every story launch to a number of chains at once, and leases the things a
@@ -99,8 +134,8 @@ declares no resources. This part writes a starter file from two answers. The hel
 
 ## Closing finished story tabs
 
-With the `tmux` driver and the tmux kit, the `autoclose` key of `handoff.conf` lets the kit's
-status-bar tick close a story's tab once the story is finished (the plugin README's "The tmux
+With the `tmux` driver and the tmux kit, the `autoclose` key of `handoff.conf` lets the tick
+close a story's tab once the story is finished (the plugin README's "The tmux
 kit" says when). It kills sessions, so it is off until the user turns it on.
 
 1. Skip this part when the driver is `background`.
@@ -168,11 +203,13 @@ user set, so it is off until they turn it on, and it needs macOS.
 
 ## Reminders
 
-The `remind` key of `handoff.conf` lets the tmux kit's tick push what waits on the user while
+The `remind` key of `handoff.conf` lets the tick push what waits on the user while
 they are neither away nor at the computer (the plugin README's "Reminders" says what and how).
 It types into a reporter's pane, so it is off until the user turns it on.
 
-1. Skip this part when the driver is `background`: the tick that sends reminders is the tmux kit's.
+1. Skip this part when the driver is `background` and `handoff.py timer diff
+   "${CLAUDE_PLUGIN_ROOT}"` does not say `installed`: without tmux only the timer runs the tick
+   that sends reminders.
 2. Say in plain words what it does: at most once a minute, silent while `/handoff:away` is in
    effect or while the user touched the keyboard or mouse in the last 10 minutes; at once, what
    Claude Code's own pushes cannot see (a pane parked at a start-up prompt, a usage-limit stop
@@ -241,3 +278,17 @@ session then has a message to relay and act on.
    AskUserQuestion tool, change nothing: print the command below, and stop.
 3. Write the answer: `handoff.py conf report_to <on|off>`. The next launch reads it; nothing
    needs a restart.
+
+## Removing what the setups installed
+
+Only when the arguments are `remove`.
+
+1. Run `handoff.py setup remove --dry-run` and show the user its lines: what would go (the timer,
+   unloaded and deleted; the commands in `~/.local/bin`; the tmux kit's files and the
+   `source-file` line in their tmux.conf, a backup kept beside it) and what stays (their
+   `handoff.conf`, `capacity.conf`, ladder and status line). `setup: nothing to remove` ends it.
+2. Ask with AskUserQuestion: remove it all, or leave everything. Without the AskUserQuestion tool,
+   change nothing: print the lines and the command below, and stop.
+3. On a yes, run `handoff.py setup remove` and relay its lines. A running tmux keeps the kit's
+   settings until it restarts, and its status bar goes quiet. Uninstalling the plugin itself is
+   theirs: `claude plugin uninstall handoff@flowkit`.
