@@ -223,8 +223,10 @@ class Register(Watch):
 
 class Poller(Watch):
     def probe(self):
-        """A command arm that never answers, and writes what its poller hands a child."""
-        return self.add("--check", f"env > {self.tmp / 'env.out'}; exit 2", "--name", "probe",
+        """A command arm that never answers, and writes what its poller hands a child: whole, since
+        it writes again at every poll and a reader must not meet the file just emptied."""
+        out = self.tmp / "env.out"
+        return self.add("--check", f"env > {out}.new && mv {out}.new {out}; exit 2", "--name", "probe",
                         env={"FLOWKIT_WATCH_POLL": "0.2", "TMUX_PANE": "%1", "CLAUDE_CODE_ENTRYPOINT": "cli"})
 
     def pid(self):
