@@ -167,7 +167,20 @@ those.
 A release is: change the files, bump `version` in that plugin's `.claude-plugin/plugin.json`
 (only there; do not also set it in `marketplace.json`, the two would disagree), tag, push. With a
 version set, Claude Code keeps the cached copy no matter how many commits are pushed, so a change
-without a bump reaches nobody. A marketplace added from a local directory
+without a bump reaches nobody.
+
+`scripts/test.sh` runs every plugin's unit tests and the scripts' own (`scripts/test.sh handoff`
+runs one suite); the `tests` workflow runs it on each push and pull request, on macOS and Linux.
+`scripts/release.py <plugin> patch|minor` does the release from the branch the work is on: it
+refuses a dirty tree, a branch behind its upstream, a `main` it cannot fast-forward, an existing
+tag and red tests; then it bumps the plugin's `version` alone, commits that file as
+`<plugin> <version>`, tags `<plugin>-v<version>`, fast-forwards `main` to the branch, pushes
+`main` and the tag together, and runs `claude plugin marketplace update flowkit` and
+`claude plugin update <plugin>@flowkit` on your machine, printing each step. `--dry-run` prints
+the steps and changes nothing. `scripts/release.py tags` lists every version that reached `main`
+without a tag (`--create` tags each at the commit that set it; push them yourself).
+
+A marketplace added from a local directory
 (`claude plugin marketplace add <path to a checkout>`) loads the files in place and ignores
 `version`, which is convenient while developing and misleading when testing an update.
 
@@ -183,4 +196,6 @@ plugins/handoff/                  the close, spawn, away, back, setup and setup-
 plugins/board/                    the hooks module (hooks/register.tsx draws the Pane, hooks/model.ts reads the stories), types/, tests/
 plugins/ladder/                   the setup and edit skills, hooks/hooks.json (the effort gate), scripts/ladder.py, tests/
 plugins/coordinate/               the start skill and its brief template, scripts/coordinate.py, tests/
+scripts/                          test.sh (every suite), release.py (the release command), tests/
+.github/workflows/                tests.yml (scripts/test.sh on macOS and Linux), gitleaks.yml (the secret scan)
 ```
