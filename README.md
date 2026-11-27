@@ -180,6 +180,13 @@ tag and red tests; then it bumps the plugin's `version` alone, commits that file
 the steps and changes nothing. `scripts/release.py tags` lists every version that reached `main`
 without a tag (`--create` tags each at the commit that set it; push them yourself).
 
+Fresh-install check, 2026-11-27, macOS, Claude Code 2.1.332: a new profile with no login added the
+marketplace from GitHub (over SSH, and over HTTPS with no key), installed brain 0.1.1,
+session-discipline 0.1.1, prompt-audit 0.1.1, walkthrough 0.1.1, handoff 0.11.0, board 0.1.5,
+ladder 0.1.2 and coordinate 0.2.4, and ran each setup's scripts (the vault init, adopt, the status
+line, settings, driver and tmux kit, the ladder table) under Python 3.14 and macOS's Python 3.9;
+nothing broke. Without a login no session started, so the skills themselves were not driven.
+
 A marketplace added from a local directory
 (`claude plugin marketplace add <path to a checkout>`) loads the files in place and ignores
 `version`, which is convenient while developing and misleading when testing an update.
