@@ -22,6 +22,8 @@ minute its flag takes effect); `/handoff:setup-tmux` copies this file to
 ~/.local/bin, kept at the plugin's version at every session start, so a shell function of your
 own can call `flowkit-away away`, `awake`, `back` and `nudge` too.
 """
+import functools
+import importlib.util
 import json
 import os
 import subprocess
@@ -33,23 +35,27 @@ CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 AWAY = CLAUDE / "away"
 QUESTION = "input needed"
 PERMISSION = "permission prompt"
-SETTLE = 10  # seconds a session may take to leave `waiting` after Escape or `claude stop`
-RESUME_GRACE = 3  # seconds between the process going and the resume: measured on 2.1.302, a resume
-#                   within a second of the stop starts a copy under a new id, one after 2 s continues
+SETTLE = 10  # seconds a session may take to leave `waiting` after Escape
 
 
-def run(*cmd, timeout=15, **kw):
-    try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
-    except (OSError, subprocess.TimeoutExpired):
+@functools.lru_cache(None)
+def backend():
+    """The plugin's backend.py, beside its handoff.py: where a session runs and how a line reaches
+    it there. None without the plugin."""
+    script = handoff_py()
+    path = script.parent / "backend.py" if script else None
+    if not (path and path.is_file()):
         return None
+    spec = importlib.util.spec_from_file_location("flowkit_backend", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def agents():
-    out = run("claude", "agents", "--json")
     try:
-        rows = json.loads(out.stdout) if out and out.returncode == 0 else None
-    except ValueError:
+        rows = backend().agents()
+    except (OSError, subprocess.SubprocessError, ValueError):
         return None
     return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
 
@@ -64,103 +70,33 @@ def line():
             "end a turn on a question; until I am back every question is denied the same way.")
 
 
-def panes():
-    """{shell pid: pane id} for every tmux pane, {} without tmux."""
-    out = run("tmux", "list-panes", "-a", "-F", "#{pane_pid} #{pane_id}")
-    found = {}
-    for row in (out.stdout if out and out.returncode == 0 else "").splitlines():
-        pid, _, pane = row.partition(" ")
-        if pid.isdigit():
-            found[int(pid)] = pane
-    return found
-
-
-def parents():
-    out = run("ps", "-axo", "pid=,ppid=")
-    found = {}
-    for row in (out.stdout if out else "").splitlines():
-        parts = row.split()
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            found[int(parts[0])] = int(parts[1])
-    return found
-
-
-def pane_of(row, pane_map, parent_map):
-    """The pane a session runs in, found through its parent processes (a pane's pid is its shell)."""
-    pid = row.get("pid")
-    for _ in range(4):
-        if pid in pane_map:
-            return pane_map[pid]
-        pid = parent_map.get(pid)
-        if pid is None:
-            return None
-    return None
-
-
-def status_of(name):
-    rows = agents() or []
-    for r in rows:
-        if r.get("name") == name:
-            return r.get("status") or r.get("state")
-    return None
-
-
-def background_row(name):
-    """The newest background entry called `name` in `claude agents --json --all`, where a stopped
-    session keeps its entry (without a pid) while the live list drops it at once."""
-    out = run("claude", "agents", "--json", "--all")
-    try:
-        rows = json.loads(out.stdout) if out and out.returncode == 0 else []
-    except ValueError:
-        rows = []
-    rows = [r for r in rows if isinstance(r, dict) and r.get("kind") == "background" and r.get("name") == name]
-    return max(rows, key=lambda r: r.get("startedAt") or 0) if rows else None
-
-
-def settled(name, pid_gone=False):
-    """Wait until the session called `name` is no longer waiting (or, with pid_gone, until its
-    process is gone: `claude stop` returns before that, and a resume while it lingers starts a
-    copy under a new id). True when it happened within SETTLE seconds."""
+def settled(name):
+    """Wait until the session called `name` is no longer waiting. True when it happened within
+    SETTLE seconds."""
     deadline = time.time() + SETTLE
     while time.time() < deadline:
-        if pid_gone:
-            row = background_row(name)
-        else:
-            row = next((r for r in (agents() or []) if r.get("name") == name), None)
-        if row is None or (not row.get("pid") if pid_gone else row.get("status") != "waiting"):
+        row = next((r for r in (agents() or []) if r.get("name") == name), None)
+        if row is None or row.get("status") != "waiting":
             return True
         time.sleep(0.5)
     return False
 
 
-def tmux(*args):
-    return run("tmux", *args)
-
-
-def nudge_pane(row, pane):
-    """Escape ends the question's turn; the away line is typed once the session has left waiting."""
-    tmux("send-keys", "-t", pane, "Escape")
-    if not settled(row.get("name")):
+def reach(row, place):
+    """The away line as the session's next prompt, as (typed, what claude said of a copy). In a
+    tmux pane Escape ends the question's turn and the line is typed once the session has left
+    waiting; a background session (no place) is stopped, then resumed under its own id with the
+    line as its prompt."""
+    b = backend()
+    try:
+        if place is None:
+            why = b.BACKGROUND.type(b.Place(row.get("sessionId"), False, row), line(), b.ESCAPE)
+        else:
+            why = b.TMUX.type(place, line(), b.ESCAPE, settled=lambda: settled(row.get("name")))
+    except (OSError, subprocess.SubprocessError, KeyError, ValueError):
         return False, ""
-    time.sleep(0.5)
-    tmux("send-keys", "-t", pane, "C-u")
-    tmux("send-keys", "-t", pane, "-l", line())
-    tmux("send-keys", "-t", pane, "Enter")
-    return True, ""
-
-
-def nudge_background(row):
-    """A background session is stopped, then resumed under its own id with the line as its
-    prompt (a live one would get a copy instead, so the resume waits until the process is gone,
-    plus RESUME_GRACE)."""
-    run("claude", "stop", row["id"], timeout=30)
-    if not settled(row.get("name"), pid_gone=True):
-        return False, ""
-    time.sleep(RESUME_GRACE)
-    out = run("claude", "--bg", "--resume", row["sessionId"], line(), timeout=60, cwd=row.get("cwd") or None)
-    text = ((out.stdout or "") + (out.stderr or "")).strip().splitlines() if out else []
-    note = next((l.strip() for l in text if "copy" in l), "")
-    return bool(out) and out.returncode == 0, note
+    said = getattr(why, "said", "").strip().splitlines()
+    return not why, next((l.strip() for l in said if "copy" in l), "")
 
 
 def classify(row):
@@ -186,7 +122,10 @@ def nudge(dry, only):
     if rows is None:
         print("cannot read `claude agents --json`: no session nudged")
         return 3
-    pane_map, parent_map = panes(), parents()
+    try:
+        find = backend().TMUX.finder()
+    except (OSError, subprocess.SubprocessError):
+        find = lambda pid: None  # no tmux: a question in a terminal cannot be reached
     shown = 0
     for row in rows:
         name = row.get("name") or "?"
@@ -203,17 +142,17 @@ def nudge(dry, only):
         if verb != "nudge":
             print(f"{verb} {name}: {where}")
             continue
-        pane = None
+        place = None
         if where == "tmux":
-            pane = pane_of(row, pane_map, parent_map)
-            if pane is None:
+            place = find(row.get("pid"))
+            if place is None:
                 print(f"unreachable {name}: waits on a question outside tmux; answer it from the phone")
                 continue
-            where = f"tmux {pane}"
+            where = f"tmux {place.id}"
         if dry:
             print(f"would nudge {name} ({where})")
             continue
-        ok, note = nudge_background(row) if pane is None else nudge_pane(row, pane)
+        ok, note = reach(row, place)
         where += f"; {note}" if note else ""
         print(f"{'nudged' if ok else 'not nudged'} {name} ({where}){'' if ok else ': it did not leave the question in time'}")
     if not shown:
@@ -270,6 +209,15 @@ def flag(cmd, by):
         return 3
 
 
+def reaching(cmd, command):
+    """`nudge` and `waiting` reach the sessions through the plugin's backend.py."""
+    if backend() is None:
+        print(f"flowkit-away {cmd}: the handoff plugin is not installed (claude plugin install handoff@flowkit)",
+              file=sys.stderr)
+        return 3
+    return command()
+
+
 def main(argv):
     cmd, args = (argv[0], argv[1:]) if argv else ("", [])
     if cmd in ("away", "awake", "back") and (not args or (len(args) == 2 and args[0] == "--by")):
@@ -288,9 +236,9 @@ def main(argv):
         if args:
             print(__doc__, file=sys.stderr)
             return 2
-        return nudge(dry, only)
+        return reaching(cmd, lambda: nudge(dry, only))
     if cmd == "waiting" and not args:
-        return waiting()
+        return reaching(cmd, waiting)
     print(__doc__, file=sys.stderr)
     return 2
 
