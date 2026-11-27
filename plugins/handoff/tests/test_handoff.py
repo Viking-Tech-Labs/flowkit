@@ -907,6 +907,28 @@ esac
         out = self.handoff("record", "my-story", stdin="## Final report · 2026-10-27 12:05\nall done\n")
         self.assertEqual(out.stdout.splitlines()[1:], [], "a final report rings nobody")
 
+    def test_a_session_registers_itself_at_its_start(self):
+        """The SessionStart hook: the pane the session's process runs in and what its tab was opened for."""
+        stub = self.tmp / "bin" / "tmux"
+        stub.write_text(f"#!/bin/sh\ncase \"$1\" in\nlist-panes) echo '{os.getppid()} %7 0';;\n"
+                        "display-message) printf 'my-story\\037\\n';;\nesac\n")
+        stub.chmod(0o755)
+        self.env.update(HOME=str(self.tmp / "home"), XDG_CONFIG_HOME=str(self.tmp / "xdg"), CLAUDE_PID=str(os.getpid()))
+        state = self.tmp / "claude" / "flowkit" / "sessions.json"
+        self.assertEqual(self.handoff("refresh", str(PLUGIN), stdin=json.dumps({"session_id": "s-1"})).stdout, "")
+        entry = json.loads(state.read_text())["sessions"]["s-1"]
+        self.assertEqual((entry["backend"], entry["place"], entry["story"], entry["adhoc"], entry["pid"]),
+                         ("tmux", "%7", "my-story", False, os.getpid()))
+        run = subprocess.run([sys.executable, "-c", "import os, subprocess, sys\n"
+                              "os.environ['CLAUDE_PID'] = str(os.getpid())\n"
+                              "sys.exit(subprocess.run([sys.executable, *sys.argv[1:]], input=b'{\"session_id\": \"s-inner\"}').returncode)",
+                              str(HANDOFF), "refresh", str(PLUGIN)], env=self.env)
+        self.assertEqual(run.returncode, 0, "a session this one runs in its own pane: the pane stays this one's")
+        self.env["CLAUDE_PID"] = "1"  # no pane above it: a session outside tmux registers nothing
+        self.assertEqual(self.handoff("refresh", str(PLUGIN), stdin=json.dumps({"session_id": "s-2"})).returncode, 0)
+        self.assertEqual(self.handoff("refresh", str(PLUGIN), stdin="").returncode, 0, "run by hand: no session to register")
+        self.assertEqual(list(json.loads(state.read_text())["sessions"]), ["s-1"])
+
     def test_nudge_sorts_the_waiting_sessions(self):
         me, shell = os.getpid(), os.getppid()
         self.agents([

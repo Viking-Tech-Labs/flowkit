@@ -2238,6 +2238,31 @@ def prune_spawned():
         print(f"spawned: {gone} prompt {'copy' if gone == 1 else 'copies'} older than {PRUNE_DAYS} days removed")
 
 
+def register(hook):
+    """The session whose start this hook is registers itself in backend.py's file: the pane it
+    runs in and what that pane's tab was opened for. One outside tmux registers nothing, and
+    neither does one a session started from inside its own pane (`inside`: the processes above
+    this one)."""
+    try:
+        sid = json.loads(hook).get("session_id")
+    except (ValueError, AttributeError):
+        return
+    pid = os.environ.get("CLAUDE_PID", "")
+    if not (isinstance(sid, str) and sid):
+        return
+    try:
+        place = TMUX.locate(pid=int(pid)) if pid.isdigit() else TMUX.here()
+        if place:
+            above, at, inside = backend.parents(), int(pid) if pid.isdigit() else None, []
+            while at in above and len(inside) < 8:
+                at = above[at]
+                inside.append(at)
+            story, adhoc = TMUX.marked(place)
+            backend.register(sid, TMUX.name, place.id, story, adhoc, int(pid) if pid.isdigit() else None, inside)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+
+
 def refresh(root):
     """Keep an installed status line, tmux kit and the commands the timer runs at the plugin's
     version, and prune the old prompt copies and hook state. The copies only go forward: a session
@@ -2331,7 +2356,7 @@ def main(argv):
     elif cmd == "setup" and args in (["remove"], ["remove", "--dry-run"]):
         setup_remove(len(args) == 2)
     elif cmd == "refresh" and len(args) == 1:
-        sys.stdin.read()
+        register(sys.stdin.read())
         refresh(*args)
     elif cmd == "away-status" and not args:
         print(away_status())
