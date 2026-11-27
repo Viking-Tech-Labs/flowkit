@@ -72,7 +72,7 @@ SETTLED = {"mergeable", "ci_still_running", "ci_must_pass", "checking", "uncheck
 MR_URL = re.compile(r"^https?://[^/\s]+/(.+?)/-/merge_requests/(\d+)")
 REMOTE = re.compile(r"^(?:https?://[^/]+/|(?:ssh://)?[^/@]+@[^:/]+[:/])(.+?)(?:\.git)?/?$")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._!#@+-]*$")
-SCRUB = ("CLAUDE_PID", "TMUX_PANE")  # with CLAUDE_CODE_*: what would pass the poller off as a session
+SCRUB = ("CLAUDE_PID", "TMUX_PANE", "FLOWKIT_TARGET")  # with CLAUDE_CODE_*: what would pass the poller off as a session, and where another arm's ring went
 SHOWN = ("state", "phase", "sha", "fix", "waits")  # what capacity's status.json says of an open arm, besides its name
 
 
@@ -219,8 +219,38 @@ def unique(base, story):
     return name
 
 
+def where():
+    """Where the watch was registered, in the word of the backend that has one for it (backend.py's
+    target()): where its launches and its doorbell go. "" when none has."""
+    spec = importlib.util.spec_from_file_location("flowkit_backend", HERE / "backend.py")
+    backend = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(backend)
+        for at in backend.BACKENDS.values():
+            with contextlib.suppress(backend.Refused, OSError, subprocess.SubprocessError):
+                word = at.target()
+                if word:
+                    return word
+    except Exception:
+        pass
+    return ""
+
+
+def reach(arm):
+    """How the arm's doorbell and its launches reach where it was registered: (the environment of
+    a ring, flowkit-spawn's options). An arm of before 0.15.1 names a tmux server and session."""
+    old = arm.get("tmux") or {}
+    if arm.get("where"):
+        return {"FLOWKIT_TARGET": arm["where"]}, ["--target", arm["where"]]
+    if old.get("socket"):
+        return {"FLOWKIT_TMUX_SOCKET": old["socket"]}, ["--tmux-socket", old["socket"],
+                                                        *(["--tmux-session", old["session"]] if old.get("session") else [])]
+    return {}, []
+
+
 def tmux_target():
-    """The tmux server and session the watch was registered in: where its launches and doorbell go."""
+    """The same for a poller of 0.15.0 or older that still runs when the watch is added: it reads
+    the tmux server and session from the arm. Goes with 0.16.0."""
     sock = os.environ.get("FLOWKIT_TMUX_SOCKET") or os.path.basename(os.environ.get("TMUX", "").split(",")[0])
     if not sock:
         return {"socket": "", "session": ""}
@@ -329,7 +359,7 @@ def add(args):
     fresh = {**target, "base": base, "story": story, "sha": sha, "tree": tree, "repo": repo, "check": check,
              "branch": branch, "target": "",
              "glab": os.path.abspath(glab) if glab else "", "until": args.until, "ready": args.ready,
-             "by": {"session": me["sessionId"], "name": me["name"], "left": args.left or ""}, "tmux": tmux_target(),
+             "by": {"session": me["sessionId"], "name": me["name"], "left": args.left or ""}, "where": where(), "tmux": tmux_target(),
              **header_of(prompt_of(me["name"])), "on_green": on_green, "worktree": "",
              "state": "pending", "phase": "pipeline", "armed": t, "targeted": t, "polled": None, "answer": "",
              "errors": 0, "seen": None, "blocked": None, "noted": [], "retargets": 0, "did": []}
@@ -694,7 +724,7 @@ def finish(arm, t):
 def record(arm, text):
     """A section into the story file through `handoff.py record`: the reporter's doorbell and the
     drain are record's; a record that fails still leaves the section, appended."""
-    ring = {**os.environ, **({"FLOWKIT_TMUX_SOCKET": arm["tmux"]["socket"]} if arm["tmux"]["socket"] else {})}
+    ring = {**os.environ, **reach(arm)[0]}
     code, _, _ = sh([sys.executable, str(HERE / "handoff.py"), "record", arm["story"]], None, timeout=300,
                     env=ring, stdin=text + "\n")
     if code != 0 and not recorded(arm):
@@ -815,10 +845,7 @@ def spawn(arm, name, tree, prompt, model, effort):
     argv = [str(HERE.parent / "bin" / "flowkit-spawn"), "--from-watch", arm["name"], "--story", arm["story"],
             "--repo", str(tree), "--name", name, *(["--model", model] if model else []),
             *(["--effort", effort] if effort else [])]
-    if arm["tmux"]["socket"]:
-        argv += ["--tmux-socket", arm["tmux"]["socket"]]
-        argv += ["--tmux-session", arm["tmux"]["session"]] if arm["tmux"]["session"] else []
-    argv.append(str(prompt))
+    argv += [*reach(arm)[1], str(prompt)]
     out = watches() / "launched" / f"{name}.log"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "ab") as f:

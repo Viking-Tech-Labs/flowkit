@@ -681,6 +681,30 @@ class Trees(Launches):
         self.assertIn("`git push`, then `/handoff:close`", brief)
         self.assertFalse((self.repo / ".claude").exists())
 
+    def fix_from(self, **where):
+        """The fix slice's launch for an arm that says where it was registered in that shape."""
+        self.session()
+        self.add()
+        arm = {k: v for k, v in self.arm().items() if k not in ("where", "tmux")}
+        (self.dir / "repo!12.json").write_text(json.dumps({**arm, **where}))
+        self.red()
+        self.section()
+        return self.spawned()[0]
+
+    def test_an_arm_of_0_15_0_still_launches_into_the_tmux_session_it_names(self):
+        self.assertIn(" --effort xhigh --tmux-socket srv --tmux-session main ", self.fix_from(tmux={"socket": "srv", "session": "main"}))
+
+    def test_an_arm_launches_where_the_watch_was_registered(self):
+        self.assertIn(" --effort xhigh --target srv/main ", self.fix_from(where="srv/main"))
+
+    def test_a_watch_keeps_where_it_was_registered_in_the_backend_s_word(self):
+        self.stub("tmux", "#!/bin/sh\necho main\n")
+        self.session()
+        self.add(env={"TMUX": "/tmp/tmux-1/srv,1,0", "TMUX_PANE": "%3"})
+        arm = self.arm()
+        self.assertEqual((arm["where"], arm["tmux"]), ("srv/main", {"socket": "srv", "session": "main"}),
+                         "and, until 0.16.0, tmux's names for a poller of 0.15.0 that still runs")
+
     def test_a_dirty_tree_gets_a_worktree_that_goes_with_the_next_arms_green(self):
         self.session()
         self.add()
