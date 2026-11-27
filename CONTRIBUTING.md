@@ -54,6 +54,15 @@ repository passes.
   `Driver`), `docs/drivers.md`, `flowkit-driver` and the tests in
   `plugins/handoff/tests/test_backend.py` (`OutsideDriver`) and `test_driver.py`, together.
 
+## What others build on
+
+[`docs/extending.md`](docs/extending.md) lists every place where a hook or a script of somebody's
+own meets flowkit, and which of it is promised to stay: the flag files, the launch hold, the story
+file's lines, the sessions file, `flowkit-session` and its hand-off at a usage limit, the board's
+JSON. A change to one of those (a renamed argument, another exit code, a key that goes) needs a
+minor release and a line in the plugin's README notes; adding a key or a line does not. A new seam
+gets its section there in the change that ships it.
+
 ## How a release is made
 
 An update reaches users only when a plugin's `version` changes. A maintainer releases with:

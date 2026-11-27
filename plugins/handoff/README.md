@@ -138,7 +138,7 @@ they are.
 ## The tmux kit
 
 `/handoff:setup-tmux` copies a small tmux setup to `~/.config/flowkit/tmux.conf` (and
-`flowkit-away` and `flowkit-usage`, see "Being away") and adds one line to your tmux.conf: `source-file
+`flowkit-away`, `flowkit-usage` and `flowkit-session`, see "Being away" and "Sessions from outside") and adds one line to your tmux.conf: `source-file
 ~/.config/flowkit/tmux.conf`. It keeps tmux's Ctrl-b prefix
 and adds: mouse on, tabs and panes counted from 1, **⚑ n need you** in the status bar with ⚑n on
 each tab that has sessions waiting on you, a one-word state after each story or adhoc tab's
@@ -261,7 +261,7 @@ launch and a watch keep where to launch as one word of the launch driver's own (
 stay, and a launch queued or a watch added by 0.15.0 still starts with them.
 
 `~/.local/bin/flowkit-tick` is a copy with no version in its path, like `flowkit-tmux`,
-`flowkit-away` and `flowkit-usage` beside it: moved forward at every session start once the timer
+`flowkit-away`, `flowkit-usage` and `flowkit-session` beside it: moved forward at every session start once the timer
 or the kit is installed, and finding the plugin's scripts through the newest handoff in
 `installed_plugins.json`.
 
@@ -487,11 +487,13 @@ without Remote Control is left to Claude Code's own wait when your settings turn
 
 Off with `autoContinueAtUsageLimit: false` in your `settings.json`, or with `limitresume=off` in
 `handoff.conf` (`handoff.py conf limitresume off`); the stop is still recorded and the tab labelled.
+New in 0.17.0: a hook of your own can take a stopped session over, and the waiter then stands
+down and types nothing (`flowkit-session claim`, see "Sessions from outside").
 The record (`~/.claude/flowkit/retry/<session id>.json`) keeps what the waiter knows: `reset`,
 `due`, `continues`, a `state` (`waiting`, `continued`, `moved`, `native`, `unreachable`, or what is
 in the way: `not idle`, `copy mode`, `draft`, `dialog`, `no prompt box`), the session's status
-and bottom pane rows as it stopped and at rest, and the login it stopped on (`config`, `account`;
-next section).
+and bottom pane rows as it stopped and at rest, the login it stopped on (`config`, `account`;
+next section), and while one holds the `claim` of a hook outside flowkit (`by`, `until`).
 
 ## Two logins on one config folder
 
@@ -541,9 +543,54 @@ link back yourself.
 
 Moving a session from one login to the other is not flowkit's: which account a session starts
 on, and whether a stopped one may carry on under the other, are yours to decide and to script (a
-wrapper that sets `CLAUDE_CONFIG_DIR` by folder, say). `driver=background` is single-account:
+wrapper that sets `CLAUDE_CONFIG_DIR` by folder, say). What such a script needs of flowkit is in
+the next section: where the session runs, a line typed into its pane, and the waiter out of its
+way. `driver=background` is single-account:
 `claude --bg` has one daemon per config folder, which keeps the environment of whoever started
 it first, so every background session runs on that caller's login until the daemon idles out.
+
+## Sessions from outside: `flowkit-session`
+
+New in 0.17.0, for a hook or a script of your own that has to reach a running session: the
+commands flowkit's own lines go through, whichever driver the session runs under.
+
+```text
+flowkit-session locate <session> [--json]       where it runs, which story it was started for
+flowkit-session read <session> [--rows <n>]     the rows its place shows now, as plain text
+flowkit-session read <session> --box            one word: free, or what is in a typed line's way
+flowkit-session type <session> <text> [--how free|line|over|escape|command]
+                                                one line as its next prompt
+flowkit-session claim <session> --by <name> [--for <minutes>] [--wait <seconds>]
+flowkit-session release <session> --by <name>
+```
+
+`<session>` is a session id, a name as `claude agents` lists it, or a process id. `locate` prints
+`key: value` lines (`session`, `name`, `pid`, `kind`, `status`, `cwd`, `backend`, `place`,
+`place_pid`, `copy`, `story`), one JSON object with `--json`. `type` types only into a free prompt
+box unless `--how` says otherwise, and prints the place it typed into or why it did not (`copy
+mode`, `no prompt box`, `dialog`, `draft`, `waiting`, `busy`); `read` and `type` take `--place
+<id>` in place of a session, for a pane with none in it. Exit codes, the same for all: 0 done, 1
+the driver's program did not answer, 2 called wrongly, 3 no such session (or more than one of the
+name), 4 it runs in no place flowkit reaches, 5 not done, the reason printed. `flowkit-session
+<command> --help` has each in full. On the `PATH` of a session's Bash tool; for a hook outside a
+session `/handoff:setup-tmux` and the timer's setup copy it to `~/.local/bin`.
+
+`claim` is the hand-off at a usage limit. A `StopFailure` hook of yours that knows something
+better to do with a stopped session (start it again under another login, say) claims it first:
+the waiter stands down and types nothing, and the story file gets `> limit <session> · <time> ·
+<name> took it over until <time>: flowkit does not continue it meanwhile`. The claim holds for
+`--for` minutes (15 without it), while the session runs in the same process, and until `release`
+or the session's next clean turn end; given back or run out, the waiter plans the stop again and
+continues the session as it would have, with a line saying so. Of a claim and the waiter's
+continue that come at the same moment exactly one wins: `claim` exits 0 only when nothing was
+typed, and 5 with `flowkit continued it at <HH:MM>` when it came too late. Unclaimed, a stop is
+continued as before. A session that started before 0.17.0 was installed runs the older waiter,
+which knows no claim, until it is restarted. `handoff.conf` has no key that runs a command at a
+stop: what yours does there is your hook's.
+
+[`docs/extending.md`](../../docs/extending.md) lists every place where something of yours meets
+flowkit (the flag files, the launch hold, the story file's lines, the sessions file, these
+commands, the board's JSON, a launch driver) and says which of it is promised to stay.
 
 ## Start-up prompts
 
