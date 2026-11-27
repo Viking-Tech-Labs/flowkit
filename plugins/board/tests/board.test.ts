@@ -6,6 +6,7 @@ import {
   buildSnapshot,
   capacityLines,
   capacityParts,
+  exportOf,
   formeLines,
   isShown,
   openSteps,
@@ -452,6 +453,47 @@ test('a pane parked at a start-up prompt makes its story need you, until the fil
   expect(parkedOf(JSON.stringify({ at: NOW / 1000, panes: [null, { story: 3 }, { story: 'chain' }] }), NOW)).toEqual([])
   const needy = buildSnapshot(stories(), AGENTS, new Map(), NOW, [], [{ story: 'needy', line: 'x' }]).cards.find(c => c.story === 'needy')
   expect(needy?.why).toBe('n-s2 waits (permission prompt)')
+})
+
+test('the export for scripts names each card\'s sessions, the section of its newest FOR ME list and its members', () => {
+  const out = exportOf(stories(), snap())
+  expect([out.version, out.at, out.isAgentsKnown, out.isStoriesKnown]).toEqual([1, NOW, true, true])
+  expect(out.stories.map(s => s.story)).toEqual(snap().cards.map(c => c.story))
+  const needy = out.stories.find(s => s.story === 'needy')
+  expect(Object.keys(needy ?? {}).sort()).toEqual(
+    ['closes', 'forMeFrom', 'links', 'members', 'next', 'sessions', 'state', 'steps', 'story', 'tests', 'touchedMs', 'why'].sort(),
+  )
+  expect(needy).toMatchObject({ state: 'needs-you', why: 'n-s2 waits (permission prompt)', closes: 1, forMeFrom: null })
+  expect(needy?.members).toEqual(['needy-report', 'n-s1', 'n-s2'])
+  expect(needy?.sessions).toEqual([
+    {
+      id: 's5',
+      name: 'n-s2',
+      state: 'needs-you',
+      detail: 'permission prompt',
+      ctx: 61,
+      cost: 141.2,
+      startedAt: NOW - 20 * MIN,
+      repo: 'a-repository-with-a-long-name',
+      isReporter: false,
+    },
+  ])
+  const chain = out.stories.find(s => s.story === 'chain')
+  expect([chain?.forMeFrom, chain?.members]).toEqual(['c-s2', ['chain-report', 'c-s1', 'c-s2', 'c-s3']])
+  expect(chain?.steps.every(s => s.key.startsWith(`chain|${s.from}|`))).toBe(true)
+  expect([...new Set(chain?.steps.map(s => s.from))].sort()).toEqual(['c-s1', 'c-s2'])
+  const reported = out.stories.find(s => s.story === 'reported')
+  expect([reported?.forMeFrom, reported?.members]).toEqual(['Final report', ['reported-report', 'r-s1']])
+  expect(out.loose.map(c => c.name)).toEqual(snap().loose.map(c => c.name))
+  expect(JSON.parse(JSON.stringify(out)).stories.length).toBe(out.stories.length)
+  expect(exportOf(undefined, buildSnapshot(undefined, undefined, new Map(), NOW))).toEqual({
+    version: 1,
+    at: NOW,
+    isAgentsKnown: false,
+    isStoriesKnown: false,
+    stories: [],
+    loose: [],
+  })
 })
 
 const stubWorld = (on: On, agentsOut: string = JSON.stringify(AGENTS), capacity: CapacityStatus = STATUS, parked?: string) => {

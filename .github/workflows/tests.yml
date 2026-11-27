@@ -27,6 +27,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+      - uses: actions/setup-node@v4  # flowkit-board runs the board's TypeScript as it is: Node 22.18 or newer
+        with:
+          node-version: "24"
       - name: Install tmux
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"

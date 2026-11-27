@@ -1,7 +1,8 @@
 #!/bin/sh
 # Runs the unit tests of every plugin that has a tests/ folder, then the maintainer scripts' own:
-# the Python suites with unittest, the board's TypeScript with `claude plugin test`. CI runs this,
-# and scripts/release.py refuses to release unless it exits 0.
+# the Python suites with unittest, the board's TypeScript with `claude plugin test` (a folder that
+# holds both kinds gets both). CI runs this, and scripts/release.py refuses to release unless it
+# exits 0.
 # Usage: scripts/test.sh [name ...]   (a plugin's name, or `scripts`; default: all of them)
 cd "$(dirname "$0")/.." || exit 1
 
@@ -23,7 +24,9 @@ for name in $names; do
   if [ -e "$1" ]; then
     echo "== $name: claude plugin test $dir"
     claude plugin test "$dir" || red="$red $name"
-  else
+  fi
+  set -- "$dir"/tests/test_*.py
+  if [ -e "$1" ]; then
     echo "== $name: python3 -m unittest discover $dir/tests"
     python3 -m unittest discover "$dir/tests" || red="$red $name"
   fi

@@ -137,6 +137,54 @@ the hooks and the tree, not a surface's paint.
 | `/where [all]` | live sessions with context and cost, the usage windows, capacity and the open watches, the stories table; `all` adds the quiet ones |
 | `/forme [story]` | the open FOR ME steps of every story touched in the last three days, or of one |
 
+### `flowkit-board snapshot`: the stories as JSON
+
+New in 0.2.0, for a script of your own (a queue, a morning digest) that wants what the board
+knows without reading the plugin's files: the format below is the promise, the code behind it is
+not. It is a shell command, not a slash command: on `PATH` inside a session, and from a shell at
+`bin/flowkit-board` under the plugin's install folder (`installPath` in `claude plugin list
+--json`). The board's model is TypeScript, so it needs `bun`, or Node 22.18 or newer.
+
+```sh
+flowkit-board snapshot              # asks `claude agents --json --all` itself
+flowkit-board snapshot --agents -   # reads that command's JSON from stdin instead
+```
+
+It reads what the board reads ("What it reads") and prints one JSON object:
+
+| Field | Holds |
+|---|---|
+| `version` | `1`; raised when a field here is renamed or dropped (a new field raises nothing) |
+| `at` | when it was taken, epoch milliseconds |
+| `isAgentsKnown`, `isStoriesKnown` | `false` when the sessions, or the stories folder, could not be read; the rest still prints |
+| `stories` | one object per story file, in the board's order: needs you, stalled, running, done, the newest first within each |
+| `loose` | the live sessions of no story, each as a session below |
+
+A story:
+
+| Field | Holds |
+|---|---|
+| `story` | the story's name (its file's, without `.md`) |
+| `state` | `needs-you`, `stalled`, `running` or `done`, as its card shows |
+| `why` | the card's one line of why (`c-s3 working`, `launch pending: p-s2`) |
+| `closes` | how many closes the file holds |
+| `touchedMs` | the file's change time, epoch milliseconds |
+| `next` | the last close's `Next:` text, at most 60 characters |
+| `sessions` | the story's sessions that `claude agents` lists |
+| `steps` | the FOR ME steps, newest first: `text`, `from` (the section that lists it), `key` (what a tick is stored under) |
+| `forMeFrom` | the newest section that lists FOR ME steps, or `null` |
+| `links` | up to six merge-request URLs, newest first |
+| `tests` | the test queue's lines: `item`, `mr`, `device`, `state`, `eta`, `notes`, `gate` |
+| `members` | every session name the file gives: its reporter (`<story>-report`), each close and each name a `Next:` line carries |
+
+A session: `id`, `name`, `state` (`working`, `needs-you`, `idle` or `ended`), `isReporter`, and,
+left out when not known, `detail` (what it waits for, or how it ended), `ctx` (context used,
+percent), `cost` (dollars), `startedAt` (epoch milliseconds) and `repo` (its folder's name).
+
+The ticks stay in the plugin's own store, so `steps` lists every step, ticked or not.
+
 ## Tests
 
-`claude plugin test plugins/board` runs `tests/board.test.ts`.
+`claude plugin test plugins/board` runs `tests/board.test.ts`, and `python3 -m unittest discover
+plugins/board/tests` drives `bin/flowkit-board` (skipped without bun or a Node that runs
+TypeScript).

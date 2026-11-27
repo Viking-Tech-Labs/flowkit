@@ -27,7 +27,8 @@ scripts/test.sh handoff    # one suite: a plugin's name, or `scripts`
 ```
 
 It needs `python3`, plus `tmux` for the `handoff` suite and Claude Code for the `board` suite
-(`claude plugin test`). The full run takes several minutes; a few `handoff` tests time things, so
+(`claude plugin test`); the test of `flowkit-board` is skipped without `bun` or Node 22.18 or newer.
+The full run takes several minutes; a few `handoff` tests time things, so
 run it on a quiet machine and run a single failure again before blaming the code. The `tests`
 workflow runs the same script on macOS and Linux for every branch push and pull request.
 

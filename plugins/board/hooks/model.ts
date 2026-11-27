@@ -326,6 +326,27 @@ export const buildSnapshot = (
   return { at: now, cards, loose, isAgentsKnown: agents !== undefined, isStoriesKnown: stories !== undefined }
 }
 
+// What `flowkit-board snapshot` prints, for scripts: every card with its sessions, the section its
+// newest FOR ME list is in, and each session name the story file gives. A field named here is a
+// promise: renaming or dropping one raises EXPORT_VERSION.
+export const EXPORT_VERSION = 1
+export const exportOf = (stories: readonly Story[] | undefined, snap: Snapshot) => ({
+  version: EXPORT_VERSION,
+  at: snap.at,
+  isAgentsKnown: snap.isAgentsKnown,
+  isStoriesKnown: snap.isStoriesKnown,
+  stories: snap.cards.map(({ chips, ...card }) => {
+    const sections = stories?.find(s => s.name === card.story)?.sections ?? []
+    return {
+      ...card,
+      sessions: chips,
+      forMeFrom: [...sections].reverse().find(s => s.forMe.length > 0)?.name ?? null,
+      members: [...new Set([`${card.story}-report`, ...sections.flatMap(s => [...(s.isFinal ? [] : [s.name]), ...s.next.names])])],
+    }
+  }),
+  loose: snap.loose,
+})
+
 export const openSteps = (card: Card, ticks: Ticks): Step[] => card.steps.filter(s => ticks[s.key] !== true)
 
 // A card the board shows by default: anything alive or recent. Done stories leave after three days

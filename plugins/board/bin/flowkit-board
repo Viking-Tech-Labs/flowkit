@@ -1,0 +1,12 @@
+#!/bin/sh
+# flowkit-board snapshot [--agents -]: the board's stories as JSON, for scripts (README "Commands").
+# The board's model is TypeScript, so this needs bun, or a Node that runs it as it is (22.18 or newer).
+here=$(cd "$(dirname "$0")/.." && pwd) || exit 1
+if command -v bun >/dev/null 2>&1; then
+  exec bun "$here/scripts/snapshot.mjs" "$@"
+fi
+if command -v node >/dev/null 2>&1 && node -e 'process.exit(process.features.typescript ? 0 : 1)' 2>/dev/null; then
+  exec node --no-warnings "$here/scripts/snapshot.mjs" "$@"
+fi
+echo "flowkit-board: needs bun, or Node 22.18 or newer, on PATH" >&2
+exit 127
