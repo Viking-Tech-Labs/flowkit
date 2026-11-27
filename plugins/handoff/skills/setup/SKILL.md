@@ -14,7 +14,9 @@ The helper is `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py"` (`handoff.py`
 Why it is offered: a close is due at about 40% of the context window, and a ladder's log wants
 each session's cost. Claude Code hands those numbers only to the status line, so this one records
 them in `~/.claude/session-stats/<session id>.json` (and `by-name/<session name>.json` for a named
-session) on every refresh, and shows a short line: model, effort, context used, cost.
+session) on every refresh, and shows a short line: model, effort, context used, cost. It also
+keeps the plan's weekly usage in `~/.claude/usage-stats/` (a `week-*.json` per week and login, and
+`series.jsonl`), which `flowkit-usage` falls back to when Claude Code does not answer.
 
 1. Run `handoff.py statusline diff "${CLAUDE_PLUGIN_ROOT}"`. If it says `installed`, say so and
    stop.

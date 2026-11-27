@@ -10,9 +10,12 @@ with no model call and no transcript left behind. An answer is kept 10 minutes p
 logged in under this environment (the account file is <CLAUDE_CONFIG_DIR>/.claude.json, or
 ~/.claude.json with the variable unset), so two logins that share one config folder, and the
 account before a /login, never answer for each other; --json names it (`account`). When the call
-fails the line says so and falls back to the newest week-*.json a status line of your own may
-record under ~/.claude/usage-stats/ (seven_day_pct, resets_at, five_hour_pct), marked old, naming
-no account and without the per-model figures.
+fails the line says so and falls back to the newest week-*.json under ~/.claude/usage-stats/
+(seven_day_pct, resets_at, five_hour_pct), marked old, naming no account and without the per-model
+figures. The plugin's status line (scripts/statusline.py) writes those files and names the login in
+each (`account`), so a week of another login is passed over; a file that names none, as a status
+line of your own may write, counts for any. Newest is by the file's change time, then its
+`updated`, then its name.
 
 The plugin runs its own copy (`handoff.py usage`; `handoff.py away` prints the line);
 `/handoff:setup-tmux` copies this file to ~/.local/bin, kept at the plugin's version at every
@@ -108,18 +111,24 @@ def fields(usage):
     return {"week": window("weekly_all", "seven_day"), "models": models, "five_hour": window("session", "five_hour")}
 
 
-def fallback():
-    """The newest week file a status line recorded, or None."""
-    weeks = sorted(WEEKS.glob("week-*.json"), key=lambda p: p.stat().st_mtime) if WEEKS.is_dir() else []
-    for path in reversed(weeks):
+def fallback(who):
+    """The newest week file a status line recorded for this login, or None."""
+    found = []
+    for path in WEEKS.glob("week-*.json") if WEEKS.is_dir() else []:
         try:
             w = json.loads(path.read_text())
-        except (OSError, ValueError):
+            if who and w.get("account") and w["account"] != who:
+                continue
+            at = epoch((w.get("updated") or "").replace("Z", "+00:00"))
+            found.append((path.stat().st_mtime, at or 0, path.name, w))
+        except (OSError, ValueError, AttributeError):
             continue
-        return {"week": {"percent": w.get("seven_day_pct"), "resets_at": w.get("resets_at")}, "models": [],
-                "five_hour": {"percent": w.get("five_hour_pct"), "resets_at": w.get("five_hour_resets_at")},
-                "as_of": epoch((w.get("updated") or "").replace("Z", "+00:00")) or int(path.stat().st_mtime)}
-    return None
+    if not found:
+        return None
+    mtime, at, _, w = max(found, key=lambda x: x[:3])
+    return {"week": {"percent": w.get("seven_day_pct"), "resets_at": w.get("resets_at")}, "models": [],
+            "five_hour": {"percent": w.get("five_hour_pct"), "resets_at": w.get("five_hour_resets_at")},
+            "as_of": at or int(mtime)}
 
 
 def resets(ts, now):
@@ -167,7 +176,7 @@ def usage(live=False):
             raise RuntimeError("the login changed while asking")
     except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError, AttributeError) as e:
         error = f"timed out after {TIMEOUT} s" if isinstance(e, subprocess.TimeoutExpired) else str(e)
-        return fallback(), "old", error or type(e).__name__
+        return fallback(who), "old", error or type(e).__name__
     try:
         cache.write_text(json.dumps({"at": int(now), "fields": f}))
     except OSError:

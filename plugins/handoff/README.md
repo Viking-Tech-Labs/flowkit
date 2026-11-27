@@ -309,8 +309,11 @@ Week 49% used, resets Tue 02:59 (in 15 h) · Fable 37% of its bucket, 19% of the
 New in 0.6.0, the same line from `handoff.py usage` (`--json` for the fields), or `flowkit-usage`,
 which `/handoff:setup-tmux` copies to `~/.local/bin`. Claude Code answers it itself (a `get_usage`
 request through `claude -p`, no model call, no transcript, about 5 s), kept 10 minutes per
-account (`--json` names it, see "Two logins on one config folder"). A failed call says so and falls back to the newest `~/.claude/usage-stats/week-*.json` a
-status line of yours may record, marked old.
+account (`--json` names it, see "Two logins on one config folder"). A failed call says so and
+falls back to the newest `~/.claude/usage-stats/week-*.json`, marked old: the status line of
+`/handoff:setup` writes one per week and login since 0.13.0 (see "The status line"), and a week of
+another login is passed over; a file that names no login, as a status line of your own may write,
+still counts.
 
 ## API errors
 
@@ -543,13 +546,41 @@ does not exist (anything but macOS) the hooks do nothing.
 ## The status line
 
 Claude Code hands a session's context use and cost only to the status line, so a close cannot see
-them unless one records them. `/handoff:setup` offers one that does: on every refresh it writes
-`~/.claude/session-stats/<session id>.json` (and `by-name/<name>.json` for a named session) with
-the model, effort, cost, API time, context used and lines changed, and shows `Opus high · ctx 34% ·
-$1.23`. If you already have a status line, yours keeps showing: the new command records the
-numbers, then runs yours. The script is copied to `~/.config/flowkit/statusline.py` and kept at the
-plugin's version by a session-start hook, which does nothing when you have not installed it. Your
-previous settings are kept as `settings.json.flowkit-bak`.
+them unless one records them. `/handoff:setup` offers one that does: on every refresh it records
+the numbers (the files below) and shows `Opus high · ctx 34% · $1.23`. If you already have a
+status line, yours keeps showing: the new command records the numbers, then runs yours. The script
+is copied to `~/.config/flowkit/statusline.py` and kept at the plugin's version by a session-start
+hook, which does nothing when you have not installed it. Your previous settings are kept as
+`settings.json.flowkit-bak`.
+
+What it writes, all under `~/.claude` (your `CLAUDE_CONFIG_DIR`), as one line of JSON each; a
+field Claude Code did not send is `null`:
+
+- `session-stats/<session id>.json`, and `session-stats/by-name/<name>.json` for a named session
+  (a `/` in the name becomes `-`), rewritten at every refresh: `session_id`, `session_name`,
+  `model_id`, `effort`, `cost_usd`, `api_ms` and `wall_ms` (time in API calls, and since the
+  session started), `ctx_pct` (context used, percent), `ctx_size` (the context window in tokens,
+  new in 0.13.0), `lines_added`, `lines_removed`, `cwd`, `updated` (UTC). The context line below,
+  the `board` plugin and a ladder's log read it.
+- `usage-stats/week-<reset>-<login>.json`, new in 0.13.0: one file per weekly window of your
+  plan, named by the window's reset (epoch seconds) and a key of the login (left out when no
+  login can be read). `resets_at`, `account` (the login's account and organization ids, as
+  `flowkit-usage --json` names them), `seven_day_pct` (the week used, the highest reading),
+  `five_hour_pct` and `five_hour_resets_at` (the 5-hour window that ends then, its highest
+  reading), `five_hour_peak_pct` (the highest 5-hour reading of the week), `full_at` (when the
+  week first read 100), `reset_at` and `pre_reset_pct` (when the limit was reset before its time,
+  and what the week read then), `updated`. `flowkit-usage` falls back to it when Claude Code does
+  not answer.
+- `usage-stats/series.jsonl`, new in 0.13.0: one line each time a week file changed, with `t`,
+  that file's `resets_at`, `account`, `seven_day_pct`, `five_hour_pct` and `five_hour_resets_at`
+  as they then were, and the `session_id`, `model_id` and `cost_usd` of the session that moved
+  them. It only grows; delete it when you like.
+
+Every session of a login reports the same two windows, and an idle one keeps showing the figures
+of its last API call. So a week file keeps the highest reading and is rewritten only when a figure
+changes; only a session that made an API call since its previous refresh can report a reset (a
+reading 5 points or more under the stored one), and after a reset only such a session raises the
+week. Two logins on one config folder get a file each.
 
 New in 0.6.0, a session hears its own context use from that file: a hook on every prompt and
 after every batch of tool calls adds one line, `Context ~45%. Repo work: /handoff:close at a

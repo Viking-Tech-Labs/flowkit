@@ -1260,9 +1260,10 @@ class Handoff(unittest.TestCase):
         weeks = self.tmp / "claude" / "usage-stats"
         weeks.mkdir()
         (weeks / "week-1.json").write_text('{"seven_day_pct": 10, "resets_at": 1}')
-        os.utime(weeks / "week-1.json", (time.time() - 60, time.time() - 60))  # a coarse clock gives both one mtime
         (weeks / "week-2.json").write_text(json.dumps({"seven_day_pct": 49, "resets_at": int(time.time()) + 7200,
                                                        "five_hour_pct": 11, "updated": "2026-10-20T09:50:55Z"}))
+        for name in ("week-1.json", "week-2.json"):  # one change time, as a coarse clock gives: `updated` decides
+            os.utime(weeks / name, (1000, 1000))
         out = self.handoff("usage")
         self.assertEqual(out.returncode, 0)
         self.assertRegex(out.stdout.strip(), r"^usage: the live call failed \(no answer \(exit 1\)\); old figures "
