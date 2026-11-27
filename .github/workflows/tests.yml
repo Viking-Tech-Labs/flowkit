@@ -1,0 +1,37 @@
+# Runs every plugin's unit tests and the maintainer scripts' own (scripts/test.sh) on each push and
+# pull request, on macOS and Linux. tmux is installed for the tests that drive a real server; the
+# board's tests run under `claude plugin test`, so Claude Code is installed at a pinned version
+# (no login: the tests need none). A tag push runs nothing: its commit was tested on its branch.
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      DISABLE_AUTOUPDATER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install tmux
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then brew install tmux; else sudo apt-get update -q && sudo apt-get install -y -q tmux; fi
+      - name: Install Claude Code 2.1.332
+        run: npm install -g @anthropic-ai/claude-code@2.1.332
+      - name: Tests
+        run: scripts/test.sh
