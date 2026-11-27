@@ -181,12 +181,16 @@ without a bump reaches nobody.
 runs one suite); the `tests` workflow runs it on each push and pull request, on macOS and Linux.
 `scripts/release.py <plugin> patch|minor` does the release from the branch the work is on: it
 refuses a dirty tree, a branch behind its upstream, a `main` it cannot fast-forward, an existing
-tag and red tests; then it bumps the plugin's `version` alone, commits that file as
+tag, a tag of the current version that never reached `origin`, red tests and tests that leave
+changes; then it bumps the plugin's `version` alone, commits that file as
 `<plugin> <version>`, tags `<plugin>-v<version>`, fast-forwards `main` to the branch, pushes
 `main` and the tag together, and runs `claude plugin marketplace update flowkit` and
-`claude plugin update <plugin>@flowkit` on your machine, printing each step. `--dry-run` prints
-the steps and changes nothing. `scripts/release.py tags` lists every version that reached `main`
-without a tag (`--create` tags each at the commit that set it; push them yourself).
+`claude plugin update <plugin>@flowkit` on your machine, printing each step. A commit or a push
+that fails (a hook that blocks, the network) puts the file, the branch, `main` and the tag back,
+so the same command runs again once the cause is fixed. `--dry-run` prints the steps and changes
+nothing. `scripts/release.py tags` lists every version that reached `main` without a tag, and
+every tag that is here and not on `origin` or the other way round (`--create` tags each untagged
+version at the commit that set it and prints the push, which is yours).
 
 Fresh-install check, 2026-11-27, macOS, Claude Code 2.1.332: a new profile with no login added the
 marketplace from GitHub (over SSH, and over HTTPS with no key), installed brain 0.1.1,

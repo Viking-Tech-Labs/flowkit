@@ -22,6 +22,7 @@ class ReleaseTest(unittest.TestCase):
         self.env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
                         GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
                         GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid",
+                        GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="maintenance.auto", GIT_CONFIG_VALUE_0="false",
                         CLAUDE_LOG=str(self.tmp / "claude.log"), STUB_TESTS_EXIT="0")
         stubs = self.tmp / "stubs"
         stubs.mkdir()
@@ -115,6 +116,12 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn("[6] fast-forward: none", done.stdout)
         self.assertEqual(self.git(self.origin, "rev-parse", "main"), self.git(self.work, "rev-parse", "HEAD"))
 
+    def own(self):
+        """The branches and tags here, the plugin.json and the tree: what a failed release puts back
+        (a fetch may still add a remote-tracking ref)."""
+        return (self.git(self.work, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/tags"),
+                *self.state()[1:])
+
     def assertRefused(self, reason, *args, **env):
         before = self.state()
         done = self.release("demo", "minor", *args, **env)
@@ -128,10 +135,9 @@ class ReleaseTest(unittest.TestCase):
         self.assertRefused("the working tree is not clean")
 
     def test_refuses_red_tests(self):
-        before = self.git(self.work, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/tags")
+        before = self.own()
         self.assertRefused("the tests are red", STUB_TESTS_EXIT="1")
-        self.assertEqual(self.git(self.work, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/tags"),
-                         before, "no commit, no tag")
+        self.assertEqual(self.own(), before, "no commit, no tag")
 
     def test_refuses_a_branch_behind_its_upstream(self):
         self.git(self.work, "push", "--quiet", "-u", "origin", "v3")
@@ -156,6 +162,72 @@ class ReleaseTest(unittest.TestCase):
         self.git(self.work, "tag", "demo-v0.2.0", "main")
         self.assertRefused("tag demo-v0.2.0 exists already")
 
+    def hook(self, name, script="#!/bin/sh\necho blocked by the hook >&2\nexit 1\n"):
+        path = self.work / ".git" / "hooks" / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(script)
+        path.chmod(0o755)
+        return path
+
+    def test_a_blocked_push_puts_everything_back_and_the_rerun_releases_the_same_version(self):
+        hook, before = self.hook("pre-push"), self.own()
+        done = self.assertRefused("git push")
+        self.assertIn("blocked by the hook", done.stderr)
+        self.assertIn("nothing released, demo is at 0.1.0 as before", done.stderr)
+        self.assertEqual(self.own(), before, "no bump commit, no tag, main where it was")
+        hook.unlink()
+        again = self.release("demo", "minor")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(self.git(self.origin, "tag", "-l"), "demo-v0.2.0")
+        self.assertEqual(self.git(self.origin, "rev-parse", "main"), self.git(self.work, "rev-parse", "HEAD"))
+
+    def test_a_blocked_push_on_main_puts_main_back(self):
+        self.git(self.work, "switch", "--quiet", "main")
+        self.git(self.work, "merge", "--quiet", "--ff-only", "v3")
+        self.hook("pre-push")
+        before = self.own()
+        self.assertRefused("git push")
+        self.assertEqual(self.own(), before)
+
+    def test_a_blocked_commit_leaves_a_clean_tree(self):
+        self.hook("pre-commit")
+        before = self.own()
+        done = self.assertRefused("git commit")
+        self.assertIn("nothing released, demo is at 0.1.0 as before", done.stderr)
+        self.assertEqual(self.own(), before)
+        self.assertEqual(self.git(self.work, "status", "--porcelain", "--untracked-files=all"), "")
+
+    def test_refuses_while_the_current_versions_tag_never_reached_origin(self):
+        self.git(self.work, "tag", "demo-v0.1.0", "main")
+        self.assertRefused("tag demo-v0.1.0 is here and not on origin")
+        self.git(self.work, "push", "--quiet", "origin", "refs/tags/demo-v0.1.0")
+        done = self.release("demo", "minor")
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_refuses_tests_that_leave_changes_before_the_bump(self):
+        self.write("scripts/test.sh", '#!/bin/sh\necho left > "$(dirname "$0")/../left.txt"\n', mode=0o755)
+        self.git(self.work, "commit", "--quiet", "-am", "tests that leave a file")
+        before = (self.work / PLUGIN_JSON).read_text()
+        done = self.release("demo", "minor")
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("refused: the tests left changes: ?? left.txt", done.stderr)
+        self.assertEqual((self.work / PLUGIN_JSON).read_text(), before)
+        self.assertEqual(self.git(self.work, "status", "--porcelain", "--untracked-files=all"), "?? left.txt")
+
+    def test_refuses_an_untracked_file_git_was_told_not_to_show(self):
+        self.git(self.work, "config", "status.showUntrackedFiles", "no")
+        self.write("stray.txt", "x\n")
+        self.assertRefused("the working tree is not clean")
+
+    def test_refuses_a_flag_or_a_step_that_does_not_go_with_the_command(self):
+        before = self.state()
+        for args in (("tags", "--create", "--dry-run"), ("tags", "--dry-run"), ("tags", "patch"),
+                     ("demo", "patch", "--create")):
+            done = self.release(*args)
+            self.assertEqual(done.returncode, 2, args)
+            self.assertIn("release.py: error:", done.stderr)
+        self.assertEqual(self.state(), before)
+
     def test_refuses_an_unknown_plugin(self):
         done = self.release("nope", "patch")
         self.assertEqual(done.returncode, 1)
@@ -170,16 +242,34 @@ class ReleaseTest(unittest.TestCase):
             path.write_text(path.read_text().replace(json.loads(path.read_text())["version"], version))
             self.git(self.work, "commit", "--quiet", "-am", f"demo {version}")
         bumps = self.git(self.work, "rev-list", "-2", "main").splitlines()[::-1]
+        self.git(self.work, "push", "--quiet", "origin", "refs/tags/demo-v0.1.0")
         listed = self.release("tags")
         self.assertEqual(listed.returncode, 1, "a missing tag is a failed check")
         self.assertEqual(listed.stdout, f"demo-v0.1.1 {bumps[0][:7]} missing\ndemo-v0.2.0 {bumps[1][:7]} missing\n")
         self.assertEqual(self.git(self.work, "tag", "-l"), "demo-v0.1.0")
         created = self.release("tags", "--create")
         self.assertEqual(created.returncode, 0, created.stderr)
+        self.assertEqual(created.stdout, f"demo-v0.1.1 {bumps[0][:7]} tagged\ndemo-v0.2.0 {bumps[1][:7]} tagged\n"
+                                         "push them: git push origin refs/tags/demo-v0.1.1 refs/tags/demo-v0.2.0\n")
         self.assertEqual(self.git(self.work, "rev-parse", "demo-v0.1.1^{commit}"), bumps[0])
         self.assertEqual(self.git(self.work, "rev-parse", "demo-v0.2.0^{commit}"), bumps[1])
+        unpushed = self.release("tags")
+        self.assertEqual(unpushed.returncode, 1, "a tag that never reached origin is a failed check")
+        self.assertEqual(unpushed.stdout, "demo-v0.1.1 not on origin\ndemo-v0.2.0 not on origin\n"
+                                          "push them: git push origin refs/tags/demo-v0.1.1 refs/tags/demo-v0.2.0\n")
+        self.git(self.work, "push", "--quiet", "origin", "refs/tags/demo-v0.1.1", "refs/tags/demo-v0.2.0")
         again = self.release("tags")
         self.assertEqual((again.returncode, again.stdout), (0, "every version has its tag\n"))
+
+    def test_tags_does_not_create_a_tag_only_origin_has(self):
+        self.git(self.work, "tag", "demo-v0.1.0", "main")
+        self.git(self.work, "push", "--quiet", "origin", "refs/tags/demo-v0.1.0")
+        self.git(self.work, "tag", "--delete", "demo-v0.1.0")
+        for args in (("tags",), ("tags", "--create")):
+            done = self.release(*args)
+            self.assertEqual((done.returncode, done.stdout),
+                             (1, "demo-v0.1.0 on origin only: git fetch --tags origin\n"), args)
+            self.assertEqual(self.git(self.work, "tag", "-l"), "")
 
 
 if __name__ == "__main__":
