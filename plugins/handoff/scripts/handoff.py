@@ -104,6 +104,7 @@ SETTINGS = CLAUDE / "settings.json"
 KIT = {  # the tmux kit: where each file of the plugin is copied, so a tmux.conf never points at a version
     "tmux/tmux.conf": CONFIG / "tmux.conf",
     "tmux/cheatsheet.md": CONFIG / "tmux-cheatsheet.md",
+    "bin/flowkit-tick": HOME / ".local" / "bin" / "flowkit-tick",
     "bin/flowkit-tmux": HOME / ".local" / "bin" / "flowkit-tmux",
     "bin/flowkit-away": HOME / ".local" / "bin" / "flowkit-away",
     "bin/flowkit-usage": HOME / ".local" / "bin" / "flowkit-usage",

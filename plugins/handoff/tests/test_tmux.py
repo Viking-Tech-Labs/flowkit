@@ -2,19 +2,15 @@
 swaps its command runner for a stub that serves panes, windows and `claude agents`, and records the
 tmux writes, so nothing reaches a real tmux server or the user's files."""
 import contextlib
-import fcntl
 import importlib.machinery
 import io
 import importlib.util
 import json
 import os
-import shutil
-import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest import mock
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "flowkit-tmux"
 SEP = "\x1f"
@@ -34,8 +30,7 @@ class Labels(unittest.TestCase):
             (self.tmp / sub).mkdir(parents=True)
         self.ft = load()
         self.ft.CLAUDE = self.tmp
-        self.ft.CONFIG = self.tmp  # never the user's handoff.conf: with remind=on there the tick would start a real pass
-        self.ft.CACHE = self.tmp / "status.json"
+        self.ft.CONFIG = self.tmp  # never the user's handoff.conf
         self.ft.run = self.run_stub
         self.rows, self.pane_list, self.windows, self.writes = [], [], {}, []
         self.later, self.listed, self.asked = None, 0, 0  # a second pane list, served from the second list-panes on
@@ -343,260 +338,37 @@ class Parked(Labels):
         self.assertEqual(self.writes[-1], ("switch-client", "-t", "%1"), "its number jumps there")
 
 
-class Cache(Labels):
-    """The status-bar job answers from its cache for 10 seconds, then asks `claude agents` again;
-    a run that overlaps another prints the cache; `list` always asks."""
+class Asks(Labels):
+    """The marks ask `claude agents` once a call (the tick decides how often: tests/test_tick.py),
+    `list` asks every time, and a program that is not installed is one that failed."""
 
     def setUp(self):
         super().setUp()
         self.window("@1", "st")
 
-    def line(self):
-        self.writes.clear()
-        self.ft.closed.cache_clear()
+    def test_marks_print_the_line_and_ask_once(self):
+        self.session(1, status="waiting")
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.ft.status_line()
-        return out.getvalue()
-
-    def test_the_tick_drains_the_capacity_queue(self):
-        queue = self.tmp / "capacity" / "queue"
-        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
-            self.line()
-            queue.mkdir(parents=True)
-            (queue / ".seq").write_text("1\n")
-            self.ft.CACHE.unlink()
-            self.line()
-            self.assertEqual(popen.call_count, 0, "an empty queue costs one directory read")
-            (queue / "1.json").write_text("{}")
-            self.ft.CACHE.unlink()
-            self.line()
-            self.assertEqual(popen.call_count, 1)
-            self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "capacity.py"), "drain"])
-            self.ft.CACHE.unlink()
-            self.line()
-            self.assertEqual(popen.call_count, 1, "at most every FLOWKIT_CAPACITY_POLL seconds")
-            with mock.patch.dict(os.environ, {"FLOWKIT_CAPACITY_POLL": "0"}):
-                self.ft.CACHE.unlink()
-                self.line()
-            self.assertEqual(popen.call_count, 2)
-
-    def test_the_tick_runs_the_minute_pass_while_a_stop_line_exists(self):
-        conf = self.tmp / "capacity.conf"
-        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
-            self.line()
-            conf.write_text("[/Users/me/app]\nresource simulator = a device check\n# stop simulator = no\n")
-            self.ft.CACHE.unlink()
-            self.line()
-            self.assertEqual(popen.call_count, 0, "no stop line costs one file read")
-            conf.write_text("[/Users/me/app]\nresource simulator = a device check\nstop simulator = ./stop-devices\n")
-            self.ft.CACHE.unlink()
-            self.line()
-            self.assertEqual(popen.call_count, 1)
-            self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "capacity.py"), "idle"])
-            self.ft.CACHE.unlink()
-            self.line()
-            self.assertEqual(popen.call_count, 1, "at most once a minute")
-            old = time.time() - 61
-            os.utime(self.tmp / "capacity" / ".idle", (old, old))
-            self.ft.CACHE.unlink()
-            self.line()
-            self.assertEqual(popen.call_count, 2)
-
-    def test_the_installed_copy_drains_through_the_installed_plugin(self):
-        """The kit's copy in ~/.local/bin is no plugin (the resolver the kit puts in ~/.local/scripts
-        notwithstanding): the drain starts the capacity.py of the newest handoff in
-        installed_plugins.json that has one."""
-        copy = self.tmp / "home" / ".local" / "bin" / "flowkit-tmux"
-        copy.parent.mkdir(parents=True)
-        shutil.copyfile(BIN, copy)
-        (copy.parent.parent / "scripts").mkdir()
-        (copy.parent.parent / "scripts" / "capacity.py").write_text("# the kit's resolver for a 0.8.0 tick\n")
-        self.ft = load(copy)
-        self.ft.CLAUDE = self.tmp
-        (self.tmp / "plugins").mkdir()
-        (self.tmp / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": {"handoff@flowkit": [
-            {"installPath": str(self.tmp / "gone")}, {"installPath": str(BIN.parent.parent)}]}}))
-        queue = self.tmp / "capacity" / "queue"
-        queue.mkdir(parents=True)
-        (queue / "1.json").write_text("{}")
-        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
-            self.ft.drain()
-        self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "capacity.py"), "drain"])
-        (self.tmp / "flowkit" / "watches").mkdir()
-        (self.tmp / "flowkit" / "watches" / "repo!12.json").write_text("{}")
-        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
-            self.ft.watch()
-        self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "watch.py"), "run"])
-
-    def test_the_tick_starts_a_watch_poller_that_went(self):
-        state = self.tmp / "flowkit" / "watches"
-        state.mkdir()
-        gone = subprocess.Popen(["true"])
-        gone.wait()
-        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
-            self.line()
-            self.assertEqual(popen.call_count, 0, "no watch is open: one directory read")
-            (state / "repo!12.json").write_text("{}")
-            (state / "poller.pid").write_text(str(os.getpid()))
-            self.ft.watch()
-            self.assertEqual(popen.call_count, 0, "its poller runs and beats")
-            os.utime(state / "poller.pid", (0, 0))
-            self.ft.CACHE.unlink()
-            self.line()
-            self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "watch.py"), "run"],
-                             "a heartbeat older than three minutes")
-            self.ft.watch()
-            self.assertEqual(popen.call_count, 1, "at most once a minute")
-            (state / "poller.pid").write_text(str(gone.pid))
-            os.utime(state / ".tick", (0, 0))
-            self.ft.watch()
-            self.assertEqual(popen.call_count, 2, "a fresh heartbeat of a process that is gone")
-
-    def test_the_tick_starts_a_limit_waiter_that_went(self):
-        state = self.tmp / "flowkit" / "retry"
-        sid = "00000001-0000-0000-0000-000000000000"
-        gone = subprocess.Popen(["true"])
-        gone.wait()
-        rec = {"kind": "rate_limit", "resume": True, "at": 5.0, "pid": os.getpid()}
-
-        def tick(**change):
-            (state / f"{sid}.json").write_text(json.dumps({**rec, **change}))
-            (state / ".tick").unlink(missing_ok=True)
-            self.ft.limits()
-
-        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
-            self.line()
-            self.assertEqual(popen.call_count, 0, "no record: one directory read")
-            (state / f"{sid}.json").write_text(json.dumps(rec))
-            self.ft.CACHE.unlink()
-            self.line()
-            self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "handoff.py"), "retry-wait", sid])
-            self.ft.limits()
-            self.assertEqual(popen.call_count, 1, "at most once a minute")
-            for change in ({"kind": "server_error"}, {"resume": False}, {"handled": 5.0, "state": "continued"},
-                           {"handled": 5.0, "state": "unreachable"}, {"pid": gone.pid}, {"pid": None}):
-                tick(**change)
-                self.assertEqual(popen.call_count, 1, change)
-            tick(handled=4.0)
-            self.assertEqual(popen.call_count, 2, "a stop newer than the one its waiter was done with")
-            with (state / f"{sid}.lock").open("w") as held:
-                fcntl.flock(held, fcntl.LOCK_EX)
-                tick()
-                self.assertEqual(popen.call_count, 2, "its waiter lives: it holds the lock")
-            tick()
-            self.assertEqual(popen.call_count, 3, "a lock file nobody holds is a dead waiter's")
-            login = self.tmp / "login"
-            login.mkdir()
-            who = {"account": "acct-1", "organization": "org-1"}
-            native = dict(handled=5.0, state="native", config=str(login), account=who)
-            for org, count, why in (("org-1", 3, "the account it stopped on: still Claude Code's own to continue"),
-                                    ("org-2", 4, "another organization under its login: open again")):
-                (login / ".claude.json").write_text(json.dumps(
-                    {"oauthAccount": {"accountUuid": "acct-1", "organizationUuid": org}}))
-                tick(**native)
-                self.assertEqual(popen.call_count, count, why)
-            (login / ".claude.json").write_text("{}")
-            tick(**native)
-            self.assertEqual(popen.call_count, 4, "nobody logged in is no change")
-
-    def test_the_tick_starts_the_reconnect_when_the_account_of_a_login_changes(self):
-        state = self.tmp / "flowkit"
-        wrote = [time.time_ns()]
-
-        def login(path, account, org="org-1"):
-            path.write_text(json.dumps({"oauthAccount": {"accountUuid": account, "organizationUuid": org}}) if account else "{}")
-            wrote[0] += 10 ** 9
-            os.utime(path, ns=(wrote[0], wrote[0]))
-
-        def tick(minutes=2):
-            if (state / ".remote-tick").exists():
-                os.utime(state / ".remote-tick", (time.time() - minutes * 60,) * 2)
-            self.ft.logins()
-
-        own = self.tmp / ".claude.json"
-        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
-            handoff = str(BIN.parent.parent / "scripts" / "handoff.py")
-            login(own, "acct-1")
-            tick()
-            login(own, "acct-1")
-            tick()
-            self.assertEqual(popen.call_count, 0, "the first sight, then the same account rewritten")
-            login(own, "acct-2")
-            tick()
-            self.assertEqual(popen.call_args[0][0][1:], [handoff, "reconnect", "--all"])
-            tick(minutes=0.5)
-            self.assertEqual(popen.call_count, 1, "at most once a minute")
-            tick()
-            self.assertEqual((popen.call_count, popen.call_args[0][0][-1]), (2, "--all"), "its notice may come late")
-            seen = json.loads((state / "logins.json").read_text())
-            (state / "logins.json").write_text(json.dumps({**seen, "changed": time.time() - self.ft.LOOK - 1}))
-            tick()
-            self.assertEqual(popen.call_count, 2, "three minutes on, nobody owed: two stats and a directory read")
-            (state / "remote").mkdir()
-            (state / "remote" / "s1.owed").write_text("1")
-            tick()
-            self.assertEqual((popen.call_count, popen.call_args[0][0][1:]), (3, [handoff, "reconnect"]), "one is owed its link")
-            (state / "remote" / "s1.owed").unlink()
-            login(own, None)
-            tick()
-            login(own, "acct-2", "org-2")
-            tick()
-            self.assertEqual((popen.call_count, popen.call_args[0][0][-1]), (4, "--all"), "logged out, then another organization")
-            home = self.tmp / "home"
-            (home / ".claude").mkdir(parents=True)
-            self.ft.CLAUDE = home / ".claude"
-            with mock.patch.object(self.ft.Path, "home", return_value=home):
-                login(home / ".claude.json", "acct-1")
-                tick()
-                login(home / ".claude.json", "acct-3")
-                tick()
-            self.assertEqual(popen.call_count, 5, "for ~/.claude the login without the variable counts too")
-
-    def test_the_tick_starts_remind_once_a_minute_with_remind_on(self):
-        tick = self.tmp / "flowkit" / ".remind-tick"
-        with mock.patch.object(self.ft.subprocess, "Popen") as popen:
-            self.line()
-            self.assertEqual(popen.call_count, 0, "no handoff.conf: off")
-            (self.tmp / "handoff.conf").write_text("remind=off\n")
-            self.ft.remind()
-            self.assertEqual(popen.call_count, 0)
-            (self.tmp / "handoff.conf").write_text("remind=off\nremind=on\n")
-            self.ft.CACHE.unlink()
-            self.line()
-            self.assertEqual(popen.call_args[0][0][1:], [str(BIN.parent.parent / "scripts" / "handoff.py"), "remind"])
-            self.ft.remind()
-            self.assertEqual(popen.call_count, 1, "at most once a minute")
-            os.utime(tick, (0, 0))
-            self.ft.remind()
-            self.assertEqual(popen.call_count, 2, "a minute on")
-
-    def test_a_line_younger_than_ten_seconds_comes_from_the_cache(self):
-        self.session(1, status="waiting")
-        first = self.line()
-        self.assertIn("1 needs you", first)
-        self.assertEqual((self.asked, self.line(), self.asked), (1, first, 1))
-        stale = json.loads(self.ft.CACHE.read_text())
-        stale["at"] -= 11
-        self.ft.CACHE.write_text(json.dumps(stale))
-        self.assertEqual((self.line(), self.asked), (first, 2))
-
-    def test_an_overlapping_run_prints_the_cache_and_asks_nothing(self):
-        self.session(1, status="waiting")
-        self.ft.CACHE.write_text(json.dumps({"at": 0, "line": "stale"}))
-        with self.ft.CACHE.with_suffix(".lock").open("w") as held:
-            fcntl.flock(held, fcntl.LOCK_EX)
-            self.assertEqual((self.line(), self.asked), ("stale", 0))
-        self.assertIn("1 needs you", self.line())
-        self.assertEqual(self.asked, 1)
+            self.ft.main(["marks"])
+        self.assertEqual((out.getvalue(), self.asked), ("#[reverse] ⚑ 1 needs you #[noreverse] ", 1))
 
     def test_list_asks_every_time(self):
         self.session(1, status="waiting")
-        self.line()
         self.ft.input = lambda prompt="": ""
         with contextlib.redirect_stdout(io.StringIO()):
             self.ft.list_sessions()
             self.ft.list_sessions()
-        self.assertEqual(self.asked, 3)
+        self.assertEqual(self.asked, 2)
+
+    def test_a_program_that_is_not_installed_ends_no_pass(self):
+        """No tmux, or no claude, on the PATH raised out of the marks and took the whole tick along."""
+        ft = load()
+        self.assertIsNone(ft.run("flowkit-no-such-program", "--version"))
+        ft.CLAUDE = ft.CONFIG = self.tmp
+        ft.run = lambda *cmd: None  # what every call answers on a computer with neither
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            ft.main(["marks"])
+        self.assertEqual(out.getvalue(), "")
 
 
 class Closer(Labels):

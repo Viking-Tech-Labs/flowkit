@@ -699,8 +699,8 @@ class Handoff(unittest.TestCase):
 
     def plugin_root(self, version):
         root = self.tmp / f"root-{version}"
-        for rel in ("tmux/tmux.conf", "tmux/cheatsheet.md", "tmux/capacity-shim.py", "bin/flowkit-tmux",
-                    "bin/flowkit-away", "bin/flowkit-usage"):
+        for rel in ("tmux/tmux.conf", "tmux/cheatsheet.md", "tmux/capacity-shim.py", "bin/flowkit-tick",
+                    "bin/flowkit-tmux", "bin/flowkit-away", "bin/flowkit-usage"):
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / rel).write_text(f"{rel} {version}\n")
         (root / ".claude-plugin").mkdir(exist_ok=True)

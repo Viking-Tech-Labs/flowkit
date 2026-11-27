@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """flowkit-tmux: the Claude Code sessions in tmux at a glance, for the flowkit tmux kit.
 
-  flowkit-tmux waiting        status-bar job: marks each Claude pane with its state
-                              (@flowkit_state: working, waiting, idle), each tab with how many
-                              of its sessions wait on you (@flowkit_wait), each story and adhoc
-                              tab with its most urgent state (@flowkit_tab), prints the total;
+  flowkit-tmux marks          the tick's job in tmux (flowkit-tick runs it at every pass): marks
+                              each Claude pane with its state (@flowkit_state: working, waiting,
+                              idle), each tab with how many of its sessions wait on you
+                              (@flowkit_wait), each story and adhoc tab with its most urgent
+                              state (@flowkit_tab), prints the total for the status bar;
                               a claude pane left at a start-up prompt waits on you too, and is
                               listed in ~/.claude/flowkit/parked.json while it does;
-                              starts again the waiter of a session stopped on a usage limit;
-                              when the account of a login changes, brings Remote Control back
-                              to the sessions that lost it (`handoff.py reconnect`);
-                              nudges the sessions parked on a question once the away flag
-                              takes effect; with remind=on in handoff.conf it sends the
-                              reminders (`handoff.py remind`);
                               with autoclose=on in handoff.conf it also closes a finished slice's
                               pane once its successor runs or its watch is open, and finished
                               story tabs
+  flowkit-tmux waiting        the status-bar job of a tmux.conf written before 0.14.0: hands
+                              over to `flowkit-tick bar`, which prints the line and, where no
+                              timer keeps the tick, runs it
   flowkit-tmux closable       dry run: the panes the tick would close, closing nothing
   flowkit-tmux list [client]  numbered list of every session, waiting first; a number jumps there
   flowkit-tmux dialog         reads a pane's screen on stdin: prints the first line of the dialog
@@ -27,17 +25,13 @@ forward to its own version at every session start; the copy finds the plugin's o
 through installed_plugins.json. A session is mapped to its pane through its parent
 processes, up to the pane's shell; background sessions have no pane and are listed apart.
 """
-import contextlib
-import fcntl
 import functools
-import io
 import json
 import os
 import re
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -65,13 +59,13 @@ SPAWN_GRACE = 2 * 60  # a pane flowkit-spawn stamped @flowkit_born this recently
 HINT = re.compile(r"enter to (?:confirm|select|continue)|esc to (?!interrupt)\w+", re.I)  # the key hints under a dialog
 RULE = re.compile(r"^\s*[─-╿]{10,}\s*$")  # a row of box-drawing characters
 PARKED = 60  # a dialog this long on a claude pane with no session listed is a start-up prompt nobody answered
-CACHE = Path(tempfile.gettempdir()) / f"flowkit-tmux-{os.getuid()}.json"  # the last status line and when
-FRESH = 10  # a status line this young is printed again without asking `claude agents`
-LOOK = 3 * 60  # after the account of a login changed, every session is looked at again this long: its notice may come late
 
 
 def run(*cmd):
-    out = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError:
+        return None  # the program is not installed: the same as one that failed
     return out.stdout if out.returncode == 0 else None
 
 
@@ -514,269 +508,13 @@ def plugin_root():
     return max(found)[1] if found else own
 
 
-def drain():
-    """The capacity queue drains on the tick too, so a slot freed by a session that died or sat
-    idle starts the next queued launch. An empty queue costs one directory read; else
-    `capacity.py drain` runs detached, at most every FLOWKIT_CAPACITY_POLL (15) seconds."""
-    state = CLAUDE / "capacity"
-    try:
-        if not any(e.name.endswith(".json") for e in os.scandir(state / "queue")):
-            return
-    except OSError:
-        return
-    try:
-        if time.time() - (state / ".tick").stat().st_mtime < float(os.environ.get("FLOWKIT_CAPACITY_POLL") or 15):
-            return
-    except OSError:
-        pass
-    try:
-        (state / ".tick").touch()
-        subprocess.Popen([sys.executable, str(plugin_root() / "scripts" / "capacity.py"), "drain"],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-    except OSError:
-        pass
-
-
-def idle():
-    """A resource with a `stop` line in capacity.conf is stopped once it sat free for its minutes
-    (the README's "A free resource is stopped"): while the file has such a line, `capacity.py idle`
-    runs detached at most once a minute, and returns at once itself when no such resource is
-    leased or counting. Without one this costs one file read."""
-    try:
-        if not re.search(r"^\s*stop\s+\S+\s*=", (CONFIG / "capacity.conf").read_text(), re.M):
-            return
-    except OSError:
-        return
-    state = CLAUDE / "capacity"
-    try:
-        if time.time() - (state / ".idle").stat().st_mtime < 60:
-            return
-    except OSError:
-        pass
-    try:
-        state.mkdir(parents=True, exist_ok=True)
-        (state / ".idle").touch()
-        subprocess.Popen([sys.executable, str(plugin_root() / "scripts" / "capacity.py"), "idle"],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-    except OSError:
-        pass
-
-
-def watch():
-    """An open watch needs its poller (scripts/watch.py): when its process is gone or its heartbeat,
-    poller.pid's mtime, is older than three minutes, `watch.py run` starts detached, at most once a
-    minute; a poller that still runs makes that one exit. No watch costs one directory read."""
-    state = CLAUDE / "flowkit" / "watches"
-    try:
-        if not any(e.name.endswith(".json") for e in os.scandir(state)):
-            return
-    except OSError:
-        return
-    try:
-        os.kill(int((state / "poller.pid").read_text()), 0)
-        if time.time() - (state / "poller.pid").stat().st_mtime < 180:
-            return
-    except (OSError, ValueError):
-        pass
-    try:
-        if time.time() - (state / ".tick").stat().st_mtime < 60:
-            return
-    except OSError:
-        pass
-    try:
-        (state / ".tick").touch()
-        subprocess.Popen([sys.executable, str(plugin_root() / "scripts" / "watch.py"), "run"],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-    except OSError:
-        pass
-
-
-def account(path):
-    """The account and organization ids an account file names, or None."""
-    try:
-        who = json.loads(path.read_text()).get("oauthAccount")
-    except (OSError, ValueError, AttributeError):
-        return None
-    return {"account": who["accountUuid"], "organization": who.get("organizationUuid")} \
-        if isinstance(who, dict) and who.get("accountUuid") else None
-
-
-def logins():
-    """When the account of a login changes (a /login in any session), Claude Code drops the Remote
-    Control link of every session on it and brings none back, so `handoff.py reconnect` does: it
-    starts detached, with --all at the change and once a minute for LOOK seconds after it, then
-    once a minute while a session is still owed its link (it was at work, or on a question). The
-    change is read from the account files: this folder's own (CLAUDE_CONFIG_DIR set) and, for
-    ~/.claude, the home's ~/.claude.json (the variable unset), their ids compared with what the
-    last tick saw in flowkit/logins.json; a file is parsed only once it was rewritten. Nothing
-    changed and nobody owed costs two stats and one directory read."""
-    state = CLAUDE / "flowkit"
-    files = [CLAUDE / ".claude.json"]
-    if CLAUDE.resolve() == (Path.home() / ".claude").resolve():
-        files.append(Path.home() / ".claude.json")
-    try:
-        seen = json.loads((state / "logins.json").read_text())
-    except (OSError, ValueError):
-        seen = {}
-    if not isinstance(seen, dict):
-        seen = {}
-    now, changed, dirty = time.time(), False, False
-    for path in files:
-        try:
-            st = path.stat()
-        except OSError:
-            continue
-        was = seen.get(str(path)) if isinstance(seen.get(str(path)), dict) else {}
-        if was.get("stat") == [st.st_mtime_ns, st.st_size]:
-            continue
-        who = account(path)
-        if who and was.get("account") and who != was["account"]:
-            seen["changed"], changed = now, True
-        seen[str(path)] = {"stat": [st.st_mtime_ns, st.st_size], "account": who or was.get("account")}
-        dirty = True
-    try:
-        if dirty:
-            state.mkdir(parents=True, exist_ok=True)
-            fresh = state / "logins.tmp"
-            fresh.write_text(json.dumps(seen))
-            os.replace(fresh, state / "logins.json")
-        looking = now - (seen.get("changed") or 0) < LOOK
-        if not looking and not any(name.endswith(".owed") for name in os.listdir(state / "remote")):
-            return
-    except OSError:
-        return
-    try:
-        if not changed and now - (state / ".remote-tick").stat().st_mtime < 60:
-            return
-    except OSError:
-        pass
-    try:
-        (state / ".remote-tick").touch()
-        subprocess.Popen([sys.executable, str(plugin_root() / "scripts" / "handoff.py"), "reconnect",
-                          *(["--all"] if looking else [])],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-    except OSError:
-        pass
-
-
-def relogged(rec):
-    """The login a limit record's session stopped on is another account's now: its account file
-    (<CLAUDE_CONFIG_DIR as the session had it>/.claude.json, ~/.claude.json when it had none) names
-    other ids than the record keeps."""
-    if not rec.get("account"):
-        return False
-    who = account(Path(rec.get("config") or Path.home()) / ".claude.json")
-    return bool(who) and who != rec["account"]
-
-
-def limits():
-    """A session stopped on a usage limit needs its waiter (`handoff.py retry-wait`), which the
-    StopFailure hook starts and which lives until the record goes: one that died is started again,
-    at most once a minute. Never for a record its waiter is done with (continued, left to the user
-    or to Claude Code's own wait) unless the account under its session changed since, which opens
-    it again; never with limit resume off, or for a session that is gone. No record costs one
-    directory read."""
-    state = CLAUDE / "flowkit" / "retry"
-    try:
-        names = [e.name for e in os.scandir(state) if e.name.endswith(".json") and not e.name.startswith(".")]
-    except OSError:
-        return
-    if not names:
-        return
-    try:
-        if time.time() - (state / ".tick").stat().st_mtime < 60:
-            return
-    except OSError:
-        pass
-    try:
-        (state / ".tick").touch()
-    except OSError:
-        return
-    for name in names:
-        try:
-            rec = json.loads((state / name).read_text())
-            if rec.get("kind") != "rate_limit" or not rec.get("resume") or \
-                    (rec.get("handled") == rec.get("at") and not relogged(rec)):
-                continue
-            os.kill(int(rec["pid"]), 0)
-        except (OSError, ValueError, TypeError, AttributeError, KeyError):
-            continue
-        try:
-            with (state / f"{name[:-5]}.lock").open() as lock:  # its waiter holds an flock on it while it lives
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            continue
-        try:
-            subprocess.Popen([sys.executable, str(plugin_root() / "scripts" / "handoff.py"), "retry-wait", name[:-5]],
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True)
-        except OSError:
-            pass
-
-
-def remind():
-    """With remind=on in handoff.conf, `handoff.py remind` starts detached at most once a minute: it
-    tells the user what waits on them while they are neither away nor at the computer, and its own
-    lock keeps one pass at a time. Off costs one read of handoff.conf."""
-    if setting("remind") != "on":
-        return
-    state = CLAUDE / "flowkit"
-    try:
-        if time.time() - (state / ".remind-tick").stat().st_mtime < 60:
-            return
-    except OSError:
-        pass
-    try:
-        state.mkdir(parents=True, exist_ok=True)
-        (state / ".remind-tick").touch()
-        subprocess.Popen([sys.executable, str(plugin_root() / "scripts" / "handoff.py"), "remind"],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-    except OSError:
-        pass
-
-
 def status_line():
-    """`waiting` for the status bar. tmux reruns a #() job at every redraw that falls in a new
-    second, not every status-interval, so the line comes from the cache while it is younger than
-    FRESH seconds, and a run that overlaps another prints the cache too (the lock is never waited
-    for)."""
-    try:
-        cached = json.loads(CACHE.read_text())
-    except (OSError, ValueError):
-        cached = {}
-    if not isinstance(cached, dict):
-        cached = {}
-    line = cached.get("line", "")
-    if time.time() - cached.get("at", 0) < FRESH:
-        print(line, end="")
-        return
-    with CACHE.with_suffix(".lock").open("w") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            print(line, end="")
-            return
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            waiting()
-        drain()
-        idle()
-        watch()
-        limits()
-        logins()
-        remind()
-        line = out.getvalue()
-        fresh = CACHE.with_suffix(".tmp")
-        fresh.write_text(json.dumps({"at": time.time(), "line": line}))
-        os.replace(fresh, CACHE)
-    print(line, end="")
+    """`waiting`, what the status bar of a tmux.conf written before 0.14.0 runs: the line, and the
+    tick where no timer keeps it, are flowkit-tick's (`flowkit-tick bar`), the copy beside this
+    one. Without it nothing is printed."""
+    tick = Path(__file__).resolve().parent / "flowkit-tick"
+    if tick.is_file():
+        os.execv(sys.executable, [sys.executable, str(tick), "bar"])
 
 
 def age(started_ms):
@@ -861,7 +599,9 @@ def closable():
 
 def main(argv):
     cmd = argv[0] if argv else ""
-    if cmd == "waiting":
+    if cmd == "marks":
+        waiting()
+    elif cmd == "waiting":
         status_line()
     elif cmd == "closable":
         closable()

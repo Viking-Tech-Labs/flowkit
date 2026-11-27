@@ -543,9 +543,10 @@ fi
 story_note "> launched $name · $(date '+%Y-%m-%d %H:%M')${from_watch:+ · launched-by: watch $from_watch}"
 
 # Marks a window as the story's tab. The @flowkit_born stamp comes first, in the same command: the
-# story closer (flowkit-tmux waiting) runs at every status-line redraw, and opening a window is
-# one, so it lists the panes within milliseconds and must never see a story tab of bare shells
-# without a stamp. Each pane's top border names its slot, its session and the state the tick sets.
+# story closer (the tick's `flowkit-tmux marks`) runs at a status-line redraw where no timer runs
+# the tick, and opening a window is one, so it lists the panes within milliseconds and must never
+# see a story tab of bare shells without a stamp. Each pane's top border names its slot, its
+# session and the state the tick sets.
 mark_tab() { # window
   tm set-option -w -t "$1" @flowkit_born "$(date +%s)" \
     \; set-option -w -t "$1" "$key" "$slug" \; set-option -w -t "$1" "${key}_part" "$part" \
