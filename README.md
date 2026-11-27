@@ -67,6 +67,11 @@ and `/handoff:back` when you return. A closed laptop lid pauses everything.
 
 Each plugin is its own decision: install only the ones you want, with
 `claude plugin install <plugin>@flowkit`. Each says in its own README what it needs.
+[`docs/day-in-the-flow.md`](docs/day-in-the-flow.md) walks through one working day with them.
+
+Some pieces change your machine outside Claude Code and ship as recipes instead: a script and a
+page you install by hand, with no version promise. [`recipes/README.md`](recipes/README.md) has
+the rules.
 
 ## GitHub Copilot
 
@@ -163,6 +168,9 @@ GitHub Issues or whatever you use, and a task that mentions a story or ticket re
 those.
 
 ## Maintaining
+
+Ideas, bugs and pull requests: [`CONTRIBUTING.md`](CONTRIBUTING.md), which also says what never
+goes into this public repository.
 
 A release is: change the files, bump `version` in that plugin's `.claude-plugin/plugin.json`
 (only there; do not also set it in `marketplace.json`, the two would disagree), tag, push. With a
