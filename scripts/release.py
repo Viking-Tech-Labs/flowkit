@@ -175,6 +175,7 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="print the steps, change nothing")
     parser.add_argument("--create", action="store_true", help="with `tags`: create the missing tags")
     args = parser.parse_args(argv)
+    sys.stdout.reconfigure(line_buffering=True)  # steps, git's and the tests' output in order
     try:
         if args.plugin == "tags":
             missing = missing_tags(args.create)
