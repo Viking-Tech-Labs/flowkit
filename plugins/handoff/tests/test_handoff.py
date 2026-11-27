@@ -27,6 +27,7 @@ PLUGIN = Path(__file__).resolve().parent.parent
 HANDOFF = PLUGIN / "scripts" / "handoff.py"
 AWAY_BIN = PLUGIN / "bin" / "flowkit-away"
 SPAWN_BIN = PLUGIN / "bin" / "flowkit-spawn"
+SESSION_BIN = PLUGIN / "bin" / "flowkit-session"
 
 
 class Handoff(unittest.TestCase):
@@ -783,7 +784,7 @@ class Handoff(unittest.TestCase):
     def plugin_root(self, version):
         root = self.tmp / f"root-{version}"
         for rel in ("tmux/tmux.conf", "tmux/cheatsheet.md", "tmux/capacity-shim.py", "bin/flowkit-tick",
-                    "bin/flowkit-tmux", "bin/flowkit-away", "bin/flowkit-usage"):
+                    "bin/flowkit-tmux", "bin/flowkit-away", "bin/flowkit-usage", "bin/flowkit-session"):
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / rel).write_text(f"{rel} {version}\n")
         (root / ".claude-plugin").mkdir(exist_ok=True)
@@ -871,7 +872,7 @@ esac
                 "CLAUDE_CONFIG_DIR": str(self.tmp / "claude"), "XDG_CONFIG_HOME": str(conf.parent), "LANG": "en_US.UTF-8"}})
         domain = f"gui/{os.getuid()}"
         self.assertEqual(self.launchctl_calls(), [f"bootout {domain}/flowkit.tick", f"bootstrap {domain} {plist}"])
-        for name in ("flowkit-tick", "flowkit-tmux", "flowkit-away", "flowkit-usage"):
+        for name in ("flowkit-tick", "flowkit-tmux", "flowkit-away", "flowkit-usage", "flowkit-session"):
             copy = home / ".local" / "bin" / name
             self.assertEqual(copy.read_bytes(), (PLUGIN / "bin" / name).read_bytes())
             self.assertTrue(os.access(copy, os.X_OK), name)
@@ -943,7 +944,8 @@ esac
         self.assertEqual(out.stdout.replace("removed: ", "would remove: ").replace(f"backup: {home / '.tmux.conf.flowkit-bak'}\n", ""),
                          dry.stdout, "the dry run named what went")
         gone = [plist, conf / "tmux.conf", conf / "tmux-cheatsheet.md", conf / "kit-version", home / ".local" / "scripts" / "capacity.py",
-                *(home / ".local" / "bin" / n for n in ("flowkit-tick", "flowkit-tmux", "flowkit-away", "flowkit-usage"))]
+                *(home / ".local" / "bin" / n for n in ("flowkit-tick", "flowkit-tmux", "flowkit-away", "flowkit-usage",
+                                                           "flowkit-session"))]
         self.assertEqual([str(p) for p in gone if p.exists()], [])
         for path in gone:
             self.assertIn(f"removed: {path}", out.stdout)
@@ -2134,6 +2136,237 @@ esac
         self.assertTrue(lock.exists(), "the new waiter stays beside the record")
         self.api_error("rate_limit")  # woken while limited: the stop is noted, without another line
         self.assertEqual(len([l for l in self.log() if l.startswith("> retry")]), 1)
+
+    def reach(self, *args):
+        return subprocess.run([str(SESSION_BIN), *args], capture_output=True, text=True, env=self.env)
+
+    def said(self, *args):
+        out = self.reach(*args)
+        return out.returncode, out.stdout.strip() or out.stderr.strip()
+
+    def test_session_commands_in_a_tmux_pane(self):
+        self.retry_setup(story="st", screen="earlier\n│ > \n\n")
+        seen = {"session": self.SID, "name": "s4", "pid": self.pid, "kind": "interactive", "status": "idle", "cwd": None,
+                "backend": "tmux", "place": "%7", "place_pid": None, "copy": False, "story": "st"}
+        for word in ("s4", self.SID, str(self.pid)):  # by name, by session id, by process
+            out = self.reach("locate", word, "--json")
+            self.assertEqual((out.returncode, json.loads(out.stdout)), (0, seen), word)
+        self.assertEqual(self.said("locate", "s4"), (0, "\n".join(
+            f"{k}: {'no' if k == 'copy' else '-' if v is None else v}" for k, v in seen.items())))
+        stub = self.tmp / "bin" / "tmux"  # the list of every pane, as places() asks for it: the pane's shell is 4242
+        whole = "\\037".join(["4242", "%%7", "main", "@1", "1", "st", "0", "2.1.330", "st", "st", "", "", "", "", "s4"])
+        stub.write_text(stub.read_text().replace(
+            "case \"$1\" in", f"case \"$*\" in *pane_current_command*) printf '{whole}\\n'; exit;; esac\ncase \"$1\" in", 1))
+        self.assertEqual(json.loads(self.reach("locate", "s4", "--json").stdout), {**seen, "place_pid": 4242})
+        self.assertEqual(self.said("read", "s4"), (0, "earlier\n│ >"))
+        self.assertEqual(self.said("read", "s4", "--rows", "1"), (0, "│ >"))
+        self.assertEqual(self.said("read", "s4", "--box"), (0, "free"))
+        self.assertEqual(self.said("type", "s4", "carry on"), (0, "%7"))
+        self.assertEqual(self.calls.read_text(), "tmux send-keys -t %7 -l carry on ; run-shell sleep 0.5 ; send-keys -t %7 Enter\n")
+        self.calls.unlink()
+        self.assertEqual(self.said("type", "s4", "--how", "over", "--", "--dashes"), (0, "%7"))
+        self.assertIn("send-keys -t %7 C-u ; send-keys -t %7 -l --dashes ;", self.calls.read_text())
+        self.calls.unlink()
+        self.assertEqual(self.said("type", "--place", "%9", "--how", "line", "cd /x && ls"), (0, "%9"), "a place, no session in it")
+        self.assertIn("send-keys -t %9 -l cd /x && ls ;", self.calls.read_text())
+        self.assertEqual(self.said("read", "--place", "%9", "--box"), (0, "free"))
+        self.calls.unlink()
+        for kw, why in ((dict(screen="│ > half a thought\n"), "draft"), (dict(screen="  1. Yes\n  2. No\n"), "no prompt box"),
+                        (dict(screen="│ > \n  Enter to confirm · Esc to cancel\n"), "dialog"), (dict(in_mode="1"), "copy mode")):
+            self.retry_setup(**kw)
+            self.assertEqual((self.said("type", "s4", "carry on"), self.said("read", "s4", "--box")), ((5, why), (5, why)))
+            self.assertFalse(self.calls.exists(), f"{why}: nothing is typed")
+        self.assertEqual(json.loads(self.reach("locate", "s4", "--json").stdout)["copy"], True)
+        self.assertEqual(self.said("type", "s4", "--how", "line", "typed anyway"), (0, "%7"))
+        # no such session, two of one name, one outside tmux, a call that is wrong
+        self.assertEqual(self.said("locate", "nobody"), (3, "flowkit-session: no session answers to 'nobody'"))
+        (self.tmp / "claude" / "sessions" / f"{os.getpid()}.json").write_text(json.dumps(
+            {"sessionId": "0a1b2c3d-0000-4000-8000-00000000000d", "name": "s4", "kind": "interactive", "status": "busy"}))
+        code, text = self.said("type", "s4", "carry on")
+        self.assertEqual((code, text.splitlines()[0]), (3, "flowkit-session: 2 sessions answer to 's4'"))
+        self.assertIn(f"  0a1b2c3d-0000-4000-8000-00000000000d  pid {os.getpid()}  s4", text)
+        out = self.reach("locate", str(os.getpid()), "--json")
+        self.assertEqual((out.returncode, json.loads(out.stdout)["place"], json.loads(out.stdout)["status"]), (4, None, "busy"))
+        self.assertEqual(self.said("read", str(os.getpid())), (4, "flowkit-session: s4 runs in no place of tmux"))
+        self.assertEqual(self.said("type", str(os.getpid()), "carry on")[0], 4)
+        for wrong in (["type", "s4"], ["type", "s4", "a", "--how", "hard"], ["read", "s4", "--rows", "x"], ["locate"],
+                      ["claim", "s4"], ["claim", "s4", "--by", "a b"], ["release", "s4", "--for", "1"], ["locate", "s4", "--no"]):
+            out = self.reach(*wrong)
+            self.assertEqual((out.returncode, out.stdout, out.stderr.split()[0:2]), (2, "", ["flowkit-session", wrong[0]]), wrong)
+        self.assertEqual(self.reach("nonsense").returncode, 2)
+        for verb in ("locate", "read", "type", "claim", "release"):  # each says its arguments, what it prints, its exits
+            text = self.reach(verb, "--help")
+            self.assertEqual((text.returncode, text.stderr), (0, ""))
+            self.assertRegex(text.stdout, rf"^flowkit-session {verb} (<session>|--place)")
+            self.assertRegex(text.stdout, r"[Pp]rints")
+            self.assertRegex(text.stdout, r"[Ee]xit \d")
+        self.assertIn("  5  not done, and the reason is the one line it prints", self.reach("--help").stdout)
+        with mock.patch.dict(os.environ, self.env, clear=True):  # a tmux that hangs
+            handoff = self.module()
+            with mock.patch.object(handoff.backend, "tmux", side_effect=subprocess.TimeoutExpired("tmux", 10)), \
+                    contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(handoff.session_cmd(["type", str(self.pid), "carry on"]), 1)
+            self.assertEqual(err.getvalue(), "flowkit-session: tmux did not answer (TimeoutExpired)\n")
+
+    def test_session_commands_for_a_background_session(self):
+        self.retry_setup()
+        other = "0a1b2c3d-0000-4000-8000-00000000000d"
+        (self.tmp / "claude" / "sessions" / f"{self.pid}.json").write_text(json.dumps(
+            {"sessionId": self.SID, "name": "bg", "kind": "background", "status": "busy"}))
+        rows = [{"name": "bg", "kind": "background", "id": "b1", "sessionId": self.SID, "pid": self.pid, "status": "busy"},
+                {"name": "st-report", "kind": "background", "id": "b0", "sessionId": other, "state": "done", "startedAt": 1},
+                {"name": "st-report", "kind": "background", "id": "b2", "sessionId": other, "state": "done", "startedAt": 2}]
+        self.agents(rows)
+        (self.tmp / "claude" / "flowkit" / "sessions.json").parent.mkdir(parents=True, exist_ok=True)
+        (self.tmp / "claude" / "flowkit" / "sessions.json").write_text(json.dumps({"sessions": {
+            other: {"backend": "background", "place": other, "story": "st"}}}))
+        out = self.reach("locate", "bg", "--json")
+        self.assertEqual((out.returncode, json.loads(out.stdout)), (0, {
+            "session": self.SID, "name": "bg", "pid": self.pid, "kind": "background", "status": "busy", "cwd": None,
+            "backend": "background", "place": self.SID, "place_pid": None, "copy": False, "story": None}))
+        self.assertEqual(self.said("read", "bg"), (5, "no screen"))
+        self.assertEqual(self.said("read", "bg", "--box"), (5, "busy"))
+        self.assertEqual(self.said("type", "bg", "carry on"), (5, "busy"), "a session at work is never stopped for a line")
+        self.assertFalse(self.calls.exists())
+        # a stopped one is in Claude Code's list alone: the newest entry of the name, resumed with the line
+        out = self.reach("locate", "st-report", "--json")
+        self.assertEqual((out.returncode, {k: json.loads(out.stdout)[k] for k in ("session", "pid", "status", "place", "story")}),
+                         (0, {"session": other, "pid": None, "status": "idle", "place": other, "story": "st"}))
+        self.assertEqual(self.said("read", "st-report", "--box"), (0, "free"))
+        self.assertEqual(self.said("type", "st-report", "closed s2"), (0, other))
+        self.assertEqual(self.calls.read_text(), f"--bg --resume {other} closed s2\n")
+        self.assertEqual(self.said("type", "st-report", "/compact", "--how", "command"), (5, "no prompt box"))
+        rows[2]["state"] = "blocked"
+        self.agents(rows)
+        self.assertEqual((self.said("type", "st-report", "closed s3"), self.said("read", "st-report", "--box")),
+                         ((5, "waiting"), (5, "waiting")))
+
+    def test_session_commands_through_an_outside_driver(self):
+        self.retry_setup(screen="earlier\n❯ \n")
+        (self.tmp / "bin" / "tmux").unlink()
+        stub = self.tmp / "bin" / "flowkit-driver-stub"
+        stub.write_text(f"#!/bin/sh\ncase \"$1\" in\nlist) printf 'place-1\\t{self.pid}\\nplace-2\\t1\\n';;\n"
+                        f"screen) cat {self.tmp / 'screen'};;\n"
+                        f"type) printf '%s\\n' \"$*\" | tr '\\r\\025' 'RU' >> {self.calls};;\n*) exit 2;;\nesac\n")
+        stub.chmod(0o755)
+        (self.tmp / "flowkit" / "handoff.conf").write_text("driver=stub\n")
+        (self.tmp / "claude" / "flowkit").mkdir(parents=True, exist_ok=True)
+        (self.tmp / "claude" / "flowkit" / "sessions.json").write_text(json.dumps({"sessions": {
+            self.SID: {"backend": "stub", "place": "place-1", "story": "st"}}}))
+        out = self.reach("locate", self.SID, "--json")
+        self.assertEqual((out.returncode, json.loads(out.stdout)), (0, {
+            "session": self.SID, "name": "s4", "pid": self.pid, "kind": "interactive", "status": "idle", "cwd": None,
+            "backend": "stub", "place": "place-1", "place_pid": self.pid, "copy": False, "story": "st"}))
+        self.assertEqual(self.said("read", "s4"), (0, "earlier\n❯"))
+        self.assertEqual(self.said("type", "s4", "carry on"), (0, "place-1"))
+        self.assertEqual(self.calls.read_text(), "type place-1 carry on\ntype place-1 R\n")
+        self.calls.unlink()
+        self.assertEqual(self.said("type", "--place", "place-2", "--how", "over", "ls"), (0, "place-2"))
+        self.assertEqual(self.calls.read_text(), "type place-2 Uls\ntype place-2 R\n")
+        self.calls.unlink()
+        (self.tmp / "screen").write_text("❯ half a thought\n")
+        self.assertEqual((self.said("type", "s4", "carry on"), self.said("read", "s4", "--box")), ((5, "draft"), (5, "draft")))
+        self.assertFalse(self.calls.exists())
+        stub.write_text(stub.read_text().replace("screen)", "screen-none)"))  # a driver that shows no screen
+        self.assertEqual((self.said("read", "s4"), self.said("read", "s4", "--box")), ((5, "no screen"), (0, "free")))
+        self.assertEqual(self.said("type", "s4", "carry on"), (0, "place-1"), "typed without a look")
+
+    @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+    def test_session_commands_in_a_real_pane(self):
+        """A throwaway tmux server whose pane draws a prompt box and then runs `cat`, standing in for
+        the session's process."""
+        sock = f"flowkit-session-{os.getpid()}"
+        real = lambda *a: subprocess.run(["tmux", "-L", sock, *a], capture_output=True, text=True)
+        self.addCleanup(real, "kill-server")
+        real("-f", "/dev/null", "new-session", "-d", "-x", "200", "-y", "20", "printf '> \\n'; exec cat")
+        cat, pane = real("list-panes", "-F", "#{pane_pid} #{pane_id}").stdout.split()
+        (self.tmp / "bin" / "tmux").unlink()
+        (self.tmp / "claude" / "sessions").mkdir()
+        (self.tmp / "claude" / "sessions" / f"{cat}.json").write_text(json.dumps(
+            {"sessionId": self.SID, "name": "s4", "kind": "interactive", "status": "idle"}))
+        self.env.update(FLOWKIT_TMUX_SOCKET=sock, TMUX_PANE="", XDG_CONFIG_HOME=str(self.tmp))
+        deadline = time.time() + 5
+        while time.time() < deadline and ">" not in real("capture-pane", "-p").stdout:
+            time.sleep(0.05)
+        where = json.loads(self.reach("locate", "s4", "--json").stdout)
+        self.assertEqual((where["backend"], where["place"], where["place_pid"], where["copy"]), ("tmux", pane, int(cat), False))
+        self.assertEqual(self.said("read", "s4", "--box"), (0, "free"))
+        self.assertEqual(self.said("type", cat, "carry on"), (0, pane))
+        deadline = time.time() + 5
+        while time.time() < deadline and real("capture-pane", "-p").stdout.count("carry on") < 2:
+            time.sleep(0.05)  # typed, and Enter made cat say it again
+        self.assertEqual(self.said("read", "s4", "--rows", "1"), (0, "carry on"))
+        self.assertEqual(self.said("type", "--place", pane, "--how", "line", "by its place"), (0, pane))
+        real("copy-mode")
+        self.assertEqual((self.said("type", "s4", "not this"), self.said("read", "s4", "--box")), ((5, "copy mode"), (5, "copy mode")))
+        self.assertNotIn("not this", real("capture-pane", "-p").stdout)
+
+    def claim(self, *args, by="spill"):
+        return self.said("claim", "s4", "--by", by, *args)
+
+    def test_limit_claimed_the_waiter_stands_down_and_says_who_took_it(self):
+        self.limit_setup(reset=time.time() + 1.0)
+        self.assertEqual(self.claim("--wait", "0"), (3, "flowkit-session: no usage-limit stop is recorded for s4"))
+        self.api_error("rate_limit")
+        code, text = self.claim()
+        self.assertEqual(code, 0, text)
+        self.assertRegex(text, r"^claimed until \d{4}-\d\d-\d\d \d\d:\d\d$")
+        self.assertEqual(self.claim(by="other"), (5, f"claimed by spill until {text[-5:]}"))
+        self.assertEqual(self.sent(2.0), "", "claimed: the waiter types nothing, its reset long over")
+        self.assertEqual(self.record()["claim"]["by"], "spill")
+        took = [l for l in self.log() if "took it over" in l]
+        self.assertEqual(len(took), 1, self.log())
+        self.assertRegex(took[0], rf"^> limit s4 · \d{{4}}-\d\d-\d\d \d\d:\d\d · spill took it over until {text[-5:]}: flowkit "
+                                  r"does not continue it meanwhile$")
+        self.assertEqual(self.claim("--for", "30")[0], 0, "claimed again under the same name: held longer")
+        self.assertEqual(len([l for l in self.log() if "took it over" in l]), 1, "and said once")
+        self.assertEqual(self.said("release", "s4", "--by", "other"), (3, "flowkit-session: other holds no claim on s4"))
+        self.assertEqual(self.said("release", "s4", "--by", "spill"), (0, "released"))
+        self.assertIn("usage limit", self.sent(), "given back: continued as it would have been")
+        self.rec_when(lambda r: r.get("state") == "continued")
+        self.assertRegex(self.log()[-1], r"^> limit s4 · .* · spill gave it back: flowkit's waiter has it again$")
+        code, text = self.claim("--wait", "0")
+        self.assertEqual((code, text[:24]), (5, "flowkit continued it at "), "too late: its continue is typed")
+        self.assertNotIn("claim", self.record())
+        # a claim that is never given back runs out, and the stop is the waiter's again
+        self.limit_setup(reset=time.time() + 1.5)
+        self.api_error("rate_limit")
+        self.assertEqual(self.claim("--for", "0.05")[0], 0)  # 3 s, the continue due after 1.65
+        self.assertEqual(self.sent(1.8), "")
+        self.assertIn("usage limit", self.sent())
+        self.assertRegex(self.log()[-1], r"^> limit s4 · .* · the claim of spill ran out: flowkit's waiter has it again$")
+        # one for the process the session ran in before says nothing of this one
+        self.limit_setup(reset=time.time() + 0.3)
+        self.api_error("rate_limit")
+        path = self.tmp / "claude" / "flowkit" / "retry" / f"{self.SID}.json"
+        path.write_text(json.dumps({**self.record(), "claim": {"by": "spill", "at": 1, "until": time.time() + 600, "pid": 1}}))
+        self.assertIn("usage limit", self.sent())
+        self.assertEqual([l.split(" · ", 2)[2].split()[0] for l in self.log()], ["rate_limit", "continues"])
+
+    def test_limit_a_claim_and_the_continue_at_one_moment_only_one_wins(self):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.limit_setup(reset=time.time() + 600)
+            self.api_error("rate_limit")
+            self.rec_when(lambda r: r.get("state") == "waiting")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            handoff = self.module()
+            row = {"sessionId": self.SID, "pid": self.pid}
+            self.assertTrue(handoff.limit_take(self.SID), "the waiter's word that it types")
+            self.assertEqual(handoff.session_claim(row, "spill", 15, 0), (5, "flowkit is typing its continue"))
+            handoff.retry_set(self.SID, typing=time.time() - handoff.TYPING - 1)  # a waiter that died over it
+            self.assertEqual(handoff.session_claim(row, "spill", 15, 0)[0], 0)
+            self.assertFalse(handoff.limit_take(self.SID), "claimed: the waiter does not type")
+            self.assertNotIn("typing", {k for k, v in self.record().items() if v and k == "typing" and v > time.time() - 5})
+        for n in range(8):  # the two as processes of their own, the claim sent around the moment the continue is due
+            self.limit_setup(reset=time.time() + 0.3)
+            self.api_error("rate_limit")
+            time.sleep(0.25 + 0.04 * n)
+            code, text = self.claim("--wait", "2")
+            typed = "Enter" in self.sent(3.0 if code else 1.0)
+            self.assertIn(code, (0, 5), text)
+            self.assertNotEqual(code == 0, typed, f"round {n}: claim said {text!r}, typed: {typed}")
+            if code:
+                self.assertRegex(text, r"^flowkit continued it at \d\d:\d\d$")
 
     NOTICE = ("Remote Control disconnected \u2014 signed-in claude.ai account or organization changed on this machine "
               "\u2014 run /remote-control to start a session for the current account")

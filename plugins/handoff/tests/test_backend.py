@@ -395,7 +395,8 @@ class Both(Case):
             self.assertNotIn("@", inspect.getsource(backend.story), "a session's story is what it registered")
 
     def test_handoff_py_and_the_commands_reach_a_session_only_through_this_file(self):
-        for path in ("scripts/handoff.py", "bin/flowkit-away", "bin/flowkit-tmux", "bin/flowkit-spawn"):
+        for path in ("scripts/handoff.py", "bin/flowkit-away", "bin/flowkit-tmux", "bin/flowkit-spawn",
+                     "bin/flowkit-session"):
             found = re.findall(r'\[\s*"(?:tmux|claude)"|(?<![.\w])tmux\(|send-keys|capture-pane|list-panes|list-clients|'
                                r'show-options|@flowkit_|@cc_hold|"--bg"|"--resume"|new-window|split-window|list-windows|'
                                r'select-layout|list-sessions|display-message|set-option|claude --bg \$',

@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""flowkit-session: a Claude Code session from outside it, for a hook or a script of your own.
+
+  flowkit-session locate <session> [--json]       where it runs and which story it was started for
+  flowkit-session read <session> [--rows <n>] [--box]
+                                                  what its place shows; --box: whether a line would be typed
+  flowkit-session type <session> <text> [--how free|line|over|escape|command]
+                                                  one line as its next prompt, only into a free prompt box
+                                                  unless --how says otherwise
+  flowkit-session claim <session> --by <name> [--for <minutes>] [--wait <seconds>]
+                                                  take over a session a usage limit stopped: flowkit's
+                                                  waiter stands down
+  flowkit-session release <session> --by <name>   give it back
+
+<session> is a session id, a name or a process id; `read` and `type` take `--place <id>` in its
+place. `flowkit-session --help` and `flowkit-session <command> --help` have what each prints and
+the exit codes; docs/extending.md in the flowkit repository says which of it is stable.
+
+The commands are the handoff plugin's own (`handoff.py session`), so a line of yours reaches a
+session the way flowkit's lines do, whichever driver it runs under. `/handoff:setup-tmux` copies
+this file to ~/.local/bin, kept at the plugin's version at every session start: a hook that runs
+outside a session finds it there, and the copy finds the newest installed plugin by itself.
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def handoff_py():
+    """The handoff plugin's handoff.py: the one beside this file (the repo, the plugin cache), else
+    the newest handoff in installed_plugins.json, since the copy in ~/.local/bin has nothing beside
+    it. None without the plugin."""
+    def version(root):
+        try:
+            return tuple(int(n) for n in json.loads((root / ".claude-plugin" / "plugin.json").read_text())["version"].split("."))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+    own = Path(__file__).resolve().parent.parent
+    if (own / ".claude-plugin" / "plugin.json").is_file():
+        return own / "scripts" / "handoff.py"
+    try:
+        entries = json.loads((CLAUDE / "plugins" / "installed_plugins.json").read_text())["plugins"]["handoff@flowkit"]
+        roots = [Path(e["installPath"]) for e in entries]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    found = [(v, root) for root in roots if (root / "scripts" / "handoff.py").is_file() and (v := version(root))]
+    return max(found)[1] / "scripts" / "handoff.py" if found else None
+
+
+def main(argv):
+    script = handoff_py()
+    if script is None:
+        print("flowkit-session: the handoff plugin is not installed (claude plugin install handoff@flowkit)", file=sys.stderr)
+        return 1
+    try:
+        os.execv(sys.executable, [sys.executable, str(script), "session", *argv])
+    except OSError as e:
+        print(f"flowkit-session: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

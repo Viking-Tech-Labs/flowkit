@@ -18,7 +18,7 @@ The helper is `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/handoff.py"` (`handoff.py`
    `${CLAUDE_PLUGIN_ROOT}/tmux/tmux.conf` and show it whole. Say in plain words what changes:
    - the files it lists are copied: the kit conf to `~/.config/flowkit/tmux.conf`, its cheat sheet
      next to it, and the helpers to `~/.local/bin/` (`flowkit-tick` for the status bar,
-     `flowkit-tmux` for the keys, `flowkit-away`, `flowkit-usage`; a stable path, because the
+     `flowkit-tmux` for the keys, `flowkit-away`, `flowkit-usage`, `flowkit-session`; a stable path, because the
      plugin's own directory moves with every version). They are kept at the plugin's version at
      every session start, so changes of their own go in the user's tmux.conf, below the line;
    - one line, `source-file ~/.config/flowkit/tmux.conf`, is appended to their tmux.conf, with

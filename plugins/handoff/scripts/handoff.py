@@ -48,6 +48,10 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py api-error | api-ok                  StopFailure and Stop hooks: the retry record and line, and
                                                  the waiter (retry-wait <session id>): after a usage limit
                                                  unless limitresume=off, after an API error with autoretry=on
+  handoff.py session locate|read|type|claim|release …
+                                                 bin/flowkit-session: where a session runs, what it shows, a
+                                                 line typed into it, and a usage-limit stop taken over from
+                                                 the waiter, for a hook outside flowkit (`session --help`)
   handoff.py reconnect [--all | <session id>]    the tick's and the Stop hook's, after the account of a login
                                                  changed: /remote-control typed into each session that lost
                                                  its link to it, once it is idle with a free prompt box
@@ -115,6 +119,7 @@ SHIMS = {  # the commands a tmux.conf and the timer call: copies with no version
     "bin/flowkit-tmux": HOME / ".local" / "bin" / "flowkit-tmux",
     "bin/flowkit-away": HOME / ".local" / "bin" / "flowkit-away",
     "bin/flowkit-usage": HOME / ".local" / "bin" / "flowkit-usage",
+    "bin/flowkit-session": HOME / ".local" / "bin" / "flowkit-session",
 }
 KIT = {  # the tmux kit: where each file of the plugin is copied, so a tmux.conf never points at a version
     **SHIMS,
@@ -935,17 +940,40 @@ def snapshot(path):
         return None
 
 
+def session_place(row):
+    """Where the session a row of Claude Code's list names runs (a sessions file's dict will do), as
+    (backend, place): a background session by its id, any other through its process in the terminal's
+    backend. The place is None where that backend has none for it."""
+    if row.get("kind") == "background":
+        return BACKGROUND, BACKGROUND.locate(sid=row.get("sessionId"))
+    return TMUX, TMUX.locate(pid=row["pid"]) if row.get("kind") == "interactive" and row.get("pid") else None
+
+
+def send(row, text, how=backend.FREE):
+    """A line as the next prompt of the session a row names, wherever it runs: (place, "") once typed,
+    else (None, why not). Why: unreachable (it runs in no place of its backend), the backend's own
+    (copy mode, no prompt box, dialog, draft, waiting, not settled, not stopped, not typed), busy (a
+    background session at work, which is never stopped for a FREE line), or no answer (<error>) when
+    the backend's program is missing or hangs."""
+    try:
+        at, found = session_place(row)
+        if found is None:
+            return None, "unreachable"
+        if at is BACKGROUND and how == backend.FREE and backend.mode(found.row) == "busy":
+            return None, "busy"
+        why = at.type(found, text, how)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"no answer ({type(e).__name__})"
+    return (None, str(why)) if why else (found.id, "")
+
+
 def type_into(row, text):
     """Type a line into the tmux pane of the session a `claude agents` row names, only into a free
     prompt box: (pane, "") once typed, else (None, why not). No tmux on the machine, or one that
     hangs, is a why like the others."""
-    try:
-        found = TMUX.locate(pid=row["pid"]) if row.get("kind") == "interactive" and row.get("pid") else None
-        why = "not in a tmux pane" if found is None else TMUX.type(found, text, backend.FREE)
-    except (OSError, subprocess.SubprocessError) as e:
-        return None, f"tmux or ps did not answer ({type(e).__name__})"
-    why = "tmux did not take the line" if why == "not typed" else why
-    return (None, why) if why else (found.id, "")
+    pane, why = send(row, text) if row.get("kind") == "interactive" else (None, "unreachable")
+    why = {"unreachable": "not in a tmux pane", "not typed": "tmux did not take the line"}.get(why, why)
+    return pane, f"tmux or ps did not answer{why[9:]}" if why.startswith("no answer") else why
 
 
 def continue_session(rec, text):
@@ -1312,6 +1340,51 @@ def limit_continue(rec, text):
     return TMUX.type(found, text, backend.FREE)
 
 
+def claimed(rec, now=None):
+    """The claim in effect on a limit record, None without one: a hook outside flowkit took the stop
+    over (`flowkit-session claim`), for the session's process as it was then and until its time."""
+    claim = rec.get("claim")
+    now = time.time() if now is None else now
+    return claim if isinstance(claim, dict) and claim.get("pid") == rec.get("pid") and now < (claim.get("until") or 0) \
+        else None
+
+
+def limit_take(sid):
+    """The waiter's word that it types its continue now, written under the records' lock, where a
+    claim is written too: False when one holds, and then nothing is typed. So of a waiter and a
+    claimer that come for one stop at the same moment only one types."""
+    took = []
+
+    def change(rec):
+        if rec is None or claimed(rec):
+            return None
+        took.append(rec)
+        return {**rec, "typing": time.time()}
+
+    retry_update(sid, change)
+    return bool(took)
+
+
+def limit_unclaim(sid, claim, said):
+    """A claim comes off its limit record: given back, or run out. One line says so, once per claim,
+    unless it was for a process the session no longer runs in."""
+    tell = []
+
+    def change(rec):
+        if rec is None or rec.get("claim") != claim:
+            return None
+        del rec["claim"]
+        if claim.get("pid") == rec.get("pid") and once(rec, f"unclaim {claim.get('at')}"):
+            tell.append(rec)
+        return rec
+
+    retry_update(sid, change)
+    if tell:
+        retry_log(tell[0], f"> limit {tell[0]['name']} · {time.strftime('%Y-%m-%d %H:%M')} · {said}: flowkit's waiter has "
+                  "it again")
+    return bool(tell)
+
+
 def limit_lock(sid):
     """The limit waiter's lock: an flock on retry/<sid>.lock, which the kernel drops with its
     holder, so a dead waiter never blocks the next. The open file, or None when another waiter
@@ -1342,19 +1415,30 @@ def limit_wait(sid):
     by itself and its pane can take it; else the next slot, or a line saying it waits for the
     user. No 12-hour cap and no away or autoretry test: limit resume is its own setting. An account
     change under the session (switched) is looked for at every nap, whatever the record was left
-    to, and starts it over (limit_switch)."""
+    to, and starts it over (limit_switch). While a hook outside flowkit holds a claim on the stop
+    (claimed) the waiter stands down: it plans nothing and types nothing, and once the claim is
+    given back or has run out it plans the stop again, as a new one."""
     lock = limit_lock(sid)
     if lock is None:
         return
     unit = float(os.environ.get("FLOWKIT_RETRY_MINUTE") or 60)
     nap = max(min(5.0, unit / 12), 0.05)
-    awake, at, due, reset, look = None, None, None, None, 0
+    awake, at, due, reset, look, stood = None, None, None, None, 0, False
     try:
         while True:
             rec = retry_record(sid)
             if not rec or rec.get("kind") != "rate_limit" or not rec.get("pid") or not alive(rec["pid"]) or \
                     not session_file(rec["pid"], sid):
                 return
+            if claimed(rec):
+                stood = True
+                time.sleep(nap)
+                continue
+            if isinstance(rec.get("claim"), dict):  # one that ran out, or of the process the session ran in before
+                limit_unclaim(sid, rec["claim"], f"the claim of {rec['claim'].get('by')} ran out")
+                stood = True
+            if stood:
+                stood, at = False, None
             if rec.get("account") and identity(rec.get("config")) not in (None, rec["account"]) and time.time() >= look:
                 who = switched(sid, rec)
                 if who:
@@ -1378,6 +1462,8 @@ def limit_wait(sid):
                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 time.sleep(nap if due is None else min(nap, due - now))
                 continue
+            if not limit_take(sid):  # claimed in this moment: the next pass stands down
+                continue
             when = time.strftime("%H:%M", time.localtime(at))
             since = "it has reset"
             if after_switch(rec, unit):
@@ -1392,20 +1478,20 @@ def limit_wait(sid):
             if why == "":
                 retry_update(sid, lambda r: r and {
                     **r, "continues": r.get("continues", 0) + 1, "continued_at": time.time(),
-                    "continued_for": reset or time.time(), "handled": at, "state": "continued"})
+                    "continued_for": reset or time.time(), "handled": at, "state": "continued", "typing": None})
             elif why == "moved":
-                limit_mark(sid, handled=at, state="moved")
+                limit_mark(sid, handled=at, state="moved", typing=None)
             elif why == "unreachable":
                 limit_mark(sid, "unreachable", f"{head}it does not run in a tmux pane; it waits for you",
-                           handled=at, state="unreachable")
+                           handled=at, state="unreachable", typing=None)
             else:  # at work, copy mode, a draft, a dialog: the next slot
                 if after_switch(rec, unit) and time.time() < rec["switched"] + SWITCH_QUIET * unit:
-                    limit_mark(sid, state=why)
+                    limit_mark(sid, state=why, typing=None)
                     due = time.time() + unit / 2  # the account change itself may be what is in the way: soon again
                     continue
                 limit_mark(sid, "dialog" if why == "dialog" else None,
                            f"{head}a dialog is open below its prompt box; looked at again every "
-                           f"{RETRY_STEPS[-1]} minutes", state=why)
+                           f"{RETRY_STEPS[-1]} minutes", state=why, typing=None)
                 due = time.time() + RETRY_STEPS[-1] * unit
                 continue
             due = None
@@ -1429,6 +1515,275 @@ def sessions():
     return found
 
 
+SESSION = """flowkit-session: a Claude Code session from outside it, for a hook or a script of your own.
+
+  flowkit-session locate <session> [--json]
+  flowkit-session read <session> [--rows <n>] [--box]
+  flowkit-session type <session> <text> [--how free|line|over|escape|command]
+  flowkit-session claim <session> --by <name> [--for <minutes>] [--wait <seconds>]
+  flowkit-session release <session> --by <name>
+
+<session> is a session id, a name as `claude agents` lists it, or a process id (digits alone).
+`read` and `type` take `--place <id>` in its place: a place of the driver handoff.conf names (a tmux
+pane's id, an outside driver's own), as `locate` printed it, a session in it or not.
+`flowkit-session <command> --help` says what each prints. Every command exits
+
+  0  done
+  1  the driver's program (tmux, claude, flowkit-driver-<name>) did not answer
+  2  called wrongly
+  3  no session answers to <session>, or more than one does (they are listed)
+  4  the session runs in no place flowkit reaches: outside tmux, or outside the driver handoff.conf names
+  5  not done, and the reason is the one line it prints
+"""
+SESSION_HELP = {
+    "locate": """flowkit-session locate <session> [--json]
+
+Where a session runs and which story it was started for. Prints a line each, `key: value`:
+
+  session     its session id
+  name        its name, - without one
+  pid         its process, - for a stopped background session
+  kind        interactive or background
+  status      idle, busy or waiting
+  cwd         its folder
+  backend     tmux, background, or the name of the outside driver
+  place       the place's id there (a tmux pane's, the driver's own; a background session's id), - when it has none
+  place_pid   the process the place itself started (a pane's shell), - where the backend names none
+  copy        yes while the place is in tmux's copy mode, where typed keys reach no session
+  story       the story's slug, - outside a story
+
+--json prints the same as one object (null for -, true and false for copy). Later versions may add
+keys. Exit 0, or 4 with the same lines and no place; 3 without a session; 1 when the driver did not answer.
+""",
+    "read": """flowkit-session read <session> [--rows <n>] [--box]
+flowkit-session read --place <id> [--rows <n>] [--box]
+
+What a session's place shows now: its rows as plain text, top to bottom, without the empty ones at
+the end; --rows <n> gives the last n. Exit 5 and `no screen` when its backend shows none (a
+background session, an outside driver that does not answer `screen`).
+
+--box prints one word instead, what `type` would find: `free` (exit 0), or what is in a line's way
+(exit 5): `copy mode`, `no prompt box`, `dialog`, `draft`; `waiting` or `busy` for a background
+session. An outside driver without `screen` is `free`: there a line is typed without a look.
+""",
+    "type": """flowkit-session type <session> <text> [--how free|line|over|escape|command]
+flowkit-session type --place <id> <text> [--how ...]
+
+One line as the session's next prompt: the text, then Enter. Prints the id of the place it was typed
+into (exit 0), or why it was not, one line (exit 5).
+
+  --how free     the default: only where nothing is in its way. A prompt box on screen, empty, no
+                 dialog below it, not in copy mode; a background session that is neither at work nor
+                 waiting on a prompt (it is resumed with the text). Why not: `copy mode`,
+                 `no prompt box`, `dialog`, `draft`, `waiting`, `busy`
+  --how line     the text and Enter, without a look: for a place that runs a shell
+  --how over     what is half typed is cleared first
+  --how escape   Escape first, which ends the turn of a session that waits on a question, then as
+                 over; a background session is stopped for it, at work or waiting
+  --how command  a slash command, as free; a background session has no prompt box to take one
+
+`not typed` (the driver refused the keys), `not stopped` (a background session's process did not
+go) and `not settled` are reasons too. A line typed with --how free into a session at work is
+queued by Claude Code as its next prompt.
+""",
+    "claim": """flowkit-session claim <session> --by <name> [--for <minutes>] [--wait <seconds>]
+
+Takes over a session a usage limit stopped: from then on flowkit's own waiter does not continue it,
+and whoever claimed it does what it wants with it (start it again elsewhere, type a line of its
+own). Prints `claimed until <YYYY-MM-DD HH:MM>` (exit 0). The claim holds for --for minutes (15
+without it; claim again under the same name to hold it longer), while the session runs in the same
+process, and until `release`; the session's next clean turn end ends it with the stop's record.
+The story file gets `> limit <session> · <time> · <name> took it over until <time>: flowkit does
+not continue it meanwhile`.
+
+Exit 5 when it is not yours to take, with one line: `flowkit continued it at <HH:MM>`, `flowkit is
+typing its continue`, or `claimed by <other> until <HH:MM>`. Exit 3 when no usage-limit stop is
+recorded for the session. A StopFailure hook of your own runs beside flowkit's, which writes that
+record: `claim` waits --wait seconds for it (5 without it). Of a claim and flowkit's continue that
+come at the same moment exactly one wins: a claim that printed `claimed` means nothing was typed.
+""",
+    "release": """flowkit-session release <session> --by <name>
+
+Gives a claimed session back: flowkit's waiter plans the stop again and continues the session as it
+would have. Prints `released` (exit 0); exit 3 when <name> holds no claim on it.
+""",
+}
+HOWS = {"free": backend.FREE, "line": backend.LINE, "over": backend.OVER, "escape": backend.ESCAPE,
+        "command": backend.COMMAND}
+CLAIM = 15  # minutes a claim on a usage-limit stop holds when its claimer names no other time
+CLAIM_WAIT = 5  # seconds `claim` waits for the stop's record: the claimer's hook and flowkit's run side by side
+TYPING = 180  # seconds a waiter's word that it is typing counts: more than its slowest continue takes
+
+
+def session_named(word):
+    """The sessions that answer to a word: a process id (digits alone), a session id, else a name.
+    The live ones from their session files; when none of them does, the newest background session
+    of that id or name in Claude Code's own list, which keeps the stopped ones too."""
+    live = sessions()
+    if word.isdigit():
+        return [i for i in live if i["pid"] == int(word)]
+    found = [i for i in live if i["sessionId"] == word] or [i for i in live if i.get("name") == word]
+    if not found:
+        try:
+            listed = [a for a in backend.agents("--all") if isinstance(a, dict) and a.get("kind") == "background"]
+        except (OSError, subprocess.SubprocessError, ValueError):
+            listed = []
+        rows = [a for a in listed if a.get("sessionId") == word] or [a for a in listed if a.get("name") == word]
+        found = [max(rows, key=lambda a: a.get("startedAt") or 0)] if rows else []
+    return found
+
+
+def session_box(at, found):
+    """What is in the way of a FREE line at a place, "" when nothing is."""
+    if at is BACKGROUND:
+        return {"waiting": "waiting", "busy": "busy"}.get(backend.mode(found.row), "")
+    return "copy mode" if found.copy else at.parked(found)
+
+
+def session_claim(row, by, minutes, wait):
+    """`flowkit-session claim`: the claim goes into the limit record of the session's live process,
+    under the records' lock, unless flowkit's waiter has typed its continue for this stop, is typing
+    it now, or another name holds the stop. (exit code, the line to print)."""
+    sid, deadline = row["sessionId"], time.time() + wait
+    clock = lambda at: time.strftime("%H:%M", time.localtime(at or 0))
+    while True:
+        out = {}
+
+        def change(rec):
+            now = time.time()
+            if not rec or rec.get("kind") != "rate_limit" or not rec.get("pid") or rec["pid"] != row.get("pid"):
+                return None
+            held = claimed(rec, now)
+            if held and held.get("by") != by:
+                out.update(final=f"claimed by {held.get('by')} until {clock(held['until'])}")
+            elif rec.get("handled") == rec.get("at") and rec.get("state") == "continued":
+                out.update(final=f"flowkit continued it at {clock(rec.get('continued_at'))}")
+            elif now - (rec.get("typing") or 0) < TYPING:
+                out.update(busy="flowkit is typing its continue")
+            else:
+                rec["claim"] = {"by": by, "at": held["at"] if held else now, "until": now + minutes * 60, "pid": rec["pid"]}
+                out.update(rec=rec, fresh=once(rec, f"claim {rec['claim']['at']}"))
+                return rec
+            return None
+
+        retry_update(sid, change)
+        if "rec" in out:
+            until = time.strftime("%Y-%m-%d %H:%M", time.localtime(out["rec"]["claim"]["until"]))
+            if out["fresh"]:
+                retry_log(out["rec"], f"> limit {out['rec']['name']} · {time.strftime('%Y-%m-%d %H:%M')} · {by} took it "
+                          f"over until {until[-5:]}: flowkit does not continue it meanwhile")
+            return 0, f"claimed until {until}"
+        if "final" in out:
+            return 5, out["final"]
+        if time.time() >= deadline:
+            return (5, out["busy"]) if "busy" in out else (3, "")
+        time.sleep(0.1)
+
+
+def session_cmd(argv):
+    """`handoff.py session …`, which bin/flowkit-session runs: the exit code, what is printed on the
+    way. The commands reach a session through what flowkit's own lines go through (session_place,
+    send, the limit record's lock)."""
+    verb, args = (argv[0], argv[1:]) if argv else ("", [])
+    if verb not in SESSION_HELP or "--help" in args or "-h" in args:
+        asked = verb in SESSION_HELP or verb in ("--help", "-h", "help")
+        print(SESSION_HELP.get(verb, SESSION), end="", file=sys.stdout if asked else sys.stderr)
+        return 0 if asked else 2
+    takes = {"locate": {"--json": 0}, "read": {"--rows": 1, "--box": 0, "--place": 1}, "type": {"--how": 1, "--place": 1},
+             "claim": {"--by": 1, "--for": 1, "--wait": 1}, "release": {"--by": 1}}[verb]
+    opts, words, wrong = {}, [], False
+    while args:
+        word = args.pop(0)
+        if word == "--":  # what follows is no option: a text that starts with two dashes
+            words, args = words + args, []
+        elif word in takes and len(args) >= takes[word]:
+            opts[word] = args.pop(0) if takes[word] else True
+        elif word.startswith("--"):
+            wrong = True
+        else:
+            words.append(word)
+    number = lambda key: opts[key].replace(".", "", 1).isdigit() if key in opts else True
+    placed = "--place" in opts
+    if wrong or len(words) != (verb == "type") + (not placed) or opts.get("--how", "free") not in HOWS \
+            or (verb in ("claim", "release") and not SAFE.match(opts.get("--by") or "")) \
+            or not (opts.get("--rows") or "1").isdigit() or not int(opts.get("--rows") or 1) \
+            or not number("--for") or not number("--wait"):
+        print(SESSION_HELP[verb], end="", file=sys.stderr)
+        return 2
+    at = TMUX
+    try:
+        if placed:
+            row, found = None, backend.Place(opts["--place"], False, None)
+        else:
+            rows = session_named(words[0])
+            if len(rows) != 1:
+                print(f"flowkit-session: {'no session answers' if not rows else f'{len(rows)} sessions answer'} to "
+                      f"{words[0]!r}" + "".join(f"\n  {r.get('sessionId')}  pid {r.get('pid') or '-'}  {r.get('name') or '-'}"
+                                                for r in rows), file=sys.stderr)
+                return 3
+            row = rows[0]
+            if verb == "claim":
+                code, said = session_claim(row, opts["--by"], float(opts.get("--for", CLAIM)),
+                                           float(opts.get("--wait", CLAIM_WAIT)))
+                print(said or f"flowkit-session: no usage-limit stop is recorded for {row.get('name') or row['sessionId']}",
+                      file=sys.stdout if said else sys.stderr)
+                return code
+            if verb == "release":
+                rec = retry_record(row["sessionId"]) or {}
+                claim = rec.get("claim") if isinstance(rec.get("claim"), dict) and rec["claim"].get("by") == opts["--by"] else None
+                if claim is None:
+                    print(f"flowkit-session: {opts['--by']} holds no claim on {row.get('name') or row['sessionId']}", file=sys.stderr)
+                    return 3
+                limit_unclaim(row["sessionId"], claim, f"{opts['--by']} gave it back")
+                print("released")
+                return 0
+            at, found = session_place(row)
+        if verb == "locate":
+            known = {"session": row.get("sessionId"), "name": row.get("name"), "pid": row.get("pid"), "kind": row.get("kind"),
+                     "status": backend.mode(row), "cwd": row.get("cwd"), "backend": at.name,
+                     "place": found.id if found else None, "place_pid": None, "copy": bool(found and found.copy),
+                     "story": (at.story(found) if found else "") or None}
+            if found and at is not BACKGROUND:
+                try:
+                    top = next((p.get("pid") for p in at.places() if p.get("id") == found.id), "")
+                except (OSError, subprocess.SubprocessError, KeyError, ValueError):
+                    top = ""  # a list of places that cannot be read takes nothing from what is known
+                known["place_pid"] = int(top) if str(top).isdigit() else None
+            if "--json" in opts:
+                print(json.dumps(known))
+            else:
+                for key, value in known.items():
+                    print(f"{key}: {('yes' if value else 'no') if key == 'copy' else '-' if value is None else value}")
+            return 0 if found else 4
+        if found is None:
+            print(f"flowkit-session: {row.get('name') or row['sessionId']} runs in no place of {at.name}", file=sys.stderr)
+            return 4
+        if verb == "read" and "--box" in opts:
+            why = session_box(at, found)
+            print(why or "free")
+            return 5 if why else 0
+        if verb == "read":
+            shown = [text for text, _ in at.screen(found)]
+            while shown and not shown[-1].strip():
+                shown.pop()
+            print("\n".join(shown[-int(opts["--rows"]):] if "--rows" in opts else shown) if shown else "no screen")
+            return 0 if shown else 5
+        how = HOWS[opts.get("--how", "free")]
+        if placed:
+            why = at.type(found, words[-1], how)
+            place, why = (None, str(why)) if why else (found.id, "")
+        else:
+            place, why = send(row, words[-1], how)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"flowkit-session: {at.name} did not answer ({type(e).__name__})", file=sys.stderr)
+        return 1
+    if why.startswith("no answer"):
+        print(f"flowkit-session: {at.name} did not answer{why[9:]}", file=sys.stderr)
+        return 1
+    print(why or place)
+    return 5 if why else 0
+
+
 def reconnect(sid, patience=0):
     """One session's Remote Control after the account of its login changed. Claude Code drops the
     link then, says so in the transcript and brings it back only when asked, so `/remote-control`
@@ -1441,7 +1796,7 @@ def reconnect(sid, patience=0):
     it to an account change; no session is ever restarted for this. Returns what was typed, or ""."""
     info = next((i for i in sessions() if i["sessionId"] == sid), None)
     mark, owed = REMOTE / f"{sid}.json", REMOTE / f"{sid}.owed"
-    if info is None or info.get("kind") != "interactive":
+    if info is None or info.get("kind") != "interactive" or claimed(retry_record(sid) or {}):
         return ""
     unit = float(os.environ.get("FLOWKIT_RETRY_MINUTE") or 60) / 60
     REMOTE.mkdir(parents=True, exist_ok=True)
@@ -2334,6 +2689,8 @@ def main(argv):
             wake("", args[2], patience=300, sid=args[1])
         except Exception:
             pass
+    elif cmd == "session":
+        sys.exit(session_cmd(args))
     elif cmd == "reconnect" and (args in ([], ["--all"]) or (len(args) == 1 and SAFE.match(args[0]))):
         try:
             reconnect(args[0], patience=SETTLE) if args and args != ["--all"] else reconnect_pass(bool(args))

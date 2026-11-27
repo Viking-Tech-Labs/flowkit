@@ -89,8 +89,8 @@ bar runs that pass, so it stops while no tmux client is attached and never runs 
 1. Run `handoff.py timer diff "${CLAUDE_PLUGIN_ROOT}"`. If it says `installed`, say so and go on
    to the next part. If it says `not on this system`, relay that line and go on: there is nothing
    to install.
-2. Show the user what it printed, and say in plain words what changes: four commands are copied to
-   `~/.local/bin/` (`flowkit-tick`, `flowkit-tmux`, `flowkit-away`, `flowkit-usage`, kept at the
+2. Show the user what it printed, and say in plain words what changes: five commands are copied to
+   `~/.local/bin/` (`flowkit-tick`, `flowkit-tmux`, `flowkit-away`, `flowkit-usage`, `flowkit-session`, kept at the
    plugin's version at every session start), and `~/Library/LaunchAgents/flowkit.tick.plist` is
    written and loaded. It runs `flowkit-tick --timer` every 15 seconds from login on, with this
    session's `PATH` and, where they are set, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME` and `LANG`
