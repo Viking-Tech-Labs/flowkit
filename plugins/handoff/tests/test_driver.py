@@ -106,7 +106,9 @@ class TestCommand(unittest.TestCase):
         sock = f"fd-{os.getpid()}"
         real = lambda *a: subprocess.run(["tmux", "-L", sock, *a], capture_output=True, text=True, env=self.env)
         self.addCleanup(real, "kill-server")
-        shell = "/bin/bash --noprofile --norc"  # never the user's shell rc
+        # never the user's shell rc; `exec`, so the pane's own process is the shell a launch is typed into (a `sh`
+        # that keeps running above it is not what a session is looked for under)
+        shell = "exec /bin/bash --noprofile --norc"
         real("-f", "/dev/null", "new-session", "-d", "-s", "main", "-x", "200", "-y", "50", shell)
         real("set-option", "-g", "default-shell", "/bin/sh")
         real("set-option", "-g", "default-command", shell)
