@@ -1969,7 +1969,7 @@ esac
                 def tmux(*args):
                     calls.append(args)
                     return subprocess.CompletedProcess(args, 0, screen, "")
-                return mock.patch.object(handoff, "tmux", tmux)
+                return mock.patch.object(handoff.backend, "tmux", tmux)
 
             for line, why, what in captured:
                 with see(self.box(line)):
@@ -2623,7 +2623,7 @@ esac
             # no tmux on this machine: every reporter is a miss, and the push falls through to notify
             (self.tmp / "claude" / "flowkit" / "remind.json").unlink()
             conf = {"remind": "on", "notify": "true"}
-            with mock.patch.object(handoff, "pane_of", side_effect=FileNotFoundError("tmux")), \
+            with mock.patch.object(handoff.TMUX, "locate", side_effect=FileNotFoundError("tmux")), \
                     mock.patch.object(handoff, "setting", side_effect=lambda key, default: conf.get(key, default)), \
                     contextlib.redirect_stdout(io.StringIO()) as out:
                 handoff.remind()

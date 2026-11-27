@@ -75,6 +75,7 @@ saved prompts and story files. The skills call this with plain arguments; nothin
 import contextlib
 import difflib
 import fcntl
+import importlib.util
 import json
 import os
 import plistlib
@@ -176,11 +177,6 @@ REMIND_RING = ("reminder: from flowkit's tick, not the user. Claude Code skips a
                "list: {path}. Message: {push}")
 PARKED = CLAUDE / "flowkit" / "parked.json"  # flowkit-tmux's: the panes parked at a start-up prompt
 PARKED_FRESH = 300  # seconds after which that file says nothing: the tick that writes it has stopped
-PROMPT_LINE = re.compile(r"^[│|\s]*[>❯]\s?(.*?)[\s│|]*$")
-# what `capture-pane -e` adds to a row: a change of attributes (its codes are group 1), a link, any other sequence
-ESCAPE = re.compile(r"\x1b\[([\d;:]*)m|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[^@-~]*[@-~]")
-COLOUR = re.compile(r"\b[345]8;(?:5;\d*|2;\d*;\d*;\d*)")  # a colour's own numbers are no attributes
-DIALOG = re.compile(r"enter to (?:confirm|select|continue)|esc to (?!interrupt)\w+|^\s*(?:[❯>]\s*)?\d+\.\s", re.I | re.M)
 HEADING = "WHERE TO PICK UP"
 NAMES = ("PLAN.md", "BUILD-PLAN.md", "HANDOFF.md", "ROADMAP.md", "docs/PLAN.md", "docs/plan.md", "docs/HANDOFF.md")
 SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -196,6 +192,19 @@ CHAIN_ENDS = {  # a chain's end: what its slices do about pushing, the MR and th
              "Draft, sets auto-merge, registers the watch and closes: the watch reports the merge and the target "
              "branch's pipeline",
 }
+
+
+def _backend():
+    """backend.py beside this file: where a session runs and how a line reaches it there."""
+    spec = importlib.util.spec_from_file_location("flowkit_backend", Path(__file__).resolve().parent / "backend.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+backend = _backend()
+TMUX, BACKGROUND = backend.TMUX, backend.BACKGROUND
+parked, draft = TMUX.parked, TMUX.draft
 
 
 def fail(msg):
@@ -374,7 +383,7 @@ def last_call(by, stamp):
     coordination board's `Coordinator:` line, or with `coord` at its start or after a `-`), only into
     a free prompt box; never into a reporter, the setter, or a session that is busy or waits."""
     try:
-        rows = [r for r in agents_json() if isinstance(r, dict)]
+        rows = [r for r in backend.agents() if isinstance(r, dict)]
     except (OSError, subprocess.TimeoutExpired, ValueError):
         print("last call: cannot read `claude agents --json`: no coordinator told")
         return
@@ -390,8 +399,8 @@ def last_call(by, stamp):
         name = str(row.get("name") or "")
         if label(name) == by or name.endswith("-report") or not (name in boards or COORD_NAME.search(name)):
             continue
-        if mode(row) != "idle":
-            print(f"no last call {name}: {mode(row)}")
+        if backend.mode(row) != "idle":
+            print(f"no last call {name}: {backend.mode(row)}")
             continue
         pane, why = type_into(row, text)
         print(f"no last call {name}: {why}" if why else f"last call {name} (tmux {pane})")
@@ -402,7 +411,7 @@ def nudge_pass():
     whose question they answered, in the last PRESENT minutes: they may be answering it now. True
     when nobody was left for a later pass. With `claude agents` unreadable everybody is nudged."""
     try:
-        rows = [r for r in agents_json() if isinstance(r, dict) and r.get("status") == "waiting"]
+        rows = [r for r in backend.agents() if isinstance(r, dict) and r.get("status") == "waiting"]
     except (OSError, subprocess.TimeoutExpired, ValueError):
         rows = []
     name = lambda r: str(r.get("name") or "?")
@@ -713,7 +722,7 @@ def whoami():
     info = session_file(os.environ.get("CLAUDE_PID", ""))
     if not info.get("name"):
         try:
-            rows = agents_json()
+            rows = backend.agents()
         except (OSError, subprocess.TimeoutExpired, ValueError):
             rows = []
         by_pid = {r["pid"]: r for r in rows if isinstance(r, dict) and r.get("pid")}
@@ -871,10 +880,11 @@ def api_error_hook():
     info = session_file(pid, sid)
     story, screen = "", []
     try:
-        if os.environ.get("TMUX_PANE"):
-            story = tmux("show-options", "-wqv", "-t", os.environ["TMUX_PANE"], "@flowkit_story").stdout.strip()
+        here = TMUX.here()
+        if here:
+            story = TMUX.story(here)
             if kind == "rate_limit":
-                screen = bottom(os.environ["TMUX_PANE"])
+                screen = TMUX.bottom(here)
     except (OSError, subprocess.TimeoutExpired):
         pass
     fresh = [True]
@@ -924,103 +934,17 @@ def snapshot(path):
         return None
 
 
-def pane_of(pid):
-    """(pane id, in copy mode) of the tmux pane the live process `pid` runs in, or None."""
-    panes = {}
-    for line in tmux("list-panes", "-a", "-F", "#{pane_pid} #{pane_id} #{pane_in_mode}").stdout.splitlines():
-        p, pane, in_mode = (line.split() + ["", "", ""])[:3]
-        if p.isdigit():
-            panes[int(p)] = (pane, in_mode)
-    ps = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
-    parents = {int(a): int(b) for a, b in (row.split() for row in ps.splitlines() if len(row.split()) == 2)}
-    for _ in range(4):
-        if pid in panes:
-            pane, in_mode = panes[pid]
-            return pane, in_mode != "0"
-        pid = parents.get(pid)
-        if pid is None:
-            return None
-    return None
-
-
-def session_pane(pid):
-    """The tmux pane the live process `pid` runs in, if it is not in copy mode."""
-    found = pane_of(pid)
-    return found[0] if found and not found[1] else None
-
-
-def shown(pane):
-    """The rows a pane shows, each as (text, typed): the row as plain text, and the same row with
-    its dim characters blanked. Claude Code draws a prompt suggestion dim in an empty prompt box,
-    which a plain capture shows as typed text. tmux writes a change of attributes where it happens
-    and not again on the next row, so the capture is read as one stream."""
-    rows, dim = [], False
-    for line in tmux("capture-pane", "-p", "-e", "-t", pane).stdout.splitlines():
-        text = typed = ""
-        parts = ESCAPE.split(line)  # text, an attribute change's codes (None for another sequence), text, …
-        for part, codes in zip(parts[::2], [*parts[1::2], None]):
-            text, typed = text + part, typed + (" " * len(part) if dim else part)
-            for code in COLOUR.sub("c", codes).split(";") if codes is not None else ():
-                dim = code == "2" if code in ("", "0", "2", "22") else dim
-        rows.append((text, typed))
-    return rows
-
-
-def drafted(row):
-    """The text typed into the prompt box a shown row holds: what follows its prompt mark and is
-    not dim."""
-    m = PROMPT_LINE.match(row[0])
-    return row[1][m.start(1):m.end(1)].strip()
-
-
-def draft(pane):
-    """Text sitting in the pane's prompt box (the last line that starts with the prompt mark)."""
-    rows = [row for row in shown(pane) if PROMPT_LINE.match(row[0])]
-    return bool(rows) and bool(drafted(rows[-1]))
-
-
-def bottom(pane):
-    """The bottom 8 rows of what a pane shows, as a list."""
-    rows = tmux("capture-pane", "-p", "-t", pane).stdout.splitlines()
-    while rows and not rows[-1].strip():
-        rows.pop()
-    return rows[-8:]
-
-
-def parked(pane):
-    """Why the pane's prompt box cannot take a typed line, "" when it can: there is none on screen,
-    dialog rows sit below it (a menu's numbered options, its Enter or Esc hint), or it holds a
-    draft. Only rows below the last prompt-box line count, so a dialog quoted in the conversation
-    above it never does."""
-    rows = shown(pane)
-    last = max((i for i, row in enumerate(rows) if PROMPT_LINE.match(row[0])), default=None)
-    if last is None:
-        return "no prompt box"
-    if DIALOG.search("\n".join(row[0] for row in rows[last + 1:])):
-        return "dialog"
-    return "draft" if drafted(rows[last]) else ""
-
-
-def type_line(pane, text):
-    """Type `text` into the pane and press Enter. One tmux call, so nothing else typing into panes
-    lands in between; the pause lets the TUI take the text as typed before Enter, which it would
-    otherwise read as part of a paste."""
-    return tmux("send-keys", "-t", pane, "-l", text, ";", "run-shell", "sleep 0.5",
-                ";", "send-keys", "-t", pane, "Enter").returncode == 0
-
-
 def type_into(row, text):
     """Type a line into the tmux pane of the session a `claude agents` row names, only into a free
     prompt box: (pane, "") once typed, else (None, why not). No tmux on the machine, or one that
     hangs, is a why like the others."""
     try:
-        found = pane_of(row["pid"]) if row.get("kind") == "interactive" and row.get("pid") else None
-        why = "not in a tmux pane" if found is None else "copy mode" if found[1] else parked(found[0])
-        if not why and not type_line(found[0], text):
-            why = "tmux did not take the line"
+        found = TMUX.locate(pid=row["pid"]) if row.get("kind") == "interactive" and row.get("pid") else None
+        why = "not in a tmux pane" if found is None else TMUX.type(found, text, backend.FREE)
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"tmux or ps did not answer ({type(e).__name__})"
-    return (None, why) if why else (found[0], "")
+    why = "tmux did not take the line" if why == "not typed" else why
+    return (None, why) if why else (found.id, "")
 
 
 def continue_session(rec, text):
@@ -1029,17 +953,17 @@ def continue_session(rec, text):
     if not session_file(rec["pid"], rec["session"]):
         return False
     if rec.get("background"):
-        row = next((a for a in agents_json() if isinstance(a, dict) and a.get("sessionId") == rec["session"]), None)
-        if row is None or mode(row) != "idle":
+        row = next((a for a in backend.agents() if isinstance(a, dict) and a.get("sessionId") == rec["session"]), None)
+        if row is None or backend.mode(row) != "idle":
             return False
         wake("", text, sid=rec["session"])
         return True
     if session_file(rec["pid"], rec["session"]).get("status") != "idle":
         return False
-    pane = session_pane(rec["pid"])
-    if pane is None or draft(pane):
+    found = TMUX.locate(pid=rec["pid"])
+    if found is None or found.copy or draft(found):
         return False
-    return type_line(pane, text)
+    return TMUX.type(found, text) == ""
 
 
 def retry_wait(sid):
@@ -1286,9 +1210,9 @@ def limit_mark(sid, key=None, line=None, **fields):
 
 
 def limit_pane(rec):
-    """pane_of for a limit record's session; None too when there is no tmux to ask."""
+    """The pane of a limit record's session; None too when there is no tmux to ask."""
     try:
-        return pane_of(rec["pid"])
+        return TMUX.locate(pid=rec["pid"])
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -1345,7 +1269,7 @@ def limit_plan(sid, rec, unit):
     that failed); one does, so after its reset; no reading, so like a stop no source names a reset for."""
     at, now = rec["at"], time.time()
     found = None if rec.get("background") else limit_pane(rec)
-    rest = {"status": session_file(rec["pid"], sid).get("status"), "screen": bottom(found[0]) if found else []}
+    rest = {"status": session_file(rec["pid"], sid).get("status"), "screen": TMUX.bottom(found) if found else []}
     head = f"> limit {rec['name']} · {time.strftime('%Y-%m-%d %H:%M')} · "
     fields = {}
     if after_switch(rec, unit):
@@ -1384,9 +1308,7 @@ def limit_continue(rec, text):
     found = limit_pane(rec)
     if found is None:
         return "unreachable"
-    if found[1]:
-        return "copy mode"
-    return parked(found[0]) or ("" if type_line(found[0], text) else "not typed")
+    return TMUX.type(found, text, backend.FREE)
 
 
 def limit_lock(sid):
@@ -1547,11 +1469,11 @@ def reconnect(sid, patience=0):
         while fresh().get("status") != "idle" and time.time() < deadline:
             time.sleep(0.2)
         try:
-            found = pane_of(pid) if fresh().get("status") == "idle" else None
-            pane = found[0] if found and not found[1] and not parked(found[0]) else None
+            pane = TMUX.locate(pid=pid) if fresh().get("status") == "idle" else None
+            typed = pane is not None and TMUX.type(pane, "/remote-control", backend.COMMAND) == ""
         except (OSError, subprocess.SubprocessError):
-            pane = None
-        if pane is None or not type_line(pane, "/remote-control"):
+            typed = False
+        if not typed:
             owed.write_text(str(notice))
             return ""
         mark.write_text(json.dumps({"notice": notice, "at": time.time(), "state": "typed"}))
@@ -1563,8 +1485,8 @@ def reconnect(sid, patience=0):
         if not back and fresh():
             left = parked(pane) == "dialog"
             if left:
-                tmux("send-keys", "-t", pane, "Escape")
-            story = tmux("show-options", "-wqv", "-t", pane, "@flowkit_story").stdout.strip()
+                TMUX.escape(pane)
+            story = TMUX.story(pane)
             retry_log({"story": story if SAFE.match(story) else ""},
                       f"> remote {info.get('name') or sid[:8]} · {time.strftime('%Y-%m-%d %H:%M')} · Remote Control did not "
                       f"come back after the account changed{': the dialog it left open was closed' if left else ''}; "
@@ -1604,58 +1526,14 @@ def api_ok_hook():
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def tmux(*args):
-    sock = os.environ.get("FLOWKIT_TMUX_SOCKET")
-    return subprocess.run(
-        ["tmux", *(["-L", sock] if sock else []), *args], capture_output=True, text=True, timeout=10
-    )
-
-
-def reporter_pane(agents, panes, parents, name):
-    """The tmux pane id and status of the live interactive session called `name`, found through
-    its parent processes (a pane's pid is the shell that started it)."""
-    for a in agents:
-        if a.get("kind") == "interactive" and a.get("name") == name and a.get("pid"):
-            pid = a["pid"]
-            for _ in range(4):
-                if pid in panes:
-                    return panes[pid], a.get("status")
-                pid = parents.get(pid)
-                if pid is None:
-                    break
-    return None
-
-
-def agents_json(*args):
-    return json.loads(
-        subprocess.run(["claude", "agents", "--json", *args], capture_output=True, text=True, timeout=15).stdout
-    )
-
-
-def bg_reporter(slug, sid=None):
-    """The story's background reporter, or with sid the background session with that id."""
-    rows = [a for a in agents_json("--all") if isinstance(a, dict) and a.get("kind") == "background"
-            and (a.get("sessionId") == sid if sid else a.get("name") == f"{slug}-report")]
-    return max(rows, key=lambda a: a.get("startedAt") or 0) if rows else None
-
-
-def mode(agent):
-    """busy, waiting or idle. A background entry's `status` is there while its process runs and
-    wins over `state`, which can still say working after the turn ended."""
-    status = agent.get("status")
-    if status is None:
-        status = {"working": "busy", "blocked": "waiting"}.get(agent.get("state"), "idle")
-    return status
-
-
 def wake(slug, name, patience=0, sid=None):
     """Ring a background reporter (with sid: resume that background session with `name` as the prompt). `claude --bg --resume` hands a stopped session the prompt under
     its own id; a live one would get a copy instead, so a live one is stopped first. Never while it
     waits on a prompt; while it is mid-turn, a process of its own waits up to five minutes, so the
     close does not."""
-    reporter = bg_reporter(slug, sid)
+    reporter = BACKGROUND.locate(sid=sid, name=f"{slug}-report")
     deadline = time.time() + patience
-    while reporter is not None and mode(reporter) == "busy":
+    while reporter is not None and backend.mode(reporter.row) == "busy":
         if time.time() >= deadline:
             if patience == 0:
                 again = ["--id", sid, name] if sid else [slug, name]
@@ -1663,21 +1541,9 @@ def wake(slug, name, patience=0, sid=None):
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
         time.sleep(10)
-        reporter = bg_reporter(slug, sid)
-    if reporter is None or mode(reporter) == "waiting":
-        return
-    if reporter.get("pid"):
-        subprocess.run(["claude", "stop", reporter["id"]], capture_output=True, text=True, timeout=30)
-        for _ in range(20):  # `stop` returns before the process is gone
-            time.sleep(0.5)
-            if not (bg_reporter(slug, sid) or {}).get("pid"):
-                break
-        else:
-            return
-    subprocess.run(
-        ["claude", "--bg", "--resume", reporter["sessionId"], name if sid else f"closed {name}"],
-        cwd=reporter.get("cwd") or None, capture_output=True, text=True, timeout=60,
-    )
+        reporter = BACKGROUND.locate(sid=sid, name=f"{slug}-report")
+    if reporter is not None:
+        BACKGROUND.type(reporter, name if sid else f"closed {name}", backend.FREE)
 
 
 def ring(slug, name):
@@ -1685,32 +1551,26 @@ def ring(slug, name):
     a tmux one gets it typed into its pane when it is live and not waiting on a prompt. The file is
     the record; this is only the doorbell, so a miss never fails the close. Returns what happened:
     rung, background (woken), waiting (found, but at a prompt) or none (no reporter runs)."""
-    if not shutil.which("claude"):
+    if not BACKGROUND.available():
         return "none"
     try:
-        agents = agents_json("--all")
+        agents = backend.agents("--all")
         if not isinstance(agents, list):
             return "none"
         if any(isinstance(a, dict) and a.get("kind") == "background" and a.get("name") == f"{slug}-report"
                for a in agents):
             wake(slug, name)
             return "background"
-        if not shutil.which("tmux"):
+        if not TMUX.available():
             return "none"
-        panes = {}
-        for line in tmux("list-panes", "-a", "-F", "#{pane_pid} #{pane_id}").stdout.splitlines():
-            pid, pane = line.split()
-            panes[int(pid)] = pane
-        ps = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
-        parents = {int(a): int(b) for a, b in (row.split() for row in ps.splitlines() if row.strip())}
-        found = reporter_pane(agents, panes, parents, f"{slug}-report")
+        where = TMUX.finder()
+        found = next(((where(a["pid"]), a.get("status")) for a in agents if a.get("kind") == "interactive"
+                      and a.get("name") == f"{slug}-report" and a.get("pid") and where(a["pid"])), None)
         if found is None:
             return "none"
         if found[1] == "waiting":
             return "waiting"
-        # one tmux call, as continue_session: nothing else typing into panes lands in between
-        tmux("send-keys", "-t", found[0], "C-u", ";", "send-keys", "-t", found[0], "-l", f"closed {name}",
-             ";", "run-shell", "sleep 0.5", ";", "send-keys", "-t", found[0], "Enter")
+        TMUX.type(found[0], f"closed {name}", backend.OVER)
         return "rung"
     except Exception:  # the record is already written; a doorbell never fails the close
         return "none"
@@ -1734,10 +1594,10 @@ def idle_seconds(now):
     if idle is not None:
         return idle
     try:
-        seen = [int(x) for x in tmux("list-clients", "-F", "#{client_activity}").stdout.split() if x.isdigit()]
+        seen = TMUX.last_input()
     except (OSError, subprocess.TimeoutExpired):
-        seen = []
-    return max(0, now - max(seen)) if seen else None
+        seen = None
+    return max(0, now - seen) if seen is not None else None
 
 
 def remind_quiet(now):
@@ -1774,7 +1634,7 @@ def remind_found(now):
                           f"{rec.get('name') or path.stem[:8]} stopped on the usage limit and flowkit cannot continue it"
                           + (f" (story {rec['story']})" if rec.get("story") else "")))
     try:
-        rows = agents_json()
+        rows = backend.agents()
     except (OSError, subprocess.TimeoutExpired, ValueError):
         rows = []
     for row in rows if isinstance(rows, list) else []:
@@ -1911,12 +1771,12 @@ def remind_deliver(push, path):
     handoff.conf, the push on its stdin; else a macOS notification. Returns what carried it, or ""."""
     line = REMIND_RING.format(quiet=REMIND_QUIET, path=home_short(path), push=push)
     try:
-        rows = [r for r in agents_json() if isinstance(r, dict)]
+        rows = [r for r in backend.agents() if isinstance(r, dict)]
     except (OSError, subprocess.TimeoutExpired, ValueError):
         rows = []
     for row in sorted(rows, key=lambda r: r.get("startedAt") or 0):
         name = str(row.get("name") or "")
-        if not name.endswith("-report") or row.get("kind") != "interactive" or mode(row) != "idle" \
+        if not name.endswith("-report") or row.get("kind") != "interactive" or backend.mode(row) != "idle" \
                 or not row.get("pid") or not row.get("sessionId") or story_reported(name[:-len("-report")]):
             continue
         sent, what = remind_ring(row, line)

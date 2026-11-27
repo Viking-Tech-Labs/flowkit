@@ -6,6 +6,7 @@ import importlib.util
 import inspect
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -340,6 +341,12 @@ class Both(Case):
         for name, value in vars(self.b.Backend).items():
             if inspect.isfunction(value):
                 self.assertFalse([p for p in inspect.signature(value).parameters if "option" in p], name)
+
+    def test_handoff_py_reaches_a_session_only_through_this_file(self):
+        source = (PLUGIN / "scripts" / "handoff.py").read_text()
+        found = re.findall(r'\[\s*"(?:tmux|claude)"|(?<![.\w])tmux\(|send-keys|capture-pane|list-panes|list-clients|'
+                           r'show-options|@flowkit_|"--bg"|"--resume"', source)
+        self.assertEqual(found, [])
 
 
 if __name__ == "__main__":
