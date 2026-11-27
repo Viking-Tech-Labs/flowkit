@@ -23,7 +23,10 @@ saved prompts and story files. The skills call this with plain arguments; nothin
                                                  first line), for 12 hours; names who set it and when; a
                                                  last call is typed into every idle coordinator now, and
                                                  `away-nudge --wait` starts; a flag already set stays as it is
-  handoff.py back [--by <session>]               clear the flag, then list the sessions waiting on the user
+  handoff.py awake [--by <session>]              the ~/.claude/awake flag, for 12 hours: out but reachable
+                                                 from a phone, so the computer stays up between turns and
+                                                 questions still reach the user; an away flag is cleared
+  handoff.py back [--by <session>]               clear both flags, then list the sessions waiting on the user
   handoff.py away-status                         away: since <stamp> (in effect), from <stamp> (set, not
                                                  yet in effect) or off
   handoff.py away-nudge [--wait]                 once the flag is in effect, nudge the sessions parked on a
@@ -40,7 +43,8 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py context                             UserPromptSubmit, PostToolBatch and PostToolUse (on
                                                  AskUserQuestion) hook: the context line, the away flag's
                                                  set and clear once each, the stamp of a prompt the user
-                                                 typed or a question they answered
+                                                 typed or a question they answered; with idle_release=on
+                                                 a prompt typed at the computer clears the away flag
   handoff.py api-error | api-ok                  StopFailure and Stop hooks: the retry record and line, and
                                                  the waiter (retry-wait <session id>): after a usage limit
                                                  unless limitresume=off, after an API error with autoretry=on
@@ -84,6 +88,8 @@ AWAY_DELAY = 5  # minutes from `away` to the flag taking effect: the coordinator
 AWAY_NUDGED = CLAUDE / "flowkit" / "away-nudged"  # the flag the nudge ran for, nobody left for a later pass
 AWAY_CLEARED = CLAUDE / "flowkit" / "away-cleared"  # who cleared the flag last, when, and which flag it was
 PRESENT = 5  # minutes after the user typed to a session (or answered its question) in which it may still ask
+RELEASE_GRACE = 30  # idle_release=on: minutes a flag is in effect before a typed prompt may clear it (the goodnight prompts)
+RELEASE_IDLE = 120  # and the seconds since the last key or mouse input within which that prompt was typed at the computer
 COORDINATOR = re.compile(r"^Coordinator: (\S+)", re.M)  # a coordination board names its coordinator
 COORD_NAME = re.compile(r"(?:^|-)coord")  # coord-1, story-coord, story-coordinator
 SPAWNED = CLAUDE / "spawned"
@@ -111,7 +117,7 @@ STATS = CLAUDE / "session-stats"
 CTX_STEPS = (40, 50, 60)
 CTX_CLEAR = 35  # a reading this low (a /compact, a fresh start) lets the steps fire again
 CTX_WARM = 30  # requests before a session hears anything: a successor that starts high must not loop
-AWAKE = CLAUDE / "awake"  # out but reachable: written by the user's own setup, read like the away flag
+AWAKE = CLAUDE / "awake"  # out but reachable: `awake` writes it (a setup of the user's own may), counted from its write
 RETRY = CLAUDE / "flowkit" / "retry"  # <session id>.json while a session sits on an API error
 RETRIES_LOG = CLAUDE / "flowkit" / "retries.log"  # retry lines of sessions outside a story
 RETRY_KINDS = ("server_error", "overloaded")  # what the API-error waiter continues; rate_limit has limit_wait
@@ -306,17 +312,42 @@ def away(by):
         reach("nudge")
 
 
-def back(by):
-    """Clear the away flag, noting who and when (the context hook tells every session), then list
-    the sessions waiting on the user."""
+def clear_away(by):
+    """Remove the away flag, noting who and when (the context hook tells every session). True when
+    one was there."""
     try:
         text = AWAY.read_text()
         AWAY.unlink()
         AWAY_CLEARED.parent.mkdir(parents=True, exist_ok=True)
         AWAY_CLEARED.write_text(json.dumps({"by": by, "at": time.strftime("%Y-%m-%d %H:%M"), "flag": text}))
     except OSError:
-        pass
+        return False
+    return True
+
+
+def awake(by):
+    """Set the awake flag: out, but reachable from a phone. The computer is kept up between turns and
+    `autoretry` counts it, as while away; questions still reach the user and a max launch still asks,
+    so an away flag is cleared. It counts AWAY_HOURS from its write, or until `back`."""
+    was_away = clear_away(by)
+    stamp = time.strftime("%Y-%m-%d %H:%M")
+    CLAUDE.mkdir(parents=True, exist_ok=True)
+    AWAKE.write_text(f"{stamp}\nby: {by}\n")
+    print(f"awake: since {stamp} (set by {by}; the computer stays up between turns, questions still reach you; "
+          f"clears with back or after {AWAY_HOURS} hours)")
+    if was_away:
+        print("away: off")
+
+
+def back(by):
+    """Clear the away and the awake flag, then list the sessions waiting on the user."""
+    clear_away(by)
     print("away: off")
+    try:
+        AWAKE.unlink()
+        print("awake: off")
+    except OSError:
+        pass
     sys.stdout.flush()
     reach("waiting")
 
@@ -430,6 +461,20 @@ def present(sid):
         return False
 
 
+def idle_release():
+    """idle_release=on in handoff.conf: a prompt the user typed at the computer clears an away flag
+    that has been in effect for RELEASE_GRACE minutes, so a flag left behind by a day out does not
+    silence the sessions all evening. At the computer means a key or the mouse was used in the last
+    RELEASE_IDLE seconds: a prompt sent from a phone clears nothing, and where the system has no
+    such reading (anything but macOS) nothing is cleared."""
+    flag = away_flag()
+    if not flag or time.time() - flag["at"] < RELEASE_GRACE * 60 or setting("idle_release", "off") != "on":
+        return
+    idle = hid_idle()
+    if idle is not None and idle < RELEASE_IDLE:
+        clear_away("a prompt typed at the computer")
+
+
 def reach(*args):
     """Run bin/flowkit-away with its output going straight to the skill; a miss never fails
     the flag (the sessions are reached as a courtesy, the flag is the record)."""
@@ -529,6 +574,7 @@ def context_hook():
         seen.pop("quiet", None)
         if typed_by_user(str(data.get("prompt") or ""), not seen.get("prompted")):
             seen["typed"] = time.time()
+            idle_release()
         seen["prompted"] = True
     news = away_news(seen)
     if closing(data):
@@ -1637,16 +1683,23 @@ def ring(slug, name):
         return "none"
 
 
-def idle_seconds(now):
-    """Seconds since the user's last keyboard or mouse input: macOS's HID idle time, elsewhere the
-    newest activity of a tmux client; None when neither answers."""
+def hid_idle():
+    """Seconds since the last keyboard or mouse input at this computer (macOS's HID idle time); None
+    where `ioreg` does not answer."""
     try:
         out = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True, timeout=10).stdout
         found = re.search(r'"HIDIdleTime" = (\d+)', out)
-        if found:
-            return int(found[1]) / 1e9
+        return int(found[1]) / 1e9 if found else None
     except (OSError, subprocess.TimeoutExpired):
-        pass
+        return None
+
+
+def idle_seconds(now):
+    """Seconds since the user's last keyboard or mouse input: macOS's HID idle time, elsewhere the
+    newest activity of a tmux client; None when neither answers."""
+    idle = hid_idle()
+    if idle is not None:
+        return idle
     try:
         seen = [int(x) for x in tmux("list-clients", "-F", "#{client_activity}").stdout.split() if x.isdigit()]
     except (OSError, subprocess.TimeoutExpired):
@@ -1986,6 +2039,9 @@ def conf(key, value):
     """Set one key=value line of handoff.conf, keeping every other line as it is."""
     if not re.fullmatch(r"[a-z_]+", key) or "\n" in value:
         fail(f"not a handoff.conf setting: {key}={value}")
+    if (key, value) == ("idle_release", "on") and not shutil.which("ioreg"):
+        fail("idle_release=on needs macOS: it tells a prompt typed at the computer from one sent from a phone by "
+             "the time since the last key or mouse input (ioreg), which this system does not report")
     lines = SETTINGS_FILE.read_text().splitlines() if SETTINGS_FILE.is_file() else []
     lines = [l for l in lines if l.partition("=")[0].strip() != key] + [f"{key}={value}"]
     CONFIG.mkdir(parents=True, exist_ok=True)
@@ -2198,8 +2254,8 @@ def main(argv):
         record(*args)
     elif cmd == "chain-end" and len(args) in (1, 2):
         chain_end(*args)
-    elif cmd in ("away", "back") and (not args or (len(args) == 2 and args[0] == "--by")):
-        (away if cmd == "away" else back)(label(args[1]) if args else "unknown")
+    elif cmd in ("away", "awake", "back") and (not args or (len(args) == 2 and args[0] == "--by")):
+        {"away": away, "awake": awake, "back": back}[cmd](label(args[1]) if args else "unknown")
     elif cmd == "away-nudge" and args in ([], ["--wait"]):
         away_nudge(bool(args))
     elif cmd == "restamp" and not args:

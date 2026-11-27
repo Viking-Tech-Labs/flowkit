@@ -14,9 +14,10 @@ called `handoff` keeps working beside this one.
 |---|---|
 | `/handoff:close [modes] [what next]` | Closes the session: commits green work (never pushes), fixes docs it made stale, writes the pick-up block, drafts the next session's prompt when repo work is left, closes with `DONE` / `FOR ME` / `OPEN` / `LEFT` and records the close in the story file. |
 | `/handoff:away` | Marks you away (`~/.claude/away`, in effect five minutes later, cleared by `/handoff:back` or 12 hours after): the idle coordinators get a last call at once; then every session, running already or started later, stops asking and takes the recommended option, marked "(auto)", unless you typed to it in the last five minutes; a session already sitting on a question is told so (below). |
-| `/handoff:back` | Clears the flag, so sessions ask you again, and lists the sessions waiting on you right now. |
+| `/handoff:awake` | Marks you out but reachable from a phone (`~/.claude/awake`, for 12 hours or until `/handoff:back`): the computer is kept awake between turns as while away, and sessions still ask you. It clears an away flag. |
+| `/handoff:back` | Clears both flags, so sessions ask you again, and lists the sessions waiting on you right now. |
 | `/handoff:spawn [single] <prompt>` | Starts any session with a prompt the way a close's `spawn` does: in its story's tab, or with `single` as a one-off in a shared `adhoc` tab ("open a fresh session in that repo"); with `report_to=on` the new session reports its verdict back here (below). |
-| `/handoff:setup` | Offers the status line below, as a diff of your settings, and writes it only on your yes; asks which launch driver spawned sessions use, and for background sessions offers two settings of yours; offers the `handoff.conf` keys below (tabs closing on their own, continuing after an API error, where a chain ends, a helper reporting back). |
+| `/handoff:setup` | Offers the status line below, as a diff of your settings, and writes it only on your yes; asks which launch driver spawned sessions use, and for background sessions offers two settings of yours; offers the `handoff.conf` keys below (tabs closing on their own, continuing after an API error, clearing away at the keyboard, where a chain ends, a helper reporting back). |
 | `/handoff:setup-tmux` | Offers the tmux kit below and the one line that loads it from your tmux.conf, and writes only on your yes; explains the launch settings. |
 
 Modes, combined freely: `quick` skips the docs sweep; `prompt-only` prints only the next prompt
@@ -241,15 +242,62 @@ them.
   the hook catches their next question; a session that ended its turn on a question in prose
   stays as it is.
 
-`/handoff:back` runs `handoff.py back --by <this session>`: the flag goes, every session hears who
-cleared it, and the sessions waiting on you are listed.
+`/handoff:back` runs `handoff.py back --by <this session>`: the away flag and the awake flag go,
+every session hears who cleared the away flag, and the sessions waiting on you are listed.
 
-`/handoff:setup-tmux` copies `flowkit-away` to `~/.local/bin` beside `flowkit-tmux`, kept at the
-plugin's version at every session start, so a shell function of your own can call `flowkit-away
-nudge` and `flowkit-away waiting` too (`--dry-run` shows what `nudge` would do, `--only <name>`
-limits it to one session); to set the flag it calls `handoff.py away --by <name>`, never a raw
-write. The flag is the record and the nudge a courtesy: a session the nudge could not reach still
-reads the flag at its next question.
+### Out but reachable: awake
+
+New in 0.12.0. `/handoff:awake` runs `handoff.py awake --by <this session>` and writes
+`~/.claude/awake` (the time, then `by: <name>`). It is for going out with the phone: sessions keep
+asking you, over Remote Control, and a launch at effort `max` still asks, but the computer is
+kept awake between turns as while away (see "Keeping the computer awake"), and with
+`autoretry=on` a session an API error stopped carries on (see "API errors"). The flag counts for
+12 hours from its write; setting it again starts them again; `/handoff:back` clears it. The two
+flags are one or the other: `awake` clears an away flag (every session hears it), and `back`
+clears both.
+
+### Back at the keyboard: `idle_release`
+
+New in 0.12.0, off by default. With `idle_release=on` in `handoff.conf`, a prompt you type at the
+computer clears an away flag that has been in effect for 30 minutes or more, so a flag left behind
+by a day out does not keep the sessions silent all evening. "At the computer" is read from the
+keyboard and the mouse: one of them was used in the last two minutes (macOS's HID idle time), so
+a prompt sent from the phone clears nothing, and neither does anything nobody typed (a task's
+notice, another session's message, a line flowkit types, a session's launch brief). The first 30
+minutes belong to the goodnight prompts. Every session hears `Away flag cleared by a prompt typed
+at the computer`. The awake flag is left as it is. `handoff.py conf idle_release on` refuses where
+no `ioreg` answers (anything but macOS); a key set by hand there does nothing.
+
+### The flag files and `flowkit-away`: the seam
+
+Two files are the whole interface, for a shell function, a launcher or a hook of your own:
+
+| File | Written by | Means | Counts |
+|---|---|---|---|
+| `~/.claude/away` | `handoff.py away` (the stamp it takes effect, `by:`, `set:`) | you are away: no questions, "(auto)" | from its stamp, for 12 hours after the stamp or the file's last write, whichever is later |
+| `~/.claude/awake` | `handoff.py awake` (the time, `by:`) | out but reachable: the computer stays up, questions are asked | for 12 hours from the file's last write |
+
+Both sit under `$CLAUDE_CONFIG_DIR` when that is set. Reading them is always safe: a file that is
+there and young enough is the flag. Writing them is better left to the commands, which also tell
+the sessions: `/handoff:setup-tmux` copies `flowkit-away` to `~/.local/bin` beside `flowkit-tmux`,
+kept at the plugin's version at every session start, so a shell function of your own calls
+
+```text
+flowkit-away away [--by <name>]     handoff.py away: the flag, the last call, the nudge at its minute
+flowkit-away awake [--by <name>]    handoff.py awake
+flowkit-away back [--by <name>]     handoff.py back: both flags cleared, who waits on you
+flowkit-away nudge [--dry-run] [--only <name>]...
+flowkit-away waiting
+```
+
+`--by` is the name the sessions hear (`shell` without it); the copy finds the newest installed
+`handoff` by itself, so nothing of yours names a version or a path into the plugin cache. A flag
+written raw still works (`date '+%Y-%m-%d %H:%M' > ~/.claude/away`: in effect at once, set by
+`unknown`, no last call and no nudge; the same line into `~/.claude/awake` for the other), and
+removing a file clears its flag. `handoff.conf` holds no command to run at `away` or `back`: what
+your own setup adds to them (a power setting, a hold of your own) goes in the shell function that
+calls `flowkit-away`. The flag is the record and the nudge a courtesy: a session the nudge could
+not reach still reads the flag at its next question.
 
 `/handoff:away` (and so `/handoff:close overnight`) also prints how much of your plan is left, so
 you see before you leave whether the night fits:
@@ -276,8 +324,7 @@ the session sits there until something prompts it. A hook on it (`handoff.py api
   `~/.claude/flowkit/retries.log` outside a story
 
 Off until you turn it on (`autoretry=on`, which `/handoff:setup` offers), and only while you are
-away (or `~/.claude/awake` is younger than 12 hours, for a setup of your own that marks you out but
-reachable): a `server_error` or `overloaded` stop gets one detached waiter per session, which keeps
+away or awake (`/handoff:awake`: out but reachable): a `server_error` or `overloaded` stop gets one detached waiter per session, which keeps
 the computer awake while it waits 2, 5, 10, 20 and 30 minutes, then every 30, for up to 12 hours
 from the first error. Then it types `Your last turn ended on an API error (<error>) at <time>. Carry
 on from where you were.` into the session's pane, in one tmux call, but only when the session is
@@ -486,7 +533,9 @@ both push.
 ## Keeping the computer awake
 
 The plugin's hooks hold a `caffeinate -i` while a turn runs, and between turns while Remote Control
-is attached or you are away, so a chain of sessions keeps going overnight. Each hold is bound to its
+is attached or you are away or awake (`/handoff:awake`, new in 0.12.0), so a chain of sessions
+keeps going overnight. A flag counts from a session's next turn end: one that was already idle
+when you set it holds nothing. Each hold is bound to its
 Claude process and ends with it. The display still sleeps, and **a closed laptop lid still sleeps
 the computer and pauses the chain**: leave the lid open and the power connected. Where `caffeinate`
 does not exist (anything but macOS) the hooks do nothing.

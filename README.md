@@ -211,7 +211,7 @@ plugins/brain/template/           the vault /brain:init creates
 plugins/session-discipline/       block/conventions.md, the adopt and decision-interview skills, scripts/adopt.py
 plugins/prompt-audit/             the audit skill and its analyst brief, scripts/extract.py and rules.py
 plugins/walkthrough/              the start skill and its question guide, scripts/history.py
-plugins/handoff/                  the close, spawn, away, back, setup and setup-tmux skills, hooks/hooks.json, scripts/, bin/flowkit-spawn and flowkit-tmux, tmux/ (the kit)
+plugins/handoff/                  the close, spawn, away, awake, back, setup and setup-tmux skills, hooks/hooks.json, scripts/, bin/flowkit-spawn and flowkit-tmux, tmux/ (the kit)
 plugins/board/                    the hooks module (hooks/register.tsx draws the Pane, hooks/model.ts reads the stories), types/, tests/
 plugins/ladder/                   the setup and edit skills, hooks/hooks.json (the effort gate), scripts/ladder.py, tests/
 plugins/coordinate/               the start skill and its brief template, scripts/coordinate.py, tests/

@@ -54,7 +54,11 @@ and marks it "(auto)". It also prints how much of your plan's usage is left. The
 awake, but a closed laptop lid still puts it to sleep and pauses the chain. Optional switches in
 `/handoff:setup`: `autoretry=on` carries on after an API error, `limitresume` (on by default)
 continues a session a usage limit stopped once the limit resets, `remind=on` pushes what waits on
-you.
+you, `idle_release=on` (macOS) clears a forgotten away flag at your first prompt back at the
+keyboard.
+
+Going out with the phone instead? `/handoff:awake` keeps the computer up the same way, and the
+sessions keep asking you, over Remote Control.
 
 ## 6. The morning
 

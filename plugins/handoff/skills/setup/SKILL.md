@@ -90,7 +90,7 @@ The `autoretry` key of `handoff.conf` lets a session that an API error stopped c
 itself while the user is away (the plugin README's "API errors" says how). It types into the
 user's sessions, so it is off until the user turns it on.
 
-1. Say in plain words what it does: only while `/handoff:away` (or `~/.claude/awake`) is set,
+1. Say in plain words what it does: only while `/handoff:away` or `/handoff:awake` is set,
    and only on `server_error` and `overloaded`, one waiter per session waits 2, 5, 10, 20 and
    30 minutes, then every 30, for up to 12 hours, and types one line asking the session to carry
    on, never while the session is busy, its pane is in copy mode or holds a draft; a background
@@ -119,6 +119,22 @@ cover sessions with Remote Control on). Nothing to install.
    command below, and stop.
 3. Write the answer: `handoff.py conf limitresume <on|off>`. The next stop reads it, and a waiter
    already waiting reads it before it types; nothing needs a restart.
+
+## Clearing away at the keyboard
+
+The `idle_release` key of `handoff.conf` lets a prompt the user types at the computer clear an
+away flag they forgot (the plugin README's "Back at the keyboard" says how). It ends a state the
+user set, so it is off until they turn it on, and it needs macOS.
+
+1. Say in plain words what it does: once the away flag has been in effect for 30 minutes, the
+   first prompt typed at the computer (a key or the mouse was used in the last two minutes) clears
+   it, and every session hears so; a prompt from the phone, a task's notice or another session's
+   message clears nothing. Without it the flag stays until `/handoff:back` or its 12 hours.
+2. Ask with AskUserQuestion: turn it on (recommended on a Mac they also work at), or leave it
+   off. Without the AskUserQuestion tool, change nothing: print the command below, and stop.
+3. Write the answer: `handoff.py conf idle_release <on|off>`. Where nothing reports the idle time
+   (anything but macOS) `on` is refused: relay why. The next prompt reads it; nothing needs a
+   restart.
 
 ## Reminders
 

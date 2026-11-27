@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Keep the computer awake while a turn runs, and between turns while the session is reachable
-# from a phone (Remote Control) or the user is away. A no-op where `caffeinate` (macOS) is absent.
+# from a phone (Remote Control) or the user is away or awake (out but reachable). A no-op where
+# `caffeinate` (macOS) is absent.
 #
 # Why a second assertion although Claude Code has its own sleep inhibitor: the built-in one is a
 # `caffeinate -i -t 300` child that is killed and respawned every few minutes, kill first. With the
@@ -16,8 +17,8 @@
 #            MAX_MIN, bound to the Claude process with -w so it dies with the session). Older
 #            ones expire on their own, so renewals overlap instead of leaving a gap.
 # idle-hold: end of turn. The turn hold is released; first, when Remote Control is attached or
-#            the away flag is set, an idle hold of IDLE_MIN takes over, so the session stays
-#            answerable and a chain of sessions keeps going between turns.
+#            the away or the awake flag is set, an idle hold of IDLE_MIN takes over, so the
+#            session stays answerable and a chain of sessions keeps going between turns.
 # release:   stop every hold this hook started for this session.
 #
 # -i only: the display still sleeps. A CLOSED LID STILL SLEEPS a laptop, which nothing here can
@@ -28,6 +29,7 @@ RENEW_MIN=5
 IDLE_MIN=120
 AWAY_MIN=720
 AWAY="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/away"
+AWAKE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/awake"
 
 cat >/dev/null   # drain the hook's stdin JSON; everything needed is in the environment
 
@@ -51,11 +53,12 @@ youngest_age() {
   printf '%s' "$best"
 }
 
-# The away flag counts while it is younger than AWAY_MIN; find -mmin works on macOS and Linux.
-# From the moment it is written, not from its first line's stamp (handoff.py `away` sets it five
-# minutes ahead): the process that nudges the sessions at that stamp needs the computer up.
-away() {
-  [ -f "$AWAY" ] && [ -n "$(find "$AWAY" -mmin -"$AWAY_MIN" 2>/dev/null)" ]
+# The away flag and the awake flag each count while younger than AWAY_MIN; find -mmin works on
+# macOS and Linux. From the moment it is written, not from its first line's stamp (handoff.py
+# `away` sets it five minutes ahead): the process that nudges the sessions at that stamp needs the
+# computer up.
+out() {
+  [ -n "$(find "$AWAY" "$AWAKE" -mmin -"$AWAY_MIN" 2>/dev/null)" ]
 }
 
 case "$1" in
@@ -68,7 +71,7 @@ case "$1" in
   idle-hold)
     # CLAUDE_CODE_BRIDGE_SESSION_ID is set while Remote Control is attached. Start the
     # replacement BEFORE releasing the turn hold, or this reopens the gap described above.
-    if [ -n "$CLAUDE_CODE_BRIDGE_SESSION_ID" ] || away; then
+    if [ -n "$CLAUDE_CODE_BRIDGE_SESSION_ID" ] || out; then
       pkill -f -x "$idle_tag" 2>/dev/null || true   # restart the window on each turn
       nohup $idle_tag </dev/null >/dev/null 2>&1 &
       disown

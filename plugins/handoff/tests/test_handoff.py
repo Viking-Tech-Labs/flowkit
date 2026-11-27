@@ -968,6 +968,134 @@ class Handoff(unittest.TestCase):
                          [f"no last call {n}: tmux or ps did not answer (FileNotFoundError)" for n in ("demo-coord", "coord-b")])
         self.assertEqual(out.stderr, "")
 
+    def test_awake_sets_its_flag_clears_away_and_back_clears_both(self):
+        awake, cleared = self.tmp / "claude" / "awake", self.tmp / "claude" / "flowkit" / "away-cleared"
+        out = self.handoff("awake", "--by", "demo s1").stdout.splitlines()
+        stamp = awake.read_text().splitlines()[0]
+        self.assertEqual(awake.read_text(), f"{stamp}\nby: demo-s1\n")
+        self.assertEqual(out, [f"awake: since {stamp} (set by demo-s1; the computer stays up between turns, questions "
+                               "still reach you; clears with back or after 12 hours)"])
+        self.assertIsNone(self.gate(), "out but reachable: a question still goes to the user")
+        self.assertEqual(self.handoff("away-status").stdout, "away: off\n")
+        self.set_flag(time.time() - 60, by="coord-a")
+        self.assertEqual(self.handoff("awake", "--by", "demo-s1").stdout.splitlines()[1:], ["away: off"])
+        self.assertFalse(self.flag.exists(), "one or the other: awake clears away")
+        self.assertEqual(json.loads(cleared.read_text())["by"], "demo-s1")
+        self.set_flag(time.time() - 60, by="coord-a")
+        self.assertEqual(self.handoff("back", "--by", "demo-s1").stdout.splitlines(),
+                         ["away: off", "awake: off", "nobody waits on you"])
+        self.assertFalse(self.flag.exists() or awake.exists())
+        self.assertEqual(self.handoff("back").stdout.splitlines(), ["away: off", "nobody waits on you"])
+
+    def test_a_shell_sets_and_clears_both_flags_through_flowkit_away(self):
+        self.usage_answer()
+        awake = self.tmp / "claude" / "awake"
+        self.assertEqual(self.away("awake").returncode, 0)
+        self.assertEqual(awake.read_text().splitlines()[1], "by: shell")
+        self.assertTrue(self.away("away", "--by", "zsh").stdout.startswith("away: from "))
+        self.assertEqual(self.flag.read_text().splitlines()[1], "by: zsh")
+        self.assertEqual(self.away("back").stdout.splitlines(), ["away: off", "awake: off", "nobody waits on you"])
+        self.assertEqual(self.away("awake", "--by").returncode, 2, "a flag without its name is the usage")
+        # the kit's copy in ~/.local/bin has no plugin beside it: the newest installed handoff is used
+        copy = self.tmp / "local" / "flowkit-away"
+        copy.parent.mkdir()
+        shutil.copy(AWAY_BIN, copy)
+        run = lambda *args: subprocess.run(["python3", str(copy), *args], capture_output=True, text=True, env=self.env)
+        none = run("awake")
+        self.assertEqual(none.returncode, 3)
+        self.assertIn("flowkit-away awake: the handoff plugin is not installed", none.stderr)
+        self.assertFalse(awake.exists())
+        old = self.tmp / "old"
+        (old / ".claude-plugin").mkdir(parents=True)
+        (old / ".claude-plugin" / "plugin.json").write_text('{"version": "0.9.0"}')
+        (old / "scripts").mkdir()
+        (old / "scripts" / "handoff.py").write_text("raise SystemExit('an older handoff was picked')\n")
+        (self.tmp / "claude" / "plugins").mkdir()
+        (self.tmp / "claude" / "plugins" / "installed_plugins.json").write_text(json.dumps(
+            {"plugins": {"handoff@flowkit": [{"installPath": str(PLUGIN)}, {"installPath": str(old)}]}}))
+        done = run("awake")
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertTrue(awake.is_file())
+
+    def idle_hold(self, **env):
+        """keep-awake.sh at a turn's end, with a stub caffeinate and pkill: whether the idle hold that
+        keeps the computer up between turns was started."""
+        calls, holds = self.tmp / "pkill.calls", self.tmp / "holds"
+        for path in (calls, holds):
+            path.unlink(missing_ok=True)
+        for name, line in (("caffeinate", f'echo "$@" >> {holds}'), ("pkill", f'echo "$@" >> {calls}')):
+            stub = self.tmp / "bin" / name
+            stub.write_text(f"#!/bin/sh\n{line}\n")
+            stub.chmod(0o755)
+        base = {k: v for k, v in self.env.items() if k != "CLAUDE_CODE_BRIDGE_SESSION_ID"}
+        subprocess.run([str(PLUGIN / "scripts" / "keep-awake.sh"), "idle-hold"], input="{}", text=True, check=True,
+                       capture_output=True, env={**base, "CLAUDE_PID": "999999", **env})
+        idle, turn = "-f -x caffeinate -i -t 7200 -w 999999\n", "-f -x caffeinate -i -t 900 -w 999999\n"
+        self.assertIn(calls.read_text(), (turn, idle + turn), "the turn hold always goes; the idle hold restarts")
+        started = calls.read_text() == idle + turn
+        deadline = time.time() + 5
+        while started and not holds.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(holds.read_text() if holds.exists() else "", "-i -t 7200 -w 999999\n" if started else "")
+        return started
+
+    def test_the_idle_hold_follows_remote_control_the_away_and_the_awake_flag(self):
+        awake = self.tmp / "claude" / "awake"
+        self.assertFalse(self.idle_hold(), "at the computer, no Remote Control: nothing is held between turns")
+        self.assertTrue(self.idle_hold(CLAUDE_CODE_BRIDGE_SESSION_ID="b1"))
+        awake.write_text("2026-11-27 16:00\nby: shell\n")
+        self.assertTrue(self.idle_hold(), "out but reachable")
+        old = time.time() - 13 * 3600
+        os.utime(awake, (old, old))
+        self.assertFalse(self.idle_hold(), "twelve hours after its write the awake flag no longer counts")
+        self.set_flag(time.time() + 240, by="coord-a")
+        self.assertTrue(self.idle_hold(), "away counts from its write, the minutes before it takes effect included")
+
+    def test_idle_release_clears_a_flag_in_effect_at_a_prompt_typed_at_the_computer(self):
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp)
+        typed = lambda prompt="carry on with the second one": self.context(10, prompt)
+        self.idle(5)
+        typed("Repo: /Users/me/repo   Session: demo-s1\n\nToday: …")
+        stamp = self.set_flag(time.time() - 31 * 60, by="coord-a")
+        typed()
+        self.assertTrue(self.flag.exists(), "off until idle_release=on")
+        self.assertEqual(self.handoff("conf", "idle_release", "on").returncode, 0)
+        self.idle(120)
+        typed()
+        self.assertTrue(self.flag.exists(), "nobody touched the keyboard: the prompt came from a phone")
+        self.idle(None)
+        typed()
+        self.assertTrue(self.flag.exists(), "no reading (not a Mac): nothing is cleared")
+        self.idle(5)
+        typed("<task-notification>\n<task-id>b1</task-id>")
+        self.context(10)
+        self.assertTrue(self.flag.exists(), "a task's notice and a batch of tool calls are not the user typing")
+        self.set_flag(time.time() - 29 * 60, by="coord-a")
+        typed()
+        self.assertTrue(self.flag.exists(), "the first half hour of a flag: the goodnight prompts")
+        self.assertEqual(self.set_flag(time.time() - 31 * 60, by="coord-a"), stamp)
+        os.utime(self.flag)  # an unattended close re-stamped it since: the half hour still counts from its effect
+        self.assertIn(f"in effect since {stamp}", self.context(10))
+        heard = typed()
+        self.assertFalse(self.flag.exists())
+        self.assertRegex(heard, r"^Away flag cleared by a prompt typed at the computer at \d{4}-\d\d-\d\d \d\d:\d\d: "
+                                r"the user is back, questions go to them again\.$")
+        self.assertIsNone(self.gate("s2"), "for every session")
+
+    def test_idle_release_is_refused_where_nothing_reports_the_idle_time(self):
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp)
+        conf = self.tmp / "flowkit" / "handoff.conf"
+        set_to = lambda value: subprocess.run([sys.executable, str(HANDOFF), "conf", "idle_release", value],
+                                              capture_output=True, text=True, env={**self.env, "PATH": str(self.tmp / "bin")})
+        refused = set_to("on")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("idle_release=on needs macOS", refused.stderr)
+        self.assertFalse(conf.exists())
+        self.assertEqual(set_to("off").returncode, 0)
+        self.idle(5)
+        self.assertEqual(set_to("on").returncode, 0)
+        self.assertEqual(conf.read_text(), "idle_release=on\n")
+
     def test_the_gate_lets_a_session_ask_within_five_minutes_of_a_prompt_the_user_typed(self):
         self.set_flag(time.time() - 60, by="coord-a")
         mark = self.tmp / "flowkit-context-s1.json"

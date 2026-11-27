@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""flowkit-away: reach the Claude Code sessions already running when the user goes away.
+"""flowkit-away: the away and the awake flag from a shell, and the Claude Code sessions already
+running when the user goes away.
 
+  flowkit-away away|awake|back [--by <name>]         set the away flag, set the awake flag, clear
+                                                     both: the handoff plugin's `handoff.py away`,
+                                                     `awake` and `back`, by `shell` unless named
   flowkit-away nudge [--dry-run] [--only <name>]...  every session parked on a question gets the
                                                      away line; the others waiting are listed
   flowkit-away waiting                               one line per session waiting on the user
@@ -16,7 +20,7 @@ session running this is busy, so it is never nudged.
 The plugin runs its own copy (`handoff.py away-nudge`, which `handoff.py away` starts for the
 minute its flag takes effect); `/handoff:setup-tmux` copies this file to
 ~/.local/bin, kept at the plugin's version at every session start, so a shell function of your
-own can call `flowkit-away nudge` too.
+own can call `flowkit-away away`, `awake`, `back` and `nudge` too.
 """
 import json
 import os
@@ -230,8 +234,46 @@ def waiting():
     return 0
 
 
+def handoff_py():
+    """The handoff plugin's handoff.py: the one beside this file (the repo, the plugin cache), else
+    the newest handoff in installed_plugins.json, since the copy in ~/.local/bin has nothing beside
+    it. None without the plugin."""
+    def version(root):
+        try:
+            return tuple(int(n) for n in json.loads((root / ".claude-plugin" / "plugin.json").read_text())["version"].split("."))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+    own = Path(__file__).resolve().parent.parent
+    if (own / ".claude-plugin" / "plugin.json").is_file():
+        return own / "scripts" / "handoff.py"
+    try:
+        entries = json.loads((CLAUDE / "plugins" / "installed_plugins.json").read_text())["plugins"]["handoff@flowkit"]
+        roots = [Path(e["installPath"]) for e in entries]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    found = [(v, root) for root in roots if (root / "scripts" / "handoff.py").is_file() and (v := version(root))]
+    return max(found)[1] / "scripts" / "handoff.py" if found else None
+
+
+def flag(cmd, by):
+    """`away`, `awake` and `back` are the plugin's own, so a flag set from a shell is the one a
+    skill sets: the last call, the nudge at its minute, who set and who cleared it."""
+    script = handoff_py()
+    if script is None:
+        print(f"flowkit-away {cmd}: the handoff plugin is not installed (claude plugin install handoff@flowkit)",
+              file=sys.stderr)
+        return 3
+    try:
+        return subprocess.run([sys.executable, str(script), cmd, "--by", by]).returncode
+    except OSError as e:
+        print(f"flowkit-away {cmd}: {e}", file=sys.stderr)
+        return 3
+
+
 def main(argv):
     cmd, args = (argv[0], argv[1:]) if argv else ("", [])
+    if cmd in ("away", "awake", "back") and (not args or (len(args) == 2 and args[0] == "--by")):
+        return flag(cmd, args[1] if args else "shell")
     if cmd == "nudge":
         dry, only = False, []
         while args:
