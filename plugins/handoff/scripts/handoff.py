@@ -62,15 +62,22 @@ saved prompts and story files. The skills call this with plain arguments; nothin
   handoff.py usage [--json]                      the plan's usage left (bin/flowkit-usage)
   handoff.py statusline diff|install <root>      the status line that records context and cost
   handoff.py tmux diff|install <root>            the tmux kit and the line that sources it
-  handoff.py refresh <root>                      update an installed status line and tmux kit, prune the
-                                                 prompt copies and the sessions' hook state older than 30
-                                                 days (SessionStart)
+  handoff.py timer diff|install <root>           the timer that runs the tick every 15 seconds, with tmux
+                                                 attached or not (bin/flowkit-tick): a LaunchAgent, so
+                                                 macOS only; elsewhere the tmux status bar runs the tick
+  handoff.py setup remove [--dry-run]            take away what the setups put on this computer outside the
+                                                 plugin: the timer, the commands in ~/.local/bin, the tmux
+                                                 kit and its line; the settings files stay
+  handoff.py refresh <root>                      update an installed status line, tmux kit and the commands
+                                                 the timer runs, prune the prompt copies and the sessions'
+                                                 hook state older than 30 days (SessionStart)
 """
 import contextlib
 import difflib
 import fcntl
 import json
 import os
+import plistlib
 import re
 import shlex
 import shutil
@@ -102,17 +109,25 @@ LADDER = CONFIG / "ladder.md"
 SETTINGS_FILE = CONFIG / "handoff.conf"
 STATUSLINE = CONFIG / "statusline.py"
 SETTINGS = CLAUDE / "settings.json"
-KIT = {  # the tmux kit: where each file of the plugin is copied, so a tmux.conf never points at a version
-    "tmux/tmux.conf": CONFIG / "tmux.conf",
-    "tmux/cheatsheet.md": CONFIG / "tmux-cheatsheet.md",
+SHIMS = {  # the commands a tmux.conf and the timer call: copies with no version in their path, the tick first
     "bin/flowkit-tick": HOME / ".local" / "bin" / "flowkit-tick",
     "bin/flowkit-tmux": HOME / ".local" / "bin" / "flowkit-tmux",
     "bin/flowkit-away": HOME / ".local" / "bin" / "flowkit-away",
     "bin/flowkit-usage": HOME / ".local" / "bin" / "flowkit-usage",
+}
+KIT = {  # the tmux kit: where each file of the plugin is copied, so a tmux.conf never points at a version
+    **SHIMS,
     "tmux/capacity-shim.py": HOME / ".local" / "scripts" / "capacity.py",  # where a 0.8.0 tick looks
+    "tmux/tmux.conf": CONFIG / "tmux.conf",
+    "tmux/cheatsheet.md": CONFIG / "tmux-cheatsheet.md",
 }
 KIT_CONF = KIT["tmux/tmux.conf"]
 KIT_STAMP = CONFIG / "kit-version"  # the plugin version the kit was copied from; refresh never goes back
+KIT_NOTE = "# flowkit tmux kit (handoff plugin); your own settings go below this line"
+TIMER = "flowkit.tick"  # the timer's launchd label
+TIMER_PLIST = HOME / "Library" / "LaunchAgents" / f"{TIMER}.plist"
+TIMER_EVERY = 15  # seconds between two passes of the tick
+TIMER_ENV = ("CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "LANG")  # carried into the timer when the setup's shell has them
 AWAY_BIN = Path(__file__).resolve().parent.parent / "bin" / "flowkit-away"
 USAGE_BIN = Path(__file__).resolve().parent.parent / "bin" / "flowkit-usage"
 STATS = CLAUDE / "session-stats"
@@ -2175,8 +2190,8 @@ def plugin_version(root):
         return None
 
 
-def copy_kit(root):
-    for rel, dest in KIT.items():
+def copy_kit(root, files=KIT):
+    for rel, dest in files.items():
         source = Path(root) / rel
         if not dest.is_file() or dest.read_bytes() != source.read_bytes():
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -2185,6 +2200,7 @@ def copy_kit(root):
             dest.chmod(0o755)
     version = plugin_version(root)
     if version:
+        KIT_STAMP.parent.mkdir(parents=True, exist_ok=True)
         KIT_STAMP.write_text(version + "\n")
 
 
@@ -2196,8 +2212,7 @@ def tmux_kit(action, root):
     if sourced and KIT_CONF.is_file():
         print(f"tmux-kit: installed ({conf} sources {KIT_CONF})")
         return
-    new = text if sourced else text + ("\n" if text and not text.endswith("\n") else "") + \
-        f"\n# flowkit tmux kit (handoff plugin); your own settings go below this line\n{line}\n"
+    new = text if sourced else text + ("\n" if text and not text.endswith("\n") else "") + f"\n{KIT_NOTE}\n{line}\n"
     if action == "diff":
         print("tmux-kit: not installed; install copies " + ", ".join(home_short(d) for d in KIT.values()))
         if sourced:
@@ -2219,6 +2234,120 @@ def tmux_kit(action, root):
         conf.write_text(new)
         print(f"added to {conf}: {line}")
     print(f"tmux-kit: installed; a running tmux picks it up with: tmux source-file {home_short(conf)}")
+
+
+def launchctl(*args):
+    """launchctl's exit code and what it said; (None, "") where there is none (anything but macOS).
+    FLOWKIT_LAUNCHCTL names another program: the tests' recorder."""
+    try:
+        out = subprocess.run([os.environ.get("FLOWKIT_LAUNCHCTL") or "launchctl", *args], capture_output=True, text=True)
+    except OSError:
+        return None, ""
+    return out.returncode, (out.stderr or out.stdout).strip()
+
+
+def timer_plist():
+    """The LaunchAgent, as bytes. launchd starts a job with almost no environment, so the PATH the
+    setup ran with is written in (without folders that are gone, and without the plugin cache's:
+    those carry a version and the tick finds the plugin itself), and CLAUDE_CONFIG_DIR,
+    XDG_CONFIG_HOME and LANG where the setup's shell has them: the timer ticks the config folders
+    the setup ran in. A variable the shell does not set is left out, never spelled out: Claude Code
+    keeps another account file once CLAUDE_CONFIG_DIR is set."""
+    folders = []
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        if folder and folder not in folders and Path(folder).is_dir() and CLAUDE / "plugins" not in Path(folder).parents:
+            folders.append(folder)
+    env = {"PATH": os.pathsep.join(folders), **{k: os.environ[k] for k in TIMER_ENV if os.environ.get(k)}}
+    return plistlib.dumps({
+        "Label": TIMER, "ProgramArguments": [str(SHIMS["bin/flowkit-tick"]), "--timer"], "StartInterval": TIMER_EVERY,
+        "RunAtLoad": True, "ProcessType": "Background", "EnvironmentVariables": env,
+        "StandardOutPath": "/dev/null", "StandardErrorPath": "/dev/null"})
+
+
+def timer(action, root):
+    """Show, or install, the timer: the commands copied to ~/.local/bin (the tmux kit or not) and a
+    LaunchAgent that runs `flowkit-tick --timer` every TIMER_EVERY seconds, loaded at once and at
+    every login."""
+    if not shutil.which(os.environ.get("FLOWKIT_LAUNCHCTL") or "launchctl"):
+        print("timer: not on this system (launchd is macOS's): the tmux kit's status bar runs the tick, while a "
+              "tmux client is attached")
+        return
+    new = timer_plist()
+    old = TIMER_PLIST.read_bytes() if TIMER_PLIST.is_file() else b""
+    domain = f"gui/{os.getuid()}"
+    whole = old == new and all(dest.is_file() for dest in SHIMS.values())
+    if whole and launchctl("print", f"{domain}/{TIMER}")[0] == 0:
+        print(f"timer: installed ({TIMER_PLIST} runs {home_short(SHIMS['bin/flowkit-tick'])} every {TIMER_EVERY} seconds)")
+        return
+    if action == "diff":
+        print(f"timer: {'written, not loaded' if whole else 'installed with other values' if old else 'not installed'}"
+              "; install copies " + ", ".join(home_short(d) for d in SHIMS.values())
+              + f" and {'changes' if old else 'writes'} {TIMER_PLIST}, which runs flowkit-tick every {TIMER_EVERY} "
+              f"seconds for {CLAUDE} with the settings in {CONFIG}:")
+        sys.stdout.writelines(difflib.unified_diff(
+            old.decode(errors="replace").splitlines(True), new.decode().splitlines(True),
+            str(TIMER_PLIST), f"{TIMER_PLIST} (after)"))
+        return
+    copy_kit(root, SHIMS)
+    for dest in SHIMS.values():
+        print(f"copied: {dest}")
+    TIMER_PLIST.parent.mkdir(parents=True, exist_ok=True)
+    TIMER_PLIST.write_bytes(new)
+    print(f"written: {TIMER_PLIST}")
+    launchctl("bootout", f"{domain}/{TIMER}")  # an older one, so the new values count; none is no error
+    code, said = launchctl("bootstrap", domain, str(TIMER_PLIST))
+    if code:
+        fail(f"timer: launchctl could not load it ({said or code}); by hand: launchctl bootstrap {domain} {TIMER_PLIST}")
+    print(f"timer: installed; flowkit-tick runs every {TIMER_EVERY} seconds, with tmux attached or not "
+          f"(`{home_short(SHIMS['bin/flowkit-tick'])} status` says when it last ran)")
+
+
+def setup_remove(dry):
+    """Take away what the setups put on this computer outside the plugin: the timer, the commands in
+    ~/.local/bin, the tmux kit's files and the line that sources them (a backup beside it). What the
+    user set stays: handoff.conf, capacity.conf, a ladder, the status line."""
+    did = "would remove" if dry else "removed"
+    gone = 0
+    if TIMER_PLIST.is_file():
+        if not dry:
+            launchctl("bootout", f"gui/{os.getuid()}/{TIMER}")
+            TIMER_PLIST.unlink()
+        print(f"{did}: {TIMER_PLIST} (the timer, unloaded)")
+        gone += 1
+    files = list(KIT.values()) + [KIT_STAMP]
+    resolver = KIT["tmux/capacity-shim.py"]
+    try:
+        if "handoff@flowkit" not in resolver.read_text(errors="replace"):
+            files.remove(resolver)  # a capacity.py of the user's own
+    except OSError:
+        pass
+    for path in files:
+        if path.is_file():
+            if not dry:
+                path.unlink()
+            print(f"{did}: {path}")
+            gone += 1
+    conf = user_tmux_conf()
+    text = conf.read_text() if conf.is_file() else ""
+    new = re.sub(r"(?:^\n)?(?:^%s\n)?^source-file (?:%s|%s)[ \t]*\n?" % tuple(
+        re.escape(s) for s in (KIT_NOTE, home_short(KIT_CONF), str(KIT_CONF))), "", text, flags=re.M)
+    if new != text:
+        if not dry:
+            backup = conf.with_name(conf.name + ".flowkit-bak")
+            backup.write_text(text)
+            print(f"backup: {backup}")
+            conf.write_text(new)
+        print(f"{did}: the line in {conf} that sources the kit (a running tmux keeps the kit until it restarts)")
+        gone += 1
+    if str(KIT_CONF) in new or home_short(KIT_CONF) in new:
+        print(f"left: {conf} still names {home_short(KIT_CONF)}; take that line out yourself")
+    if not gone:
+        print("setup: nothing to remove")
+    stay = [str(p) for p in (SETTINGS_FILE, CONFIG / "capacity.conf", LADDER) if p.is_file()]
+    if stay:
+        print("kept, yours: " + ", ".join(stay))
+    if str(STATUSLINE) in settings_text():
+        print(f"kept: the status line ({STATUSLINE}); to undo it, take `statusLine` out of {SETTINGS}")
 
 
 def prune_marks():
@@ -2250,9 +2379,10 @@ def prune_spawned():
 
 
 def refresh(root):
-    """Keep an installed status line and tmux kit at the plugin's version, and prune the old prompt
-    copies and hook state. The kit only goes forward: a session on an older plugin leaves a newer
-    kit alone. Its output reaches context, so it says nothing unless something went."""
+    """Keep an installed status line, tmux kit and the commands the timer runs at the plugin's
+    version, and prune the old prompt copies and hook state. The copies only go forward: a session
+    on an older plugin leaves newer ones alone. Its output reaches context, so it says nothing
+    unless something went."""
     prune_spawned()
     prune_marks()
     source = Path(root) / "scripts" / "statusline.py"
@@ -2264,8 +2394,11 @@ def refresh(root):
     try:
         installed = kit_version(KIT_STAMP.read_text()) if KIT_STAMP.is_file() else None
         own = kit_version(plugin_version(root))
-        if KIT_CONF.is_file() and not (installed and own and installed > own):
-            copy_kit(root)
+        if not (installed and own and installed > own):
+            if KIT_CONF.is_file():
+                copy_kit(root)
+            elif TIMER_PLIST.is_file():
+                copy_kit(root, SHIMS)
     except OSError:
         pass
 
@@ -2333,6 +2466,10 @@ def main(argv):
         statusline(*args)
     elif cmd == "tmux" and len(args) == 2 and args[0] in ("diff", "install"):
         tmux_kit(*args)
+    elif cmd == "timer" and len(args) == 2 and args[0] in ("diff", "install"):
+        timer(*args)
+    elif cmd == "setup" and args in (["remove"], ["remove", "--dry-run"]):
+        setup_remove(len(args) == 2)
     elif cmd == "refresh" and len(args) == 1:
         sys.stdin.read()
         refresh(*args)

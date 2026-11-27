@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import plistlib
 import re
 import signal
 import shutil
@@ -739,6 +740,156 @@ class Handoff(unittest.TestCase):
         shim = tick.parent.parent / "scripts" / "capacity.py"
         out = subprocess.run([sys.executable, str(shim), "drain"], capture_output=True, text=True, env=self.env)
         self.assertEqual((out.returncode, out.stdout), (0, f"{newest / 'scripts' / 'capacity.py'} drain\n"), out.stderr)
+
+    def sandbox_home(self):
+        """A HOME and config dir of the test's own, and a `launchctl` that records its calls and
+        keeps one fact: whether the timer is loaded."""
+        home, conf = self.tmp / "home", self.tmp / "xdg" / "flowkit"
+        home.mkdir()
+        conf.mkdir(parents=True)
+        fake = self.tmp / "bin" / "launchctl"
+        loaded = self.tmp / "loaded"
+        fake.write_text(f"""#!/bin/sh
+echo "$@" >> {self.tmp / 'launchctl.calls'}
+case "$1" in
+  bootstrap) [ ! -e {self.tmp / 'refuse'} ] || {{ echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; }}; touch {loaded};;
+  bootout) [ -e {loaded} ] || exit 3; rm {loaded};;
+  print) [ -e {loaded} ] || exit 113;;
+esac
+""")
+        fake.chmod(0o755)
+        self.env.update(HOME=str(home), XDG_CONFIG_HOME=str(conf.parent), FLOWKIT_LAUNCHCTL=str(fake), LANG="en_US.UTF-8")
+        return home, conf
+
+    def launchctl_calls(self):
+        calls = self.tmp / "launchctl.calls"
+        said = calls.read_text().splitlines() if calls.exists() else []
+        calls.unlink(missing_ok=True)
+        return said
+
+    def test_the_timer_is_a_launch_agent_that_carries_the_path_and_both_config_folders(self):
+        home, conf = self.sandbox_home()
+        plist = home / "Library" / "LaunchAgents" / "flowkit.tick.plist"
+        cache = self.tmp / "claude" / "plugins" / "cache" / "flowkit" / "handoff" / "0.13.0" / "bin"
+        cache.mkdir(parents=True)
+        python = os.path.dirname(shutil.which("python3"))  # wherever this system keeps it: handoff.py runs from this PATH
+        kept = lambda *more: os.pathsep.join(dict.fromkeys([str(self.tmp / "bin"), python, "/usr/bin", "/bin", *more]))
+        self.env["PATH"] = os.pathsep.join([str(cache), str(self.tmp / "bin"), str(self.tmp / "gone"), python, "/usr/bin",
+                                            "/bin", str(self.tmp / "bin")])
+        out = self.handoff("timer", "diff", str(PLUGIN))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertTrue(out.stdout.startswith("timer: not installed; install copies ~/.local/bin/flowkit-tick, "), out.stdout)
+        self.assertIn(f"for {self.tmp / 'claude'} with the settings in {conf}:", out.stdout)
+        self.assertIn("+\t<string>flowkit.tick</string>", out.stdout)
+        self.assertFalse(plist.exists() or (home / ".local").exists(), "a diff writes nothing")
+        self.assertEqual(self.launchctl_calls(), [], "and loads nothing")
+        out = self.handoff("timer", "install", str(PLUGIN))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        job = plistlib.loads(plist.read_bytes())
+        self.assertEqual(job, {
+            "Label": "flowkit.tick", "ProgramArguments": [str(home / ".local" / "bin" / "flowkit-tick"), "--timer"],
+            "StartInterval": 15, "RunAtLoad": True, "ProcessType": "Background",
+            "StandardOutPath": "/dev/null", "StandardErrorPath": "/dev/null",
+            "EnvironmentVariables": {
+                "PATH": kept(),  # no folder that is gone, none of the plugin cache, none twice
+                "CLAUDE_CONFIG_DIR": str(self.tmp / "claude"), "XDG_CONFIG_HOME": str(conf.parent), "LANG": "en_US.UTF-8"}})
+        domain = f"gui/{os.getuid()}"
+        self.assertEqual(self.launchctl_calls(), [f"bootout {domain}/flowkit.tick", f"bootstrap {domain} {plist}"])
+        for name in ("flowkit-tick", "flowkit-tmux", "flowkit-away", "flowkit-usage"):
+            copy = home / ".local" / "bin" / name
+            self.assertEqual(copy.read_bytes(), (PLUGIN / "bin" / name).read_bytes())
+            self.assertTrue(os.access(copy, os.X_OK), name)
+        self.assertFalse((conf / "tmux.conf").exists() or (home / ".tmux.conf").exists(), "the timer needs no tmux kit")
+        self.assertIn("timer: installed; flowkit-tick runs every 15 seconds", out.stdout)
+        out = self.handoff("timer", "diff", str(PLUGIN))
+        self.assertEqual(out.stdout, f"timer: installed ({plist} runs ~/.local/bin/flowkit-tick every 15 seconds)\n")
+        (self.tmp / "loaded").unlink()  # booted out by hand
+        self.assertTrue(self.handoff("timer", "diff", str(PLUGIN)).stdout.startswith("timer: written, not loaded; "))
+        self.launchctl_calls()
+        self.env["PATH"] = kept("/usr/sbin")
+        del self.env["CLAUDE_CONFIG_DIR"], self.env["XDG_CONFIG_HOME"]
+        out = self.handoff("timer", "diff", str(PLUGIN))
+        self.assertTrue(out.stdout.startswith("timer: installed with other values; "), out.stdout)
+        self.assertEqual(self.handoff("timer", "install", str(PLUGIN)).returncode, 0)
+        env = plistlib.loads(plist.read_bytes())["EnvironmentVariables"]
+        self.assertEqual(env, {"PATH": kept("/usr/sbin"), "LANG": "en_US.UTF-8"},
+                         "a folder the shell does not name is left to the default, never spelled out")
+
+    def test_the_timer_says_so_when_launchctl_refuses_or_is_not_there(self):
+        home, _ = self.sandbox_home()
+        plist = home / "Library" / "LaunchAgents" / "flowkit.tick.plist"
+        (self.tmp / "refuse").write_text("")
+        out = self.handoff("timer", "install", str(PLUGIN))
+        self.assertEqual(out.returncode, 1)
+        self.assertEqual(out.stderr, "timer: launchctl could not load it (Bootstrap failed: 5: Input/output error); by hand: "
+                                     f"launchctl bootstrap gui/{os.getuid()} {plist}\n")
+        self.env["FLOWKIT_LAUNCHCTL"] = str(self.tmp / "no-launchctl")  # any system but macOS
+        plist.unlink()
+        for action in ("diff", "install"):
+            out = self.handoff("timer", action, str(PLUGIN))
+            self.assertEqual((out.returncode, out.stdout), (0, "timer: not on this system (launchd is macOS's): the tmux "
+                             "kit's status bar runs the tick, while a tmux client is attached\n"))
+        self.assertFalse(plist.exists())
+
+    def test_refresh_moves_the_timer_s_commands_forward_without_the_tmux_kit(self):
+        home, conf = self.sandbox_home()
+        tick = home / ".local" / "bin" / "flowkit-tick"
+        self.assertEqual(self.handoff("refresh", self.plugin_root("0.14.0")).returncode, 0)
+        self.assertFalse(tick.exists(), "no timer, no kit: nothing is copied")
+        self.assertEqual(self.handoff("timer", "install", self.plugin_root("0.14.0")).returncode, 0)
+        self.assertEqual((tick.read_text(), (conf / "kit-version").read_text()), ("bin/flowkit-tick 0.14.0\n", "0.14.0\n"))
+        self.handoff("refresh", self.plugin_root("0.14.1"))
+        self.assertEqual((tick.read_text(), (conf / "kit-version").read_text()), ("bin/flowkit-tick 0.14.1\n", "0.14.1\n"))
+        self.handoff("refresh", self.plugin_root("0.14.0"))
+        self.assertEqual(tick.read_text(), "bin/flowkit-tick 0.14.1\n", "a session on an older plugin leaves it alone")
+        self.assertFalse((conf / "tmux.conf").exists() or (home / ".local" / "scripts").exists(), "the kit stays out")
+
+    def test_setup_remove_takes_the_timer_the_commands_and_the_kit_away(self):
+        home, conf = self.sandbox_home()
+        plist = home / "Library" / "LaunchAgents" / "flowkit.tick.plist"
+        mine = "set -g mouse on\nbind r source-file ~/.tmux.conf\n"
+        (home / ".tmux.conf").write_text(mine)
+        (conf / "handoff.conf").write_text("driver=tmux\n")
+        self.assertEqual(self.handoff("setup", "remove").stdout, f"setup: nothing to remove\nkept, yours: {conf / 'handoff.conf'}\n")
+        self.assertEqual(self.handoff("tmux", "install", str(PLUGIN)).returncode, 0)
+        self.assertEqual(self.handoff("timer", "install", str(PLUGIN)).returncode, 0)
+        self.assertEqual((home / ".tmux.conf").read_text(), mine + "\n# flowkit tmux kit (handoff plugin); your own settings "
+                         "go below this line\nsource-file ~/.config/flowkit/tmux.conf\n".replace(
+                             "~/.config/flowkit", str(conf)), "the config folder is not under this HOME: its full path")
+        self.launchctl_calls()
+        before = sorted(str(p) for p in self.tmp.rglob("*") if p.is_file())
+        dry = self.handoff("setup", "remove", "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertEqual(sorted(str(p) for p in self.tmp.rglob("*") if p.is_file()), before, "a dry run removes nothing")
+        self.assertEqual(self.launchctl_calls(), [])
+        out = self.handoff("setup", "remove")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.replace("removed: ", "would remove: ").replace(f"backup: {home / '.tmux.conf.flowkit-bak'}\n", ""),
+                         dry.stdout, "the dry run named what went")
+        gone = [plist, conf / "tmux.conf", conf / "tmux-cheatsheet.md", conf / "kit-version", home / ".local" / "scripts" / "capacity.py",
+                *(home / ".local" / "bin" / n for n in ("flowkit-tick", "flowkit-tmux", "flowkit-away", "flowkit-usage"))]
+        self.assertEqual([str(p) for p in gone if p.exists()], [])
+        for path in gone:
+            self.assertIn(f"removed: {path}", out.stdout)
+        self.assertEqual(self.launchctl_calls(), [f"bootout gui/{os.getuid()}/flowkit.tick"])
+        self.assertFalse((self.tmp / "loaded").exists())
+        self.assertEqual((home / ".tmux.conf").read_text(), mine, "the user's tmux.conf is what it was")
+        self.assertEqual((conf / "handoff.conf").read_text(), "driver=tmux\n")
+        self.assertTrue(out.stdout.endswith(f"kept, yours: {conf / 'handoff.conf'}\n"), out.stdout)
+        self.assertEqual(self.handoff("refresh", str(PLUGIN)).returncode, 0)
+        self.assertFalse((home / ".local" / "bin" / "flowkit-tick").exists(), "the next session start copies nothing back")
+
+    def test_setup_remove_leaves_a_capacity_py_and_a_source_line_of_the_user_s_own(self):
+        home, conf = self.sandbox_home()
+        self.assertEqual(self.handoff("tmux", "install", str(PLUGIN)).returncode, 0)
+        own = home / ".local" / "scripts" / "capacity.py"
+        own.write_text("print('mine')\n")
+        (home / ".tmux.conf").write_text(f"source-file -q {conf / 'tmux.conf'}\n")
+        out = self.handoff("setup", "remove")
+        self.assertEqual(own.read_text(), "print('mine')\n")
+        self.assertNotIn(str(own), out.stdout)
+        self.assertEqual((home / ".tmux.conf").read_text(), f"source-file -q {conf / 'tmux.conf'}\n")
+        self.assertIn(f"left: {home / '.tmux.conf'} still names {conf / 'tmux.conf'}; take that line out yourself\n", out.stdout)
 
     def test_record_says_what_the_doorbell_did(self):
         def recorded(name):
