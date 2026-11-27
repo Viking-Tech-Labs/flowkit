@@ -1,0 +1,79 @@
+#!/bin/bash
+# flowkit-driver-screen — the reference launch driver: each session in a GNU screen session of
+# its own. Use it with driver=screen in ~/.config/flowkit/handoff.conf; `screen -ls` lists the
+# sessions, `screen -r <id>` opens one in your terminal, Ctrl-a d leaves it running again.
+#
+# It is also the example to copy for a driver of your own (docs/drivers.md has the contract).
+# flowkit runs a driver as `flowkit-driver-<name> <request> [argument ...]`. It answers on its
+# standard output and exits 0; it exits 2 for a request it has no answer to, and with anything
+# else, the reason on its standard error, when it failed.
+#
+#   open <story> <name> <folder> <command>   a new place, the command started in it; prints its id
+#   list                                     every place, a line each: <id><tab><pid>
+#   type <id> <text>                         the characters, as if typed there
+#   label <id> <word>                        the word beside it, none for an empty one
+#   close <id>                               the place goes, with what runs in it
+#
+# Two requests are left out (exit 2), so flowkit works without them: `screen <id>`, since this
+# screen writes a copy of a window with every character cut to one byte, and flowkit would not
+# find claude's prompt mark in it; and `pick <id>`, since screen has no way to turn a terminal
+# that is attached elsewhere.
+#
+# Written for the screen macOS ships (4.00.03), which tells nobody outside a session what its
+# windows are. So a place is a whole screen session named flowkit.<story>.<name>, its one window
+# running the command, and it goes when the command ends.
+set -u
+request=${1:-}
+[ $# -gt 0 ] && shift
+
+places() {  # <id><tab><pid> of every live session this driver opened; the pid is screen's own
+  screen -ls 2>/dev/null | awk '$1 ~ /^[0-9]+\.flowkit\./ && /\((Attached|Detached)\)/ {
+    dot = index($1, "."); print substr($1, dot + 1) "\t" substr($1, 1, dot - 1) }'
+}
+
+named() {  # screen's full name of a place of ours, <pid>.<id>: it takes a bare name as a prefix of any
+  places | awk -F '\t' -v id="$1" '$1 == id { print $2 "." $1; exit }'
+}
+
+known() {  # sets $at to that name; a request for a place that is not ours is refused
+  at=$(named "$1")
+  [ -n "$at" ] || { echo "no place '$1'" >&2; exit 1; }
+}
+
+case "$request" in
+  open)
+    [ $# -eq 4 ] || { echo "open takes <story> <name> <folder> <command>" >&2; exit 1; }
+    id="flowkit.$1.$2" n=2
+    while places | cut -f1 | grep -qxF -- "$id"; do id="flowkit.$1.$2-$n" n=$((n + 1)); done
+    cd "$3" || exit 1
+    screen -dmS "$id" sh -c "$4" || { echo "screen started no session" >&2; exit 1; }
+    printf '%s\n' "$id"
+    ;;
+  list)
+    places
+    ;;
+  type)
+    [ $# -eq 2 ] || { echo "type takes <id> <text>" >&2; exit 1; }
+    known "$1"
+    text=$2
+    while [ -n "$text" ]; do  # screen drops a string of about 1000 bytes or more without a word
+      screen -S "$at" -p 0 -X stuff "${text:0:200}" >/dev/null || { echo "screen did not take the text" >&2; exit 1; }
+      text=${text:200}
+    done
+    ;;
+  label)
+    [ $# -eq 2 ] || { echo "label takes <id> <word>" >&2; exit 1; }
+    known "$1"
+    name=${1#flowkit.*.}
+    screen -S "$at" -p 0 -X title "$name${2:+ · $2}" >/dev/null || { echo "screen did not take the title" >&2; exit 1; }
+    ;;
+  close)
+    [ $# -eq 1 ] || { echo "close takes <id>" >&2; exit 1; }
+    known "$1"
+    screen -S "$at" -X quit >/dev/null || { echo "screen did not close the session" >&2; exit 1; }
+    ;;
+  *)
+    echo "flowkit-driver-screen: no answer to '$request'" >&2
+    exit 2
+    ;;
+esac
