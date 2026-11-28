@@ -163,10 +163,10 @@ class TmuxBackend(Case):
     def test_a_line_is_one_tmux_call(self):
         self.assertEqual(self.t.type(self.pane, "carry on"), "")
         self.assertEqual(self.t.type("%7", "carry on", self.b.LINE), "", "a bare pane id is a place")
-        line = "tmux send-keys -t %7 -l carry on ; run-shell sleep 0.5 ; send-keys -t %7 Enter"
+        line = "tmux send-keys -t %7 -l -- carry on ; run-shell sleep 0.5 ; send-keys -t %7 Enter"
         self.assertEqual(self.calls(), [line, line])
         self.assertEqual(self.t.type(self.pane, "closed s1", self.b.OVER), "")
-        self.assertEqual(self.calls(), ["tmux send-keys -t %7 C-u ; send-keys -t %7 -l closed s1 ; run-shell sleep 0.5 ; "
+        self.assertEqual(self.calls(), ["tmux send-keys -t %7 C-u ; send-keys -t %7 -l -- closed s1 ; run-shell sleep 0.5 ; "
                                         "send-keys -t %7 Enter"])
         (self.tmp / "refuse").write_text("")
         self.assertEqual([self.t.type(self.pane, "x", how) for how in (self.b.LINE, self.b.OVER)], ["not typed"] * 2)
@@ -185,7 +185,7 @@ class TmuxBackend(Case):
             self.assertEqual(self.calls(), ["tmux capture-pane -p -e -t %7"] * 3, "and nothing is typed")
             self.box("\x1b[39m❯\xa0\x1b[2ma suggestion\x1b[0m")
             self.assertEqual(self.t.type(self.pane, "/remote-control", how), "")
-            self.assertEqual(self.calls(), ["tmux capture-pane -p -e -t %7", "tmux send-keys -t %7 -l /remote-control ; "
+            self.assertEqual(self.calls(), ["tmux capture-pane -p -e -t %7", "tmux send-keys -t %7 -l -- /remote-control ; "
                                             "run-shell sleep 0.5 ; send-keys -t %7 Enter"])
             (self.tmp / "refuse").write_text("")
             self.assertEqual(self.t.type(self.pane, "/remote-control", how), "not typed")
@@ -195,7 +195,7 @@ class TmuxBackend(Case):
     def test_escape_first_ends_the_question_then_types_over_what_is_there(self):
         asked = []
         self.assertEqual(self.t.type(self.pane, "away: carry on", self.b.ESCAPE, settled=lambda: asked.append(1) or True), "")
-        self.assertEqual(self.calls(), ["tmux send-keys -t %7 Escape", "tmux send-keys -t %7 C-u ; send-keys -t %7 -l "
+        self.assertEqual(self.calls(), ["tmux send-keys -t %7 Escape", "tmux send-keys -t %7 C-u ; send-keys -t %7 -l -- "
                                         "away: carry on ; run-shell sleep 0.5 ; send-keys -t %7 Enter"])
         self.assertEqual((asked, self.slept), ([1], [self.b.PAUSE]), "asked once, after the Escape")
         self.assertEqual(self.t.type(self.pane, "away: carry on", self.b.ESCAPE, settled=lambda: False), "not settled")

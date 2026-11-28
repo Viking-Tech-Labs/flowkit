@@ -492,7 +492,7 @@ class Tmux(Backend):
                 return "not settled"
             time.sleep(PAUSE)
         clear = ("send-keys", "-t", pane, "C-u", ";") if how in (OVER, ESCAPE) else ()
-        sent = tmux(*clear, "send-keys", "-t", pane, "-l", text, ";", "run-shell", f"sleep {PAUSE}",
+        sent = tmux(*clear, "send-keys", "-t", pane, "-l", "--", text, ";", "run-shell", f"sleep {PAUSE}",
                     ";", "send-keys", "-t", pane, "Enter")
         return "" if sent.returncode == 0 else "not typed"
 
