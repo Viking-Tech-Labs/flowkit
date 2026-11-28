@@ -4,6 +4,12 @@ Ideas and bugs are welcome as issues (the forms under **New issue**) and as thre
 Discussions. A pull request is welcome too; say in its description what it changes and how you
 checked it.
 
+## How a change lands
+
+Every change goes the same way, a maintainer's too: a branch, a pull request against `main`, the
+`tests` and `gitleaks` checks green on it, the merge, and then the release (below), made on `main`.
+Nothing but a release's version commit is pushed to `main` directly.
+
 ## This repository is public
 
 Nothing that names a real workplace goes into a tracked file, a commit message, a tag, an issue or
@@ -72,7 +78,7 @@ scripts/release.py <plugin> patch|minor --dry-run   # prints the steps, changes 
 scripts/release.py <plugin> patch|minor
 ```
 
-It refuses a dirty tree, red tests or an existing tag; then it bumps the version in the plugin's
-`.claude-plugin/plugin.json`, commits, tags `<plugin>-v<version>`, fast-forwards `main` and pushes
-both. README "Maintaining" has the details. A pull request does not bump versions; the release
-does.
+It is run on `main` after the pull request has merged. It refuses a dirty tree, red tests or an
+existing tag; then it bumps the version in the plugin's `.claude-plugin/plugin.json`, commits, tags
+`<plugin>-v<version>` and pushes `main` and the tag. README "Maintaining" has the details. A pull
+request does not bump versions; the release does.
