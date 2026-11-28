@@ -97,11 +97,12 @@ keep for it:
 
 A session's entry is written at its start and kept for a day after its process went: `backend`
 (`tmux`, `background`, or an outside driver's name) and `place` (the place's id there) say where it
-runs, `story` which story it was started for (`""` outside one, `adhoc` for a one-off), `born` when
-its launch was typed. `places` holds what a launch wrote for a place no session has registered in
-yet. Stable to read: those keys, with those meanings. Never write it: flowkit replaces the file
-whole under a lock of its own, and a writer beside it loses entries. To ask about one session,
-`flowkit-session locate` reads it for you and checks it against what runs now.
+runs, `story` which story it was started for (`""` outside one, and for a one-off, which has
+`"adhoc": true`), `born` when its launch was typed. `places` holds what a launch wrote for a place
+no session has registered in yet. Stable to read: those keys, with those meanings. Never write it:
+flowkit replaces the file whole under a lock of its own, and a writer beside it loses entries. To
+ask about one session, `flowkit-session locate` reads it for you and checks it against what runs
+now.
 
 ## `flowkit-session`: a session from outside
 
@@ -136,10 +137,11 @@ copy: no
 story: billing
 ```
 
-`place_pid` is the process the place itself started (a pane's shell): when it is the parent of
-`pid`, the shell takes the keyboard back once the session ends. `-` (JSON `null`) stands for what
-is not known. It exits 4, with the same lines and no place, for a session that runs where flowkit
-cannot reach it.
+`status` is Claude Code's own word, passed on from the session's file: `idle`, `busy`, `waiting`
+or `shell` today, so test for the one you need. `place_pid` is the process the place itself started
+(a pane's shell): when it is the parent of `pid`, the shell takes the keyboard back once the
+session ends. `-` (JSON `null`) stands for what is not known. It exits 4, with the same lines and
+no place, for a session that runs where flowkit cannot reach it.
 
 **`type`** types only into a free prompt box unless told otherwise: on screen, empty, no dialog
 below it, not in copy mode; a background session that is neither at work nor waiting on a prompt is

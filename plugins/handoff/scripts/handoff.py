@@ -1550,7 +1550,7 @@ Where a session runs and which story it was started for. Prints a line each, `ke
   name        its name, - without one
   pid         its process, - for a stopped background session
   kind        interactive or background
-  status      idle, busy or waiting
+  status      Claude Code's own word, from the session's file: idle, busy, waiting or shell
   cwd         its folder
   backend     tmux, background, or the name of the outside driver
   place       the place's id there (a tmux pane's, the driver's own; a background session's id), - when it has none
