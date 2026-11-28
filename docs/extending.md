@@ -97,11 +97,12 @@ keep for it:
 
 A session's entry is written at its start and kept for a day after its process went: `backend`
 (`tmux`, `background`, or an outside driver's name) and `place` (the place's id there) say where it
-runs, `story` which story it was started for (`""` outside one, `adhoc` for a one-off), `born` when
-its launch was typed. `places` holds what a launch wrote for a place no session has registered in
-yet. Stable to read: those keys, with those meanings. Never write it: flowkit replaces the file
-whole under a lock of its own, and a writer beside it loses entries. To ask about one session,
-`flowkit-session locate` reads it for you and checks it against what runs now.
+runs, `story` which story it was started for (`""` outside one, and for a one-off, which has
+`"adhoc": true`), `born` when its launch was typed. `places` holds what a launch wrote for a place
+no session has registered in yet. Stable to read: those keys, with those meanings. Never write it:
+flowkit replaces the file whole under a lock of its own, and a writer beside it loses entries. To
+ask about one session, `flowkit-session locate` reads it for you and checks it against what runs
+now.
 
 ## `flowkit-session`: a session from outside
 
@@ -136,10 +137,11 @@ copy: no
 story: billing
 ```
 
-`place_pid` is the process the place itself started (a pane's shell): when it is the parent of
-`pid`, the shell takes the keyboard back once the session ends. `-` (JSON `null`) stands for what
-is not known. It exits 4, with the same lines and no place, for a session that runs where flowkit
-cannot reach it.
+`status` is Claude Code's own word, passed on from the session's file: `idle`, `busy`, `waiting`
+or `shell` today, so test for the one you need. `place_pid` is the process the place itself started
+(a pane's shell): when it is the parent of `pid`, the shell takes the keyboard back once the
+session ends. `-` (JSON `null`) stands for what is not known. It exits 4, with the same lines and
+no place, for a session that runs where flowkit cannot reach it.
 
 **`type`** types only into a free prompt box unless told otherwise: on screen, empty, no dialog
 below it, not in copy mode; a background session that is neither at work nor waiting on a prompt is
@@ -179,18 +181,20 @@ flowkit-session release <session> --by <name>
 
 `claim` takes the stop over: flowkit's waiter stands down, types nothing, and the story file says
 `> limit <session> · <time> · <name> took it over until <time>: flowkit does not continue it
-meanwhile`. The claim holds for `--for` minutes (15 without it; claim again under the same name to
-hold it longer), only while the session runs in the same process, and ends with the stop's record
-at the session's next clean turn end. `release` gives the session back, and so does a claim that
-runs out: the waiter plans the stop again and continues the session as it would have, with a line
-saying so. A claimer that dies therefore strands nothing.
+meanwhile`. The claim holds for `--for` minutes (15 without it, above 0 and 1440 at most; claim
+again under the same name to hold it longer), only while the session runs in the same process, and
+ends with the stop's record at the session's next clean turn end. `release` gives the session
+back, and so does a claim that runs out: the waiter plans the stop again and continues the session
+as it would have, with a line saying so. A claimer that dies therefore strands nothing.
 
 Of a claim and the waiter's continue that come at the same moment exactly one wins. `claim` exits
 0 and prints `claimed until <YYYY-MM-DD HH:MM>` only when nothing was typed and nothing will be;
 it exits 5 with `flowkit continued it at <HH:MM>`, `flowkit is typing its continue` or `claimed by
 <other> until <HH:MM>` when the session is not yours to take, and 3 when no usage-limit stop is
 recorded for it. Your `StopFailure` hook runs beside flowkit's, which writes that record, so
-`claim` waits up to `--wait` seconds for it (5 without it).
+`claim` waits up to `--wait` seconds for it (5 without it), and as long before it answers `flowkit
+continued it` or `flowkit is typing its continue`: a continued session that stops again keeps the
+record of the stop before until flowkit's hook has written the new one.
 
 The shape of a hook that uses it (a `StopFailure` hook with the matcher `rate_limit`; keep the
 hook itself short and do the work in a process it starts):

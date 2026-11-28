@@ -1349,14 +1349,15 @@ def claimed(rec, now=None):
         else None
 
 
-def limit_take(sid):
+def limit_take(sid, at):
     """The waiter's word that it types its continue now, written under the records' lock, where a
     claim is written too: False when one holds, and then nothing is typed. So of a waiter and a
-    claimer that come for one stop at the same moment only one types."""
+    claimer that come for one stop at the same moment only one types. False too when the record is
+    no longer the stop the waiter planned (`at`): a newer one, or one handled since."""
     took = []
 
     def change(rec):
-        if rec is None or claimed(rec):
+        if rec is None or claimed(rec) or rec.get("at") != at or rec.get("handled") == at:
             return None
         took.append(rec)
         return {**rec, "typing": time.time()}
@@ -1366,23 +1367,27 @@ def limit_take(sid):
 
 
 def limit_unclaim(sid, claim, said):
-    """A claim comes off its limit record: given back, or run out. One line says so, once per claim,
-    unless it was for a process the session no longer runs in."""
+    """A claim comes off its limit record: run out (`claim` is the claim as the waiter read it) or
+    given back (the name of its holder). Which one is on the record is looked at under the records'
+    lock, so a claim renewed since is left by the first and taken by the second. One line says so,
+    once per claim, unless it was for a process the session no longer runs in. True when one came
+    off."""
     tell = []
 
     def change(rec):
-        if rec is None or rec.get("claim") != claim:
+        held = rec.get("claim") if rec else None
+        if not isinstance(held, dict) or claim != (held.get("by") if isinstance(claim, str) else held):
             return None
         del rec["claim"]
-        if claim.get("pid") == rec.get("pid") and once(rec, f"unclaim {claim.get('at')}"):
+        if held.get("pid") == rec.get("pid") and once(rec, f"unclaim {held.get('at')}"):
             tell.append(rec)
         return rec
 
-    retry_update(sid, change)
+    came = retry_update(sid, change) is not None
     if tell:
         retry_log(tell[0], f"> limit {tell[0]['name']} · {time.strftime('%Y-%m-%d %H:%M')} · {said}: flowkit's waiter has "
                   "it again")
-    return bool(tell)
+    return came
 
 
 def limit_lock(sid):
@@ -1462,7 +1467,8 @@ def limit_wait(sid):
                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 time.sleep(nap if due is None else min(nap, due - now))
                 continue
-            if not limit_take(sid):  # claimed in this moment: the next pass stands down
+            if not limit_take(sid, at):  # claimed in this moment, or no longer the stop planned: the next pass sees which
+                time.sleep(nap)
                 continue
             when = time.strftime("%H:%M", time.localtime(at))
             since = "it has reset"
@@ -1544,7 +1550,7 @@ Where a session runs and which story it was started for. Prints a line each, `ke
   name        its name, - without one
   pid         its process, - for a stopped background session
   kind        interactive or background
-  status      idle, busy or waiting
+  status      Claude Code's own word, from the session's file: idle, busy, waiting or shell
   cwd         its folder
   backend     tmux, background, or the name of the outside driver
   place       the place's id there (a tmux pane's, the driver's own; a background session's id), - when it has none
@@ -1559,8 +1565,8 @@ keys. Exit 0, or 4 with the same lines and no place; 3 without a session; 1 when
 flowkit-session read --place <id> [--rows <n>] [--box]
 
 What a session's place shows now: its rows as plain text, top to bottom, without the empty ones at
-the end; --rows <n> gives the last n. Exit 5 and `no screen` when its backend shows none (a
-background session, an outside driver that does not answer `screen`).
+the end; --rows <n> gives the last n (1 to 10000). Exit 5 and `no screen` when its backend shows
+none (a background session, an outside driver that does not answer `screen`).
 
 --box prints one word instead, what `type` would find: `free` (exit 0), or what is in a line's way
 (exit 5): `copy mode`, `no prompt box`, `dialog`, `draft`; `waiting` or `busy` for a background
@@ -1591,16 +1597,19 @@ queued by Claude Code as its next prompt.
 Takes over a session a usage limit stopped: from then on flowkit's own waiter does not continue it,
 and whoever claimed it does what it wants with it (start it again elsewhere, type a line of its
 own). Prints `claimed until <YYYY-MM-DD HH:MM>` (exit 0). The claim holds for --for minutes (15
-without it; claim again under the same name to hold it longer), while the session runs in the same
-process, and until `release`; the session's next clean turn end ends it with the stop's record.
+without it, above 0 and 1440 at most; claim again under the same name to hold it longer), while the
+session runs in the same process, and until `release`; the session's next clean turn end ends it
+with the stop's record.
 The story file gets `> limit <session> · <time> · <name> took it over until <time>: flowkit does
 not continue it meanwhile`.
 
 Exit 5 when it is not yours to take, with one line: `flowkit continued it at <HH:MM>`, `flowkit is
 typing its continue`, or `claimed by <other> until <HH:MM>`. Exit 3 when no usage-limit stop is
 recorded for the session. A StopFailure hook of your own runs beside flowkit's, which writes that
-record: `claim` waits --wait seconds for it (5 without it). Of a claim and flowkit's continue that
-come at the same moment exactly one wins: a claim that printed `claimed` means nothing was typed.
+record: `claim` waits --wait seconds for it (5 without it, 86400 at most), and as long before it
+says that flowkit continued the session or is typing, which until then may be said of the stop
+before this one. Of a claim and flowkit's continue that come at the same moment exactly one wins:
+a claim that printed `claimed` means nothing was typed.
 """,
     "release": """flowkit-session release <session> --by <name>
 
@@ -1611,6 +1620,8 @@ would have. Prints `released` (exit 0); exit 3 when <name> holds no claim on it.
 HOWS = {"free": backend.FREE, "line": backend.LINE, "over": backend.OVER, "escape": backend.ESCAPE,
         "command": backend.COMMAND}
 CLAIM = 15  # minutes a claim on a usage-limit stop holds when its claimer names no other time
+CLAIM_MOST = 24 * 60  # the most minutes one claim holds; in seconds, the longest `claim` waits
+ROWS_MOST = 10000  # more rows than a place shows
 CLAIM_WAIT = 5  # seconds `claim` waits for the stop's record: the claimer's hook and flowkit's run side by side
 TYPING = 180  # seconds a waiter's word that it is typing counts: more than its slowest continue takes
 
@@ -1643,7 +1654,9 @@ def session_box(at, found):
 def session_claim(row, by, minutes, wait):
     """`flowkit-session claim`: the claim goes into the limit record of the session's live process,
     under the records' lock, unless flowkit's waiter has typed its continue for this stop, is typing
-    it now, or another name holds the stop. (exit code, the line to print)."""
+    it now, or another name holds the stop. A record that says continued may still be the stop
+    before this one, until flowkit's own hook has written the new one: like the typing it is the
+    answer only once `wait` is over. (exit code, the line to print)."""
     sid, deadline = row["sessionId"], time.time() + wait
     clock = lambda at: time.strftime("%H:%M", time.localtime(at or 0))
     while True:
@@ -1657,7 +1670,7 @@ def session_claim(row, by, minutes, wait):
             if held and held.get("by") != by:
                 out.update(final=f"claimed by {held.get('by')} until {clock(held['until'])}")
             elif rec.get("handled") == rec.get("at") and rec.get("state") == "continued":
-                out.update(final=f"flowkit continued it at {clock(rec.get('continued_at'))}")
+                out.update(busy=f"flowkit continued it at {clock(rec.get('continued_at'))}")
             elif now - (rec.get("typing") or 0) < TYPING:
                 out.update(busy="flowkit is typing its continue")
             else:
@@ -1685,7 +1698,7 @@ def session_cmd(argv):
     way. The commands reach a session through what flowkit's own lines go through (session_place,
     send, the limit record's lock)."""
     verb, args = (argv[0], argv[1:]) if argv else ("", [])
-    if verb not in SESSION_HELP or "--help" in args or "-h" in args:
+    if verb not in SESSION_HELP or args[:1] in (["--help"], ["-h"]):  # further on it is a text, or a wrong option
         asked = verb in SESSION_HELP or verb in ("--help", "-h", "help")
         print(SESSION_HELP.get(verb, SESSION), end="", file=sys.stdout if asked else sys.stderr)
         return 0 if asked else 2
@@ -1702,18 +1715,20 @@ def session_cmd(argv):
             wrong = True
         else:
             words.append(word)
-    number = lambda key: opts[key].replace(".", "", 1).isdigit() if key in opts else True
+    number = lambda key, whole=False: key not in opts or (  # ASCII digits: others pass isdigit() and break float()
+        opts[key].isascii() and (opts[key] if whole else opts[key].replace(".", "", 1)).isdigit())
     placed = "--place" in opts
     if wrong or len(words) != (verb == "type") + (not placed) or opts.get("--how", "free") not in HOWS \
             or (verb in ("claim", "release") and not SAFE.match(opts.get("--by") or "")) \
-            or not (opts.get("--rows") or "1").isdigit() or not int(opts.get("--rows") or 1) \
-            or not number("--for") or not number("--wait"):
+            or not number("--rows", True) or not 1 <= float(opts.get("--rows", 1)) <= ROWS_MOST \
+            or not number("--for") or not 0 < float(opts.get("--for", CLAIM)) <= CLAIM_MOST \
+            or not number("--wait") or not float(opts.get("--wait", CLAIM_WAIT)) <= CLAIM_MOST * 60:
         print(SESSION_HELP[verb], end="", file=sys.stderr)
         return 2
     at = TMUX
     try:
         if placed:
-            row, found = None, backend.Place(opts["--place"], False, None)
+            row, found = None, at.place(opts["--place"])
         else:
             rows = session_named(words[0])
             if len(rows) != 1:
@@ -1729,12 +1744,9 @@ def session_cmd(argv):
                       file=sys.stdout if said else sys.stderr)
                 return code
             if verb == "release":
-                rec = retry_record(row["sessionId"]) or {}
-                claim = rec.get("claim") if isinstance(rec.get("claim"), dict) and rec["claim"].get("by") == opts["--by"] else None
-                if claim is None:
+                if not limit_unclaim(row["sessionId"], opts["--by"], f"{opts['--by']} gave it back"):
                     print(f"flowkit-session: {opts['--by']} holds no claim on {row.get('name') or row['sessionId']}", file=sys.stderr)
                     return 3
-                limit_unclaim(row["sessionId"], claim, f"{opts['--by']} gave it back")
                 print("released")
                 return 0
             at, found = session_place(row)

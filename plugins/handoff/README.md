@@ -584,10 +584,11 @@ the waiter stands down and types nothing, and the story file gets `> limit <sess
 or the session's next clean turn end; given back or run out, the waiter plans the stop again and
 continues the session as it would have, with a line saying so. Of a claim and the waiter's
 continue that come at the same moment exactly one wins: `claim` exits 0 only when nothing was
-typed, and 5 with `flowkit continued it at <HH:MM>` when it came too late. Unclaimed, a stop is
-continued as before. A session that started before 0.17.0 was installed runs the older waiter,
-which knows no claim, until it is restarted. `handoff.conf` has no key that runs a command at a
-stop: what yours does there is your hook's.
+typed, and 5 with `flowkit continued it at <HH:MM>` when it came too late, said once `--wait` is
+over: a continued session that stops again keeps that record until flowkit's own hook has written
+the new stop. Unclaimed, a stop is continued as before. A session that started before 0.17.0 was
+installed runs the older waiter, which knows no claim, until it is restarted. `handoff.conf` has
+no key that runs a command at a stop: what yours does there is your hook's.
 
 [`docs/extending.md`](../../docs/extending.md) lists every place where something of yours meets
 flowkit (the flag files, the launch hold, the story file's lines, the sessions file, these

@@ -196,7 +196,7 @@ class Handoff(unittest.TestCase):
         self.assertTrue(story.read_text().startswith("# my-story\n\n## s1 · 2026-10-27 12:00\n"))
         typed = [l for l in self.calls.read_text().splitlines() if "send-keys" in l]
         self.assertEqual(len(typed), 1, typed)
-        self.assertRegex(typed[0], r"-t %7 C-u ; send-keys -t %7 -l closed s1 ; run-shell sleep 0.5 ; send-keys -t %7 Enter$")
+        self.assertRegex(typed[0], r"-t %7 C-u ; send-keys -t %7 -l -- closed s1 ; run-shell sleep 0.5 ; send-keys -t %7 Enter$")
 
     def test_spawn_hands_over_to_a_newer_installed_release_once(self):
         fake = self.tmp / "fake"
@@ -1191,8 +1191,8 @@ esac
                                    "no last call coord-b: busy", "no last call coord-d: draft",
                                    "no last call coord-w: waiting", "no last call coord-e: not in a tmux pane"])
         typed = self.calls.read_text().splitlines()
-        self.assertEqual([t.split(" -l ")[0] for t in typed], ["tmux send-keys -t %1", "tmux send-keys -t %2"])
-        self.assertTrue(typed[0].split(" -l ")[1].startswith(f"last call: the user goes away at {when}. Ask now "
+        self.assertEqual([t.split(" -l -- ")[0] for t in typed], ["tmux send-keys -t %1", "tmux send-keys -t %2"])
+        self.assertTrue(typed[0].split(" -l -- ")[1].startswith(f"last call: the user goes away at {when}. Ask now "
                                                              "anything you need from them;"))
         self.assertTrue(typed[0].endswith("; run-shell sleep 0.5 ; send-keys -t %1 Enter"))
         self.handoff("away", "--by", "coord-b")
@@ -1694,7 +1694,7 @@ esac
         for error in ("server_error", "overloaded"):
             self.retry_setup()
             self.api_error(error)
-            self.assertIn(f"tmux send-keys -t %7 -l Your last turn ended on an API error ({error}) at ", self.typed())
+            self.assertIn(f"tmux send-keys -t %7 -l -- Your last turn ended on an API error ({error}) at ", self.typed())
             self.assertIn("Carry on from where you were. ; run-shell sleep 0.5 ; send-keys -t %7 Enter", self.typed())
             self.assertEqual(self.record()["attempts"], 1)
             self.handoff("api-ok", stdin=json.dumps({"session_id": self.SID}))
@@ -1875,7 +1875,7 @@ esac
         self.limit_setup(reset=reset)
         self.api_error("rate_limit")
         typed = self.sent(6.0)
-        self.assertIn("tmux send-keys -t %7 -l Your last turn stopped on the usage limit at ", typed)
+        self.assertIn("tmux send-keys -t %7 -l -- Your last turn stopped on the usage limit at ", typed)
         self.assertIn("; it has reset. Carry on from where you were. ; run-shell sleep 0.5 ; send-keys -t %7 Enter", typed)
         rec = self.rec_when(lambda r: r.get("state") == "continued")
         self.assertEqual((rec["continues"], rec["continued_for"], rec["reset"], rec["handled"]), (1, reset, reset, rec["at"]))
@@ -2132,7 +2132,7 @@ esac
         os.kill(int(lock.read_text()), signal.SIGKILL)  # the waiter dies; its lock file stays, unlocked
         extra.append(subprocess.Popen(["python3", str(HANDOFF), "retry-wait", self.SID], env=self.env))
         time.sleep(1.0)
-        self.assertEqual(self.calls.read_text().count("-l Your last turn"), 1, "a continue is typed once")
+        self.assertEqual(self.calls.read_text().count("-l -- Your last turn"), 1, "a continue is typed once")
         self.assertTrue(lock.exists(), "the new waiter stays beside the record")
         self.api_error("rate_limit")  # woken while limited: the stop is noted, without another line
         self.assertEqual(len([l for l in self.log() if l.startswith("> retry")]), 1)
@@ -2162,13 +2162,13 @@ esac
         self.assertEqual(self.said("read", "s4", "--rows", "1"), (0, "│ >"))
         self.assertEqual(self.said("read", "s4", "--box"), (0, "free"))
         self.assertEqual(self.said("type", "s4", "carry on"), (0, "%7"))
-        self.assertEqual(self.calls.read_text(), "tmux send-keys -t %7 -l carry on ; run-shell sleep 0.5 ; send-keys -t %7 Enter\n")
+        self.assertEqual(self.calls.read_text(), "tmux send-keys -t %7 -l -- carry on ; run-shell sleep 0.5 ; send-keys -t %7 Enter\n")
         self.calls.unlink()
         self.assertEqual(self.said("type", "s4", "--how", "over", "--", "--dashes"), (0, "%7"))
-        self.assertIn("send-keys -t %7 C-u ; send-keys -t %7 -l --dashes ;", self.calls.read_text())
+        self.assertIn("send-keys -t %7 C-u ; send-keys -t %7 -l -- --dashes ;", self.calls.read_text())
         self.calls.unlink()
         self.assertEqual(self.said("type", "--place", "%9", "--how", "line", "cd /x && ls"), (0, "%9"), "a place, no session in it")
-        self.assertIn("send-keys -t %9 -l cd /x && ls ;", self.calls.read_text())
+        self.assertIn("send-keys -t %9 -l -- cd /x && ls ;", self.calls.read_text())
         self.assertEqual(self.said("read", "--place", "%9", "--box"), (0, "free"))
         self.calls.unlink()
         for kw, why in ((dict(screen="│ > half a thought\n"), "draft"), (dict(screen="  1. Yes\n  2. No\n"), "no prompt box"),
@@ -2177,7 +2177,15 @@ esac
             self.assertEqual((self.said("type", "s4", "carry on"), self.said("read", "s4", "--box")), ((5, why), (5, why)))
             self.assertFalse(self.calls.exists(), f"{why}: nothing is typed")
         self.assertEqual(json.loads(self.reach("locate", "s4", "--json").stdout)["copy"], True)
+        self.assertEqual((self.said("type", "--place", "%7", "carry on"), self.said("read", "--place", "%7", "--box")),
+                         ((5, "copy mode"), (5, "copy mode")), "a place given by its id is asked for its copy mode")
+        self.assertFalse(self.calls.exists())
         self.assertEqual(self.said("type", "s4", "--how", "line", "typed anyway"), (0, "%7"))
+        self.calls.unlink()  # help is the word after the command; further on it is a text like any other
+        self.assertEqual((self.said("type", "s4", "--how", "line", "--", "--help"), self.said("type", "s4", "--how", "line", "-h")),
+                         ((0, "%7"), (0, "%7")))
+        self.assertEqual([line.split(" ; ")[0] for line in self.calls.read_text().splitlines()],
+                         ["tmux send-keys -t %7 -l -- --help", "tmux send-keys -t %7 -l -- -h"])
         # no such session, two of one name, one outside tmux, a call that is wrong
         self.assertEqual(self.said("locate", "nobody"), (3, "flowkit-session: no session answers to 'nobody'"))
         (self.tmp / "claude" / "sessions" / f"{os.getpid()}.json").write_text(json.dumps(
@@ -2190,6 +2198,11 @@ esac
         self.assertEqual(self.said("read", str(os.getpid())), (4, "flowkit-session: s4 runs in no place of tmux"))
         self.assertEqual(self.said("type", str(os.getpid()), "carry on")[0], 4)
         for wrong in (["type", "s4"], ["type", "s4", "a", "--how", "hard"], ["read", "s4", "--rows", "x"], ["locate"],
+                      ["type", "s4", "--help"], ["read", "s4", "--box", "-h"],
+                      ["read", "s4", "--rows", "0"], ["read", "s4", "--rows", "\u00b2"], ["read", "s4", "--rows", "9" * 5000],
+                      ["claim", "s4", "--by", "a", "--for", "0"], ["claim", "s4", "--by", "a", "--for", "1441"],
+                      ["claim", "s4", "--by", "a", "--for", "\u0663"], ["claim", "s4", "--by", "a", "--wait", "\u00b2"],
+                      ["claim", "s4", "--by", "a", "--wait", "9" * 400],
                       ["claim", "s4"], ["claim", "s4", "--by", "a b"], ["release", "s4", "--for", "1"], ["locate", "s4", "--no"]):
             out = self.reach(*wrong)
             self.assertEqual((out.returncode, out.stdout, out.stderr.split()[0:2]), (2, "", ["flowkit-session", wrong[0]]), wrong)
@@ -2297,9 +2310,18 @@ esac
             time.sleep(0.05)  # typed, and Enter made cat say it again
         self.assertEqual(self.said("read", "s4", "--rows", "1"), (0, "carry on"))
         self.assertEqual(self.said("type", "--place", pane, "--how", "line", "by its place"), (0, pane))
+        self.assertEqual(self.said("type", "s4", "--how", "over", "--", "-x --dashes"), (0, pane), "a flag to nobody: tmux types it")
+        deadline = time.time() + 5
+        while time.time() < deadline and real("capture-pane", "-p").stdout.count("-x --dashes") < 2:
+            time.sleep(0.05)
+        self.assertEqual(self.said("read", "s4", "--rows", "1"), (0, "-x --dashes"))
+        self.assertEqual(self.said("read", "--place", pane, "--box"), (0, "free"))
         real("copy-mode")
         self.assertEqual((self.said("type", "s4", "not this"), self.said("read", "s4", "--box")), ((5, "copy mode"), (5, "copy mode")))
-        self.assertNotIn("not this", real("capture-pane", "-p").stdout)
+        self.assertEqual((self.said("type", "--place", pane, "nor this"), self.said("read", "--place", pane, "--box")),
+                         ((5, "copy mode"), (5, "copy mode")))
+        shown = real("capture-pane", "-p").stdout
+        self.assertFalse("not this" in shown or "nor this" in shown, shown)
 
     def claim(self, *args, by="spill"):
         return self.said("claim", "s4", "--by", by, *args)
@@ -2313,7 +2335,11 @@ esac
         self.assertRegex(text, r"^claimed until \d{4}-\d\d-\d\d \d\d:\d\d$")
         self.assertEqual(self.claim(by="other"), (5, f"claimed by spill until {text[-5:]}"))
         self.assertEqual(self.sent(2.0), "", "claimed: the waiter types nothing, its reset long over")
-        self.assertEqual(self.record()["claim"]["by"], "spill")
+        held = self.record()["claim"]
+        self.assertEqual(held["by"], "spill")
+        for minutes in ("0", "99999999999999999"):  # a claim over as it is made, one that never runs out: neither is written
+            self.assertEqual(self.reach("claim", "s4", "--by", "spill", "--for", minutes).returncode, 2, minutes)
+        self.assertEqual(self.record()["claim"], held)
         took = [l for l in self.log() if "took it over" in l]
         self.assertEqual(len(took), 1, self.log())
         self.assertRegex(took[0], rf"^> limit s4 · \d{{4}}-\d\d-\d\d \d\d:\d\d · spill took it over until {text[-5:]}: flowkit "
@@ -2351,11 +2377,12 @@ esac
         with mock.patch.dict(os.environ, self.env, clear=True):
             handoff = self.module()
             row = {"sessionId": self.SID, "pid": self.pid}
-            self.assertTrue(handoff.limit_take(self.SID), "the waiter's word that it types")
+            at = self.record()["at"]
+            self.assertTrue(handoff.limit_take(self.SID, at), "the waiter's word that it types")
             self.assertEqual(handoff.session_claim(row, "spill", 15, 0), (5, "flowkit is typing its continue"))
             handoff.retry_set(self.SID, typing=time.time() - handoff.TYPING - 1)  # a waiter that died over it
             self.assertEqual(handoff.session_claim(row, "spill", 15, 0)[0], 0)
-            self.assertFalse(handoff.limit_take(self.SID), "claimed: the waiter does not type")
+            self.assertFalse(handoff.limit_take(self.SID, at), "claimed: the waiter does not type")
             self.assertNotIn("typing", {k for k, v in self.record().items() if v and k == "typing" and v > time.time() - 5})
         for n in range(8):  # the two as processes of their own, the claim sent around the moment the continue is due
             self.limit_setup(reset=time.time() + 0.3)
@@ -2367,6 +2394,74 @@ esac
             self.assertNotEqual(code == 0, typed, f"round {n}: claim said {text!r}, typed: {typed}")
             if code:
                 self.assertRegex(text, r"^flowkit continued it at \d\d:\d\d$")
+
+    def test_limit_a_claim_waits_out_the_record_of_the_stop_before(self):
+        """A continued session that stops on the limit again: a hook's claim runs beside flowkit's own
+        hook, and until that has written the new stop the record still says `continued`."""
+        self.limit_setup(reset=time.time() + 0.3)
+        self.api_error("rate_limit")
+        self.assertIn("usage limit", self.sent())
+        self.rec_when(lambda r: r.get("state") == "continued")
+        began = time.time()
+        code, text = self.claim("--wait", "0.6")
+        self.assertEqual((code, text[:24]), (5, "flowkit continued it at "), "no new stop: said once the wait is over")
+        self.assertGreaterEqual(time.time() - began, 0.6)
+        claim = subprocess.Popen([str(SESSION_BIN), "claim", "s4", "--by", "spill", "--wait", "8"], env=self.env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (claim.kill(), claim.wait()))
+        time.sleep(0.5)
+        with self.transcript.open("a") as f:  # the stop the claim is for, its reset far ahead
+            f.write(json.dumps({"type": "assistant", "timestamp": self.iso(time.time()), "isApiErrorMessage": True,
+                                "error": "rate_limit", "quotaLimits": {"status": "rejected", "resetsAt": time.time() + 600},
+                                "message": {"model": "<synthetic>", "content": [
+                                    {"type": "text", "text": "You've hit your weekly limit"}]}}) + "\n")
+        self.api_error("rate_limit")
+        out, err = claim.communicate(timeout=10)
+        self.assertEqual((claim.returncode, out[:14]), (0, "claimed until "), out + err)
+        self.assertEqual(self.record()["claim"]["by"], "spill")
+        time.sleep(0.5)
+        self.assertEqual(self.calls.read_text().count("Enter"), 1, "the one continue of the stop before")
+
+    def test_limit_a_release_takes_off_the_claim_that_is_there_when_it_has_the_lock(self):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.limit_setup(reset=time.time() + 600)
+            self.api_error("rate_limit")
+            self.rec_when(lambda r: r.get("state") == "waiting")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            handoff = self.module()
+            row = {"sessionId": self.SID, "pid": self.pid}
+            self.assertEqual(handoff.session_claim(row, "spill", 15, 0)[0], 0)
+            lock, renewed = handoff.retry_lock, []
+
+            @contextlib.contextmanager
+            def late():  # the same name claims again just before the release gets the lock
+                if not renewed:
+                    renewed.append(None)
+                    renewed[0] = handoff.session_claim(row, "spill", 30, 0)[0]
+                with lock():
+                    yield
+
+            release = lambda: handoff.session_cmd(["release", "s4", "--by", "spill"])
+            with mock.patch.object(handoff, "retry_lock", late), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual((release(), out.getvalue(), renewed), (0, "released\n", [0]))
+            self.assertNotIn("claim", self.record(), "released: nothing keeps the waiter off the stop")
+            with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual((release(), out.getvalue()), (3, ""), "nothing came off: not said to be released")
+            self.assertEqual(err.getvalue(), "flowkit-session: spill holds no claim on s4\n")
+
+    def test_limit_the_waiter_takes_only_the_stop_it_planned(self):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.limit_setup(reset=time.time() + 600)
+            self.api_error("rate_limit")
+            at = self.rec_when(lambda r: r.get("state") == "waiting")["at"]
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            handoff = self.module()
+            handoff.retry_set(self.SID, at=at + 1)  # the session stopped again between the waiter's look and its take
+            self.assertFalse(handoff.limit_take(self.SID, at), "a newer stop: the planned one's line is not typed")
+            self.assertFalse(self.record().get("typing"))
+            self.assertTrue(handoff.limit_take(self.SID, at + 1))
+            handoff.retry_set(self.SID, handled=at + 1, typing=None)
+            self.assertFalse(handoff.limit_take(self.SID, at + 1), "handled since")
 
     NOTICE = ("Remote Control disconnected \u2014 signed-in claude.ai account or organization changed on this machine "
               "\u2014 run /remote-control to start a session for the current account")
@@ -2452,13 +2547,13 @@ esac
         self.assertEqual(self.record()["account"], one)
         self.unlink_remote()
         typed = self.sent()
-        self.assertIn("tmux send-keys -t %7 -l Your last turn stopped on the usage limit at ", typed)
+        self.assertIn("tmux send-keys -t %7 -l -- Your last turn stopped on the usage limit at ", typed)
         self.assertIn("; the account it runs on has changed since. Carry on from where you were. ; run-shell", typed)
         rec = self.rec_when(lambda r: r.get("state") == "continued")
         self.assertEqual((rec["account"], rec["continues"], rec["reset"], self.probes()), (two, 1, None, 1))
         self.assertRegex(self.log()[-1], r"^> limit s4 · .* · the account it runs on changed: counted as a reset$")
         time.sleep(0.5)
-        self.assertEqual(self.calls.read_text().count("-l Your last turn"), 1, "one continue")
+        self.assertEqual(self.calls.read_text().count("-l -- Your last turn"), 1, "one continue")
 
         self.login("acct-1")  # the new account is at its limit too: its reset is waited for
         self.limit_setup(reset=time.time() + 3600, remote=False)
@@ -2502,7 +2597,7 @@ esac
         self.login("acct-2")
         self.rec_when(lambda r: r.get("state") == "continued")
         typed = self.calls.read_text()
-        self.assertEqual((typed.count("-l /remote-control ;"), typed.count("-l Your last turn stopped")), (1, 1))
+        self.assertEqual((typed.count("-l -- /remote-control ;"), typed.count("-l -- Your last turn stopped")), (1, 1))
         self.assertLess(typed.index("/remote-control"), typed.index("Your last turn"), "so the turn shows on the phone")
 
     def test_limit_plan_after_an_account_change_by_the_clock(self):
@@ -2557,7 +2652,7 @@ esac
     def remote(self, suffix):
         return self.tmp / "claude" / "flowkit" / "remote" / f"{self.SID}.{suffix}"
 
-    TYPED = "tmux send-keys -t %7 -l /remote-control ; run-shell sleep 0.5 ; send-keys -t %7 Enter\n"
+    TYPED = "tmux send-keys -t %7 -l -- /remote-control ; run-shell sleep 0.5 ; send-keys -t %7 Enter\n"
 
     def test_reconnect_types_remote_control_once_per_notice_into_a_free_idle_session(self):
         self.remote_setup()
@@ -2931,11 +3026,11 @@ esac
             self.assertRegex(lines[5], r"^remind: sent through side-report \(.*/flowkit/remind/\d{8}-\d{6}\.md\)$")
             self.assertEqual(len(lines), 6)
             typed = self.calls.read_text().splitlines()
-            self.assertEqual([t.split(" -l ")[0] for t in typed], ["tmux send-keys -t %7", "tmux send-keys -t %10",
+            self.assertEqual([t.split(" -l -- ")[0] for t in typed], ["tmux send-keys -t %7", "tmux send-keys -t %10",
                                                                    "tmux send-keys -t %14", "tmux send-keys -t %8"])
             push = ("Waiting on you: a pane is parked at a start-up prompt: Accessing workspace: (tab demo, pane 2, "
                     "story demo) (+5 more in remind-latest.md)")
-            self.assertTrue(typed[0].split(" -l ")[1].startswith("reminder: from flowkit's tick, not the user. "))
+            self.assertTrue(typed[0].split(" -l -- ")[1].startswith("reminder: from flowkit's tick, not the user. "))
             self.assertIn(f"so first run `sleep {handoff.REMIND_QUIET}` with the Bash tool, run_in_background true, and "
                           "end the turn; when its completion notice arrives, send the user one push", typed[0])
             self.assertTrue(typed[0].endswith(f"Message: {push} ; run-shell sleep 0.5 ; send-keys -t %7 Enter"))
@@ -3022,7 +3117,7 @@ esac
                     handoff.remind()
                 return out.getvalue().splitlines()
 
-            rung = lambda: self.calls.read_text().count(" -l reminder: ")
+            rung = lambda: self.calls.read_text().count(" -l -- reminder: ")
             lines = one_pass()
             self.assertEqual(lines[0], "ring demo-report: no push in 0.2 s")
             self.assertRegex(lines[1], r"^remind: not delivered, next try \d\d:\d\d \(")

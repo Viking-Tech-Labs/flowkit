@@ -536,7 +536,7 @@ class Closer(Labels):
         self.assertFalse(self.rang(), "a tick before 0.15.0 rang it and kept that in the pane")
         self.pane_list[-1][12] = ""
         self.closes()
-        self.assertEqual([a for a in self.writes if a[0] == "send-keys"], [("send-keys", "-t", "%1", "C-u", ";", "send-keys", "-t", "%1", "-l", "report now",
+        self.assertEqual([a for a in self.writes if a[0] == "send-keys"], [("send-keys", "-t", "%1", "C-u", ";", "send-keys", "-t", "%1", "-l", "--", "report now",
                                         ";", "run-shell", "sleep 0.5", ";", "send-keys", "-t", "%1", "Enter")])
         self.assertAlmostEqual(self.b.kept()["sessions"][reporter]["rung"], time.time(), delta=5)
         self.closes()
