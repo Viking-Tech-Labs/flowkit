@@ -2181,6 +2181,11 @@ esac
                          ((5, "copy mode"), (5, "copy mode")), "a place given by its id is asked for its copy mode")
         self.assertFalse(self.calls.exists())
         self.assertEqual(self.said("type", "s4", "--how", "line", "typed anyway"), (0, "%7"))
+        self.calls.unlink()  # help is the word after the command; further on it is a text like any other
+        self.assertEqual((self.said("type", "s4", "--how", "line", "--", "--help"), self.said("type", "s4", "--how", "line", "-h")),
+                         ((0, "%7"), (0, "%7")))
+        self.assertEqual([line.split(" ; ")[0] for line in self.calls.read_text().splitlines()],
+                         ["tmux send-keys -t %7 -l -- --help", "tmux send-keys -t %7 -l -- -h"])
         # no such session, two of one name, one outside tmux, a call that is wrong
         self.assertEqual(self.said("locate", "nobody"), (3, "flowkit-session: no session answers to 'nobody'"))
         (self.tmp / "claude" / "sessions" / f"{os.getpid()}.json").write_text(json.dumps(
@@ -2193,6 +2198,7 @@ esac
         self.assertEqual(self.said("read", str(os.getpid())), (4, "flowkit-session: s4 runs in no place of tmux"))
         self.assertEqual(self.said("type", str(os.getpid()), "carry on")[0], 4)
         for wrong in (["type", "s4"], ["type", "s4", "a", "--how", "hard"], ["read", "s4", "--rows", "x"], ["locate"],
+                      ["type", "s4", "--help"], ["read", "s4", "--box", "-h"],
                       ["claim", "s4"], ["claim", "s4", "--by", "a b"], ["release", "s4", "--for", "1"], ["locate", "s4", "--no"]):
             out = self.reach(*wrong)
             self.assertEqual((out.returncode, out.stdout, out.stderr.split()[0:2]), (2, "", ["flowkit-session", wrong[0]]), wrong)

@@ -1695,7 +1695,7 @@ def session_cmd(argv):
     way. The commands reach a session through what flowkit's own lines go through (session_place,
     send, the limit record's lock)."""
     verb, args = (argv[0], argv[1:]) if argv else ("", [])
-    if verb not in SESSION_HELP or "--help" in args or "-h" in args:
+    if verb not in SESSION_HELP or args[:1] in (["--help"], ["-h"]):  # further on it is a text, or a wrong option
         asked = verb in SESSION_HELP or verb in ("--help", "-h", "help")
         print(SESSION_HELP.get(verb, SESSION), end="", file=sys.stdout if asked else sys.stderr)
         return 0 if asked else 2
