@@ -13,6 +13,8 @@ same requests:
                               id, a session id), whether it sits in copy mode, where typed keys
                               reach no session, and the `claude agents` row it was found through
   here()                      the place of the session this process runs in
+  place(id)                   the place of an id that comes from outside flowkit, with its copy
+                              mode as it is now
   screen(place)               the rows it shows, each as (text, typed): the row as plain text, and
                               the same row with what is only suggested blanked
   bottom(place)               its last rows as plain text
@@ -370,6 +372,10 @@ class Backend:
     def here(self):
         return None
 
+    def place(self, id):
+        """The place of an id that comes from outside flowkit (`flowkit-session --place`)."""
+        return Place(id, False, None)
+
     def screen(self, place):
         return []
 
@@ -458,6 +464,15 @@ class Tmux(Backend):
         if sock and os.path.basename(os.environ.get("TMUX") or "x").split(",")[0] != sock:
             return None
         return Place(pane, False, None) if pane else None
+
+    def place(self, id):
+        """With the pane's copy mode as it is now, which only a place found through its session
+        knew: a pane tmux does not list is in none."""
+        for line in tmux("list-panes", "-a", "-F", "#{pane_pid} #{pane_id} #{pane_in_mode}").stdout.splitlines():
+            _, pane, in_mode = (line.split() + ["", "", ""])[:3]
+            if pane == id:
+                return Place(id, in_mode != "0", None)
+        return Place(id, False, None)
 
     def screen(self, place):
         return rows(tmux("capture-pane", "-p", "-e", "-t", self.pane(place)).stdout)

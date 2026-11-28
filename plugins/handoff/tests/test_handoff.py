@@ -2177,6 +2177,9 @@ esac
             self.assertEqual((self.said("type", "s4", "carry on"), self.said("read", "s4", "--box")), ((5, why), (5, why)))
             self.assertFalse(self.calls.exists(), f"{why}: nothing is typed")
         self.assertEqual(json.loads(self.reach("locate", "s4", "--json").stdout)["copy"], True)
+        self.assertEqual((self.said("type", "--place", "%7", "carry on"), self.said("read", "--place", "%7", "--box")),
+                         ((5, "copy mode"), (5, "copy mode")), "a place given by its id is asked for its copy mode")
+        self.assertFalse(self.calls.exists())
         self.assertEqual(self.said("type", "s4", "--how", "line", "typed anyway"), (0, "%7"))
         # no such session, two of one name, one outside tmux, a call that is wrong
         self.assertEqual(self.said("locate", "nobody"), (3, "flowkit-session: no session answers to 'nobody'"))
@@ -2302,9 +2305,13 @@ esac
         while time.time() < deadline and real("capture-pane", "-p").stdout.count("-x --dashes") < 2:
             time.sleep(0.05)
         self.assertEqual(self.said("read", "s4", "--rows", "1"), (0, "-x --dashes"))
+        self.assertEqual(self.said("read", "--place", pane, "--box"), (0, "free"))
         real("copy-mode")
         self.assertEqual((self.said("type", "s4", "not this"), self.said("read", "s4", "--box")), ((5, "copy mode"), (5, "copy mode")))
-        self.assertNotIn("not this", real("capture-pane", "-p").stdout)
+        self.assertEqual((self.said("type", "--place", pane, "nor this"), self.said("read", "--place", pane, "--box")),
+                         ((5, "copy mode"), (5, "copy mode")))
+        shown = real("capture-pane", "-p").stdout
+        self.assertFalse("not this" in shown or "nor this" in shown, shown)
 
     def claim(self, *args, by="spill"):
         return self.said("claim", "s4", "--by", by, *args)

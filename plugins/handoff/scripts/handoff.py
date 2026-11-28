@@ -1723,7 +1723,7 @@ def session_cmd(argv):
     at = TMUX
     try:
         if placed:
-            row, found = None, backend.Place(opts["--place"], False, None)
+            row, found = None, at.place(opts["--place"])
         else:
             rows = session_named(words[0])
             if len(rows) != 1:

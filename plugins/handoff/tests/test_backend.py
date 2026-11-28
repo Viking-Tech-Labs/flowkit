@@ -112,6 +112,14 @@ class TmuxBackend(Case):
             self.assertIsNone(self.t.locate(pid=pid))
         self.assertIsNone(self.t.locate(sid=SID, name="st-report"), "a pane is found by the process alone")
 
+    def test_a_place_given_by_its_id_is_asked_for_its_copy_mode(self):
+        self.world(["100 %1 0", "200 %2 1"], [])
+        P = self.b.Place
+        self.assertEqual([self.t.place(pane) for pane in ("%1", "%2", "%9")],
+                         [P("%1", False, None), P("%2", True, None), P("%9", False, None)], "one tmux does not list is in none")
+        self.assertEqual(self.calls(), [PANES] * 3)
+        self.assertEqual(self.b.Backend().place("x"), P("x", False, None), "a backend with no copy mode")
+
     def test_one_finder_reads_the_panes_once_for_any_number_of_sessions(self):
         self.world(["100 %1 0", "200 %2 0"], [(101, 100), (201, 200)])
         find = self.t.finder()
@@ -376,7 +384,8 @@ class Both(Case):
     def test_the_two_backends_answer_the_same_requests(self):
         requests = sorted(name for name, value in vars(self.b.Backend).items() if inspect.isfunction(value))
         self.assertEqual(requests, ["available", "bottom", "close", "draft", "escape", "here", "label", "last_input",
-                                    "locate", "open", "parked", "pick", "places", "plan", "screen", "story", "target", "type"])
+                                    "locate", "open", "parked", "pick", "place", "places", "plan", "screen", "story",
+                                    "target", "type"])
         for backend in (self.b.TMUX, self.b.BACKGROUND):
             for name in requests:
                 self.assertEqual(inspect.signature(getattr(backend, name)), inspect.signature(getattr(self.b.Backend(), name)),
