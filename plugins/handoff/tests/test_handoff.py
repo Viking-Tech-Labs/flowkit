@@ -2351,11 +2351,12 @@ esac
         with mock.patch.dict(os.environ, self.env, clear=True):
             handoff = self.module()
             row = {"sessionId": self.SID, "pid": self.pid}
-            self.assertTrue(handoff.limit_take(self.SID), "the waiter's word that it types")
+            at = self.record()["at"]
+            self.assertTrue(handoff.limit_take(self.SID, at), "the waiter's word that it types")
             self.assertEqual(handoff.session_claim(row, "spill", 15, 0), (5, "flowkit is typing its continue"))
             handoff.retry_set(self.SID, typing=time.time() - handoff.TYPING - 1)  # a waiter that died over it
             self.assertEqual(handoff.session_claim(row, "spill", 15, 0)[0], 0)
-            self.assertFalse(handoff.limit_take(self.SID), "claimed: the waiter does not type")
+            self.assertFalse(handoff.limit_take(self.SID, at), "claimed: the waiter does not type")
             self.assertNotIn("typing", {k for k, v in self.record().items() if v and k == "typing" and v > time.time() - 5})
         for n in range(8):  # the two as processes of their own, the claim sent around the moment the continue is due
             self.limit_setup(reset=time.time() + 0.3)
@@ -2367,6 +2368,74 @@ esac
             self.assertNotEqual(code == 0, typed, f"round {n}: claim said {text!r}, typed: {typed}")
             if code:
                 self.assertRegex(text, r"^flowkit continued it at \d\d:\d\d$")
+
+    def test_limit_a_claim_waits_out_the_record_of_the_stop_before(self):
+        """A continued session that stops on the limit again: a hook's claim runs beside flowkit's own
+        hook, and until that has written the new stop the record still says `continued`."""
+        self.limit_setup(reset=time.time() + 0.3)
+        self.api_error("rate_limit")
+        self.assertIn("usage limit", self.sent())
+        self.rec_when(lambda r: r.get("state") == "continued")
+        began = time.time()
+        code, text = self.claim("--wait", "0.6")
+        self.assertEqual((code, text[:24]), (5, "flowkit continued it at "), "no new stop: said once the wait is over")
+        self.assertGreaterEqual(time.time() - began, 0.6)
+        claim = subprocess.Popen([str(SESSION_BIN), "claim", "s4", "--by", "spill", "--wait", "8"], env=self.env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (claim.kill(), claim.wait()))
+        time.sleep(0.5)
+        with self.transcript.open("a") as f:  # the stop the claim is for, its reset far ahead
+            f.write(json.dumps({"type": "assistant", "timestamp": self.iso(time.time()), "isApiErrorMessage": True,
+                                "error": "rate_limit", "quotaLimits": {"status": "rejected", "resetsAt": time.time() + 600},
+                                "message": {"model": "<synthetic>", "content": [
+                                    {"type": "text", "text": "You've hit your weekly limit"}]}}) + "\n")
+        self.api_error("rate_limit")
+        out, err = claim.communicate(timeout=10)
+        self.assertEqual((claim.returncode, out[:14]), (0, "claimed until "), out + err)
+        self.assertEqual(self.record()["claim"]["by"], "spill")
+        time.sleep(0.5)
+        self.assertEqual(self.calls.read_text().count("Enter"), 1, "the one continue of the stop before")
+
+    def test_limit_a_release_takes_off_the_claim_that_is_there_when_it_has_the_lock(self):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.limit_setup(reset=time.time() + 600)
+            self.api_error("rate_limit")
+            self.rec_when(lambda r: r.get("state") == "waiting")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            handoff = self.module()
+            row = {"sessionId": self.SID, "pid": self.pid}
+            self.assertEqual(handoff.session_claim(row, "spill", 15, 0)[0], 0)
+            lock, renewed = handoff.retry_lock, []
+
+            @contextlib.contextmanager
+            def late():  # the same name claims again just before the release gets the lock
+                if not renewed:
+                    renewed.append(None)
+                    renewed[0] = handoff.session_claim(row, "spill", 30, 0)[0]
+                with lock():
+                    yield
+
+            release = lambda: handoff.session_cmd(["release", "s4", "--by", "spill"])
+            with mock.patch.object(handoff, "retry_lock", late), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual((release(), out.getvalue(), renewed), (0, "released\n", [0]))
+            self.assertNotIn("claim", self.record(), "released: nothing keeps the waiter off the stop")
+            with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual((release(), out.getvalue()), (3, ""), "nothing came off: not said to be released")
+            self.assertEqual(err.getvalue(), "flowkit-session: spill holds no claim on s4\n")
+
+    def test_limit_the_waiter_takes_only_the_stop_it_planned(self):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.limit_setup(reset=time.time() + 600)
+            self.api_error("rate_limit")
+            at = self.rec_when(lambda r: r.get("state") == "waiting")["at"]
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            handoff = self.module()
+            handoff.retry_set(self.SID, at=at + 1)  # the session stopped again between the waiter's look and its take
+            self.assertFalse(handoff.limit_take(self.SID, at), "a newer stop: the planned one's line is not typed")
+            self.assertFalse(self.record().get("typing"))
+            self.assertTrue(handoff.limit_take(self.SID, at + 1))
+            handoff.retry_set(self.SID, handled=at + 1, typing=None)
+            self.assertFalse(handoff.limit_take(self.SID, at + 1), "handled since")
 
     NOTICE = ("Remote Control disconnected \u2014 signed-in claude.ai account or organization changed on this machine "
               "\u2014 run /remote-control to start a session for the current account")

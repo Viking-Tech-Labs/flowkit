@@ -1349,14 +1349,15 @@ def claimed(rec, now=None):
         else None
 
 
-def limit_take(sid):
+def limit_take(sid, at):
     """The waiter's word that it types its continue now, written under the records' lock, where a
     claim is written too: False when one holds, and then nothing is typed. So of a waiter and a
-    claimer that come for one stop at the same moment only one types."""
+    claimer that come for one stop at the same moment only one types. False too when the record is
+    no longer the stop the waiter planned (`at`): a newer one, or one handled since."""
     took = []
 
     def change(rec):
-        if rec is None or claimed(rec):
+        if rec is None or claimed(rec) or rec.get("at") != at or rec.get("handled") == at:
             return None
         took.append(rec)
         return {**rec, "typing": time.time()}
@@ -1366,23 +1367,27 @@ def limit_take(sid):
 
 
 def limit_unclaim(sid, claim, said):
-    """A claim comes off its limit record: given back, or run out. One line says so, once per claim,
-    unless it was for a process the session no longer runs in."""
+    """A claim comes off its limit record: run out (`claim` is the claim as the waiter read it) or
+    given back (the name of its holder). Which one is on the record is looked at under the records'
+    lock, so a claim renewed since is left by the first and taken by the second. One line says so,
+    once per claim, unless it was for a process the session no longer runs in. True when one came
+    off."""
     tell = []
 
     def change(rec):
-        if rec is None or rec.get("claim") != claim:
+        held = rec.get("claim") if rec else None
+        if not isinstance(held, dict) or claim != (held.get("by") if isinstance(claim, str) else held):
             return None
         del rec["claim"]
-        if claim.get("pid") == rec.get("pid") and once(rec, f"unclaim {claim.get('at')}"):
+        if held.get("pid") == rec.get("pid") and once(rec, f"unclaim {held.get('at')}"):
             tell.append(rec)
         return rec
 
-    retry_update(sid, change)
+    came = retry_update(sid, change) is not None
     if tell:
         retry_log(tell[0], f"> limit {tell[0]['name']} · {time.strftime('%Y-%m-%d %H:%M')} · {said}: flowkit's waiter has "
                   "it again")
-    return bool(tell)
+    return came
 
 
 def limit_lock(sid):
@@ -1462,7 +1467,8 @@ def limit_wait(sid):
                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 time.sleep(nap if due is None else min(nap, due - now))
                 continue
-            if not limit_take(sid):  # claimed in this moment: the next pass stands down
+            if not limit_take(sid, at):  # claimed in this moment, or no longer the stop planned: the next pass sees which
+                time.sleep(nap)
                 continue
             when = time.strftime("%H:%M", time.localtime(at))
             since = "it has reset"
@@ -1599,8 +1605,10 @@ not continue it meanwhile`.
 Exit 5 when it is not yours to take, with one line: `flowkit continued it at <HH:MM>`, `flowkit is
 typing its continue`, or `claimed by <other> until <HH:MM>`. Exit 3 when no usage-limit stop is
 recorded for the session. A StopFailure hook of your own runs beside flowkit's, which writes that
-record: `claim` waits --wait seconds for it (5 without it). Of a claim and flowkit's continue that
-come at the same moment exactly one wins: a claim that printed `claimed` means nothing was typed.
+record: `claim` waits --wait seconds for it (5 without it), and as long before it says that flowkit
+continued the session or is typing, which until then may be said of the stop before this one. Of a
+claim and flowkit's continue that come at the same moment exactly one wins: a claim that printed
+`claimed` means nothing was typed.
 """,
     "release": """flowkit-session release <session> --by <name>
 
@@ -1643,7 +1651,9 @@ def session_box(at, found):
 def session_claim(row, by, minutes, wait):
     """`flowkit-session claim`: the claim goes into the limit record of the session's live process,
     under the records' lock, unless flowkit's waiter has typed its continue for this stop, is typing
-    it now, or another name holds the stop. (exit code, the line to print)."""
+    it now, or another name holds the stop. A record that says continued may still be the stop
+    before this one, until flowkit's own hook has written the new one: like the typing it is the
+    answer only once `wait` is over. (exit code, the line to print)."""
     sid, deadline = row["sessionId"], time.time() + wait
     clock = lambda at: time.strftime("%H:%M", time.localtime(at or 0))
     while True:
@@ -1657,7 +1667,7 @@ def session_claim(row, by, minutes, wait):
             if held and held.get("by") != by:
                 out.update(final=f"claimed by {held.get('by')} until {clock(held['until'])}")
             elif rec.get("handled") == rec.get("at") and rec.get("state") == "continued":
-                out.update(final=f"flowkit continued it at {clock(rec.get('continued_at'))}")
+                out.update(busy=f"flowkit continued it at {clock(rec.get('continued_at'))}")
             elif now - (rec.get("typing") or 0) < TYPING:
                 out.update(busy="flowkit is typing its continue")
             else:
@@ -1729,12 +1739,9 @@ def session_cmd(argv):
                       file=sys.stdout if said else sys.stderr)
                 return code
             if verb == "release":
-                rec = retry_record(row["sessionId"]) or {}
-                claim = rec.get("claim") if isinstance(rec.get("claim"), dict) and rec["claim"].get("by") == opts["--by"] else None
-                if claim is None:
+                if not limit_unclaim(row["sessionId"], opts["--by"], f"{opts['--by']} gave it back"):
                     print(f"flowkit-session: {opts['--by']} holds no claim on {row.get('name') or row['sessionId']}", file=sys.stderr)
                     return 3
-                limit_unclaim(row["sessionId"], claim, f"{opts['--by']} gave it back")
                 print("released")
                 return 0
             at, found = session_place(row)

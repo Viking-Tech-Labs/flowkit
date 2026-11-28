@@ -190,7 +190,9 @@ Of a claim and the waiter's continue that come at the same moment exactly one wi
 it exits 5 with `flowkit continued it at <HH:MM>`, `flowkit is typing its continue` or `claimed by
 <other> until <HH:MM>` when the session is not yours to take, and 3 when no usage-limit stop is
 recorded for it. Your `StopFailure` hook runs beside flowkit's, which writes that record, so
-`claim` waits up to `--wait` seconds for it (5 without it).
+`claim` waits up to `--wait` seconds for it (5 without it), and as long before it answers `flowkit
+continued it` or `flowkit is typing its continue`: a continued session that stops again keeps the
+record of the stop before until flowkit's hook has written the new one.
 
 The shape of a hook that uses it (a `StopFailure` hook with the matcher `rate_limit`; keep the
 hook itself short and do the work in a process it starts):
