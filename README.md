@@ -163,14 +163,22 @@ a release in one of three ways:
 
 ## Your tracker
 
-flowkit names no issue tracker or code host: add your own MCP servers or skills for Jira, Linear,
+flowkit names no issue tracker: add your own MCP servers or skills for Jira, Linear,
 GitHub Issues or whatever you use, and a task that mentions a story or ticket reaches it through
-those.
+those. Its pipeline watch knows two code hosts, GitLab (through `glab`) and GitHub (through `gh`),
+by the URL of the merge request or pull request it is given; any other pipeline is watched with a
+command of yours ([`handoff`](plugins/handoff/README.md), "Watches").
 
 ## Maintaining
 
 Ideas, bugs and pull requests: [`CONTRIBUTING.md`](CONTRIBUTING.md), which also says what never
 goes into this public repository.
+
+A change lands through a pull request, the maintainer's own too: a branch, a pull request against
+`main`, the `tests` and `gitleaks` checks green on it, the merge, and then the release, made on
+`main`. With the `handoff` plugin the checks are watched, not waited for (`flowkit-watch add
+--story <slug> --pr <pull request URL>`: a first red starts one fix slice). Only a release's
+version commit reaches `main` without a pull request.
 
 A release is: change the files, bump `version` in that plugin's `.claude-plugin/plugin.json`
 (only there; do not also set it in `marketplace.json`, the two would disagree), tag, push. With a
@@ -179,7 +187,8 @@ without a bump reaches nobody.
 
 `scripts/test.sh` runs every plugin's unit tests and the scripts' own (`scripts/test.sh handoff`
 runs one suite); the `tests` workflow runs it on each push and pull request, on macOS and Linux.
-`scripts/release.py <plugin> patch|minor` does the release from the branch the work is on: it
+`scripts/release.py <plugin> patch|minor` does the release from the branch it is run on, which is
+`main` once the pull request has merged (`git switch main && git pull --ff-only` first): it
 refuses a dirty tree, a branch behind its upstream, a `main` it cannot fast-forward, an existing
 tag, a tag of the current version that never reached `origin`, red tests and tests that leave
 changes; then it bumps the plugin's `version` alone, commits that file as

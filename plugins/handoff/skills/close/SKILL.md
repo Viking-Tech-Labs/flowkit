@@ -221,8 +221,10 @@ other session still uses them, and ends with what is ready for the user to try i
       step.
     It arms what was pushed (`@{u}`), not `HEAD`, so the commits of steps 2 to 4 change nothing,
     and it asks the forge nothing, so the close never waits for the network. A slice that pushed
-    in two repos registers one watch per merge request, each from its own tree. A push with no
-    merge request is watched as `--ref <branch>`; a pipeline that is not GitLab's as
+    in two repos registers one watch per merge request, each from its own tree. A GitHub pull
+    request's URL goes to the same `--mr` (the watch reads the host from the URL and asks through
+    `gh`). A push with no merge request is watched as `--ref <branch>`; a pipeline that is
+    neither GitLab's nor GitHub's as
     `--check '<command>' --name <name>` (exit 0 green, 1 red, 2 still running). A fix slice a
     watch started registers the next watch the same way, with no flags: it keeps those of the
     watch before it.
@@ -234,8 +236,8 @@ other session still uses them, and ends with what is ready for the user to try i
     red, a pipeline that never starts and a broken watch are reported to the user there. A merge
     (other than `merge`'s own auto-merge), a release and a message to a person still wait for
     the user's word.
-    When `add` fails (exit 1, the reason on stderr: no `glab` on the PATH, not a merge request's
-    URL, no upstream): say why under OPEN, put the pipeline's link under FOR ME as the step to
+    When `add` fails (exit 1, the reason on stderr: no `glab` on the PATH, or `gh` for a pull
+    request, not a merge request's or a pull request's URL, no upstream): say why under OPEN, put the pipeline's link under FOR ME as the step to
     look at, and step 10 writes `Next: none`. Never wait for the pipeline in its place.
 10. **Record the close in the story file**, as the last tool call before the reply. The story's
     slug is the `Story:` of the prompt this session started from (started from a command: of the

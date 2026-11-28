@@ -1,8 +1,8 @@
-The brief of a slice a watch starts by itself (watch.py): the fix slice of a merge request's first
-red, or the slice that merges a base in once that base is green again. A `=== <name>` line starts
-a block, `{word}` is filled in; the prompt is head, then red or base, one of tree, worktree and
-checkout, merge when the chain ends with one, then tail. The header keeps the shape of
-skills/close/prompt-template.md.
+The brief of a slice a watch starts by itself (watch.py): the fix slice of a merge request's or a
+pull request's first red, or the slice that merges a base in once that base is green again. A
+`=== <name>` line starts a block, `{word}` is filled in; the prompt is head, then red or base, one
+of tree, worktree and checkout, merge when the chain ends with one, then tail. The header keeps
+the shape of skills/close/prompt-template.md.
 
 === head
 Repo: {tree}   Session: {session}   Story: {story}
@@ -14,12 +14,12 @@ A watch started you: nobody approved this launch, so mark what you decide "(auto
 drafted this prompt: where `/handoff:close` finds a ladder, this session has no row yet.
 
 === red
-{url} is red at {sha}: {what} ({link}). You are the one fix slice a watch starts for this merge
-request; a second red is reported to the user.
+{url} is red at {sha}: {what} ({link}). You are the one fix slice a watch starts for this {request};
+a second red is reported to the user.
 
 Failed jobs:
 {jobs}
-A job's log: `glab ci trace <job id> -R {project}`.
+A job's log: `{log}`.
 
 Decide which of the three it is, and do only that:
 1. The branch caused it: fix it, validate, commit on top (never a rebase, an amend or a force-push:
@@ -27,7 +27,7 @@ Decide which of the three it is, and do only that:
    `{push}`, then `/handoff:close`, which registers the watch again from this tree
    (`flowkit-watch add --story {story} --mr {url}`). With a ladder, this grades {by} `rework`.
 2. Flaky (the job fails by itself, not by the branch): retry it once
-   (`glab ci retry <job id> -R {project}`), change nothing, and close with the watch registered
+   (`{retry}`), change nothing, and close with the watch registered
    again the same way.
 3. Red that {target} has already, or that is not this branch's doing: change nothing, register
    nothing, and close with it under FOR ME and `Next: none`.
@@ -38,7 +38,7 @@ Merge it in and push, nothing else:
 1. `git fetch origin {base}`, then `git merge origin/{base}` (a merge, never a rebase or a
    force-push); solve what conflicts, validate, commit.
 2. Push with `{push}`, then `/handoff:close`, which registers the watch again from this tree
-   (`flowkit-watch add --story {story} --mr {url}`). A second red of this merge request is
+   (`flowkit-watch add --story {story} --mr {url}`). A second red of this {request} is
    reported to the user.
 
 === tree
