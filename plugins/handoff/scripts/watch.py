@@ -17,8 +17,10 @@ docs after the push. It prints `watching <name> · …`; the name is unique per 
 then `…#2`), so a section recorded for one arm never stands for the next. Kinds: `gitlab-mr` (the
 MR's head pipeline, or the repo's `check = <command>` of capacity.conf), `gitlab-ref` (a branch's
 pipeline at a sha) and `command` (exit 0 green, 1 red, 2 pending, anything else an error; its last
-stdout line is the summary). A head that moved re-targets the arm; green, red and every answer that
-ends a watch become a section in the story file through `handoff.py record`.
+stdout line is the summary). `--mr` (or `--pr`) takes a GitHub pull request's URL too: `github-pr`
+is the same watch asked through `gh` (the checks of the head as GitHub rolls them up), and a ref of
+a github.com repository is a `github-ref`. A head that moved re-targets the arm; green, red and
+every answer that ends a watch become a section in the story file through `handoff.py record`.
 
 An MR's first red starts one fix slice (fix-brief.md, through `flowkit-spawn --from-watch`): in the
 registered tree when it is free and still on the MR's branch, in a repository of one checkout
@@ -29,7 +31,8 @@ is red waits for it (`waiting-base`). On green `--on-green-run` runs a command i
 `--on-green` starts a prompt (in --repo, as --on-green-name, default the prompt file's name).
 
 State: ${CLAUDE_CONFIG_DIR:-~/.claude}/flowkit/watches/<name>.json (one arm), <name>.lock, and
-poller.pid, whose mtime is the poller's heartbeat; launched/<session>.log is the output of a launch
+poller.pid, whose mtime is the poller's heartbeat (poller.kinds: the kinds of arm that poller
+asks); launched/<session>.log is the output of a launch
 the watch made. Events go to capacity's log.jsonl as `watch`; capacity's status.json lists the open
 arms (`watches`), rewritten whenever one opens, changes state or goes.
 """
@@ -70,7 +73,20 @@ SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")  # a session name flowkit-
 RUNNING = {"created", "waiting_for_resource", "preparing", "pending", "running", "scheduled"}
 SETTLED = {"mergeable", "ci_still_running", "ci_must_pass", "checking", "unchecked", "preparing", "approvals_syncing"}
 MR_URL = re.compile(r"^https?://[^/\s]+/(.+?)/-/merge_requests/(\d+)")
+PR_URL = re.compile(r"^https?://([^/\s]+)/([^/\s]+/[^/\s]+)/pull/(\d+)")
 REMOTE = re.compile(r"^(?:https?://[^/]+/|(?:ssh://)?[^/@]+@[^:/]+[:/])(.+?)(?:\.git)?/?$")
+HOST = re.compile(r"^(?:[a-z+]+://)?(?:[^/@]+@)?([^:/]+)")  # a remote URL's host
+KINDS = ("gitlab-mr", "gitlab-ref", "command", "github-pr", "github-ref")  # a poller of 0.17.0 or older asks the first three
+REQUESTS = ("gitlab-mr", "github-pr")  # a merge request or a pull request: what a red starts a fix slice for
+FAILED = {"FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ERROR"}  # a GitHub check that a fix slice can answer
+STOPPED = ("CANCELLED", "ACTION_REQUIRED", "STALE")  # one that only its user can
+# one ask for a GitHub arm: a commit's checks as GitHub rolls them up and, for a pull request, its state
+QUERY = """query($owner:String!,$name:String!,$oid:GitObjectID!%s){repository(owner:$owner,name:$name){%s
+object(oid:$oid){...on Commit{statusCheckRollup{state contexts(first:100){nodes{__typename
+...on CheckRun{name conclusion startedAt detailsUrl checkSuite{workflowRun{workflow{name}}}}
+...on StatusContext{context state targetUrl createdAt}}}}}}}}"""
+PULL = ("pullRequest(number:$number){state headRefOid baseRefName mergeable mergeStateStatus reviewDecision "
+        "autoMergeRequest{enabledAt} mergeCommit{oid}}")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._!#@+-]*$")
 SCRUB = ("CLAUDE_PID", "TMUX_PANE", "FLOWKIT_TARGET")  # with CLAUDE_CODE_*: what would pass the poller off as a session, and where another arm's ring went
 SHOWN = ("state", "phase", "sha", "fix", "waits")  # what capacity's status.json says of an open arm, besides its name
@@ -282,6 +298,11 @@ def prompt_of(session):
     return copies[-1] if copies else None
 
 
+def github(arm):
+    """Whether an arm asks GitHub, through gh; the other merge requests and refs ask GitLab, through glab."""
+    return arm["kind"].startswith("github")
+
+
 def named(name, base):
     """Whether name is one of base's arms: base, base#2, …"""
     return name == base or str(name).startswith(f"{base}#") and str(name)[len(base) + 1:].isdigit()
@@ -309,11 +330,15 @@ def add(args):
     upstream = git(tree, "rev-parse", "@{u}")
     check = old = None
     if args.mr:
-        m = MR_URL.match(args.mr)
-        if not m:
-            fail(f"--mr takes a merge request's URL (…/-/merge_requests/<iid>), not {args.mr!r}")
-        target = {"kind": "gitlab-mr", "project": m.group(1), "iid": int(m.group(2)), "url": m.group(0)}
-        base = args.name or f"{repo_dir}!{m.group(2)}"
+        m, pr = MR_URL.match(args.mr), PR_URL.match(args.mr)
+        if m:
+            target = {"kind": "gitlab-mr", "project": m.group(1), "iid": int(m.group(2)), "url": m.group(0)}
+        elif pr:
+            target = {"kind": "github-pr", "project": pr.group(2), "iid": int(pr.group(3)), "url": pr.group(0), "host": pr.group(1)}
+        else:
+            fail("--mr takes a merge request's URL (…/-/merge_requests/<iid>) or a pull request's (…/pull/<number>), "
+                 f"not {args.mr!r}")
+        base = args.name or f"{repo_dir}!{target['iid']}"
         old = next((a for a in arms() if a["state"] == "fixing" and a["story"] == story and a["base"] == base
                     and all(a.get(k) == v for k, v in target.items())), None)
         if old and branch != old["branch"]:
@@ -326,13 +351,15 @@ def add(args):
         sha = upstream
         check = (cap.repo_section(cap.load_config(), tree) or {}).get("check")
     elif args.ref:
-        remote = REMOTE.match(git(tree, "remote", "get-url", "origin"))
+        origin = git(tree, "remote", "get-url", "origin")
+        remote, host = REMOTE.match(origin), HOST.match(origin)
         project = args.project or (remote.group(1) if remote else "")
         sha = args.sha or git(tree, "rev-parse", f"refs/remotes/origin/{args.ref}")
         if not project or not sha:
             fail(f"--ref needs a project and a sha: {tree} has no origin/{args.ref} to take them from "
                  "(--project, --sha)")
-        target = {"kind": "gitlab-ref", "project": project, "ref": args.ref}
+        target = {"kind": "github-ref" if host and host.group(1) == "github.com" else "gitlab-ref", "project": project,
+                  "ref": args.ref}
         base = args.name or f"{repo_dir}@{args.ref}"
     else:
         if not args.name:
@@ -340,9 +367,10 @@ def add(args):
         target, base, sha = {"kind": "command", "command": args.check}, args.name, upstream
     if not NAME.match(base):
         fail(f"a watch's name is letters, digits and . _ ! # @ + -: {base!r}")
-    glab = shutil.which("glab") if target["kind"] != "command" else None
-    if target["kind"] != "command" and not glab:
-        fail("glab is not on the PATH: a GitLab watch asks through it")
+    tool = "" if target["kind"] == "command" else "gh" if github(target) else "glab"
+    found = shutil.which(tool) if tool else None
+    if tool and not found:
+        fail(f"{tool} is not on the PATH: a {'GitHub' if tool == 'gh' else 'GitLab'} watch asks through it")
     on_green = {"run": args.on_green_run or "", "prompt": "", "repo": "", "name": ""}
     if args.on_green:
         prompt = os.path.abspath(args.on_green)
@@ -358,7 +386,8 @@ def add(args):
     me = {"sessionId": args.session, "name": ""} if args.session else cap.self_session(None)
     fresh = {**target, "base": base, "story": story, "sha": sha, "tree": tree, "repo": repo, "check": check,
              "branch": branch, "target": "",
-             "glab": os.path.abspath(glab) if glab else "", "until": args.until, "ready": args.ready,
+             "glab": os.path.abspath(found) if tool == "glab" else "", **({"gh": os.path.abspath(found)} if tool == "gh" else {}),
+             "until": args.until, "ready": args.ready,
              "by": {"session": me["sessionId"], "name": me["name"], "left": args.left or ""}, "where": where(), "tmux": tmux_target(),
              **header_of(prompt_of(me["name"])), "on_green": on_green, "worktree": "",
              "state": "pending", "phase": "pipeline", "armed": t, "targeted": t, "polled": None, "answer": "",
@@ -387,8 +416,7 @@ def add(args):
     took = pipeline_minutes(repo) if queued_tests(arm) else None
     testq(arm, t, "building", t + took * 60 if took else None)
     print(" · ".join(filter(None, [f"watching {arm['name']}", sha and f"sha {sha[:7]}", f"until {arm['until']}"])))
-    if poller() is None:
-        start()
+    ensure()
 
 
 def listing(as_json):
@@ -517,16 +545,110 @@ def merge_request(arm, t):
     return {**found, **more}
 
 
+def gh_api(arm, sha, number=None):
+    """GitHub's answer to QUERY, through `gh api graphql`: the repository, with the commit as
+    `object` and, for a number, its `pullRequest`."""
+    owner, _, name = arm["project"].partition("/")
+    query = QUERY % ((",$number:Int!", PULL) if number else ("", ""))
+    code, out, err = sh([arm["gh"], "api", "graphql", "--hostname", arm.get("host") or "github.com", "-f", f"query={query}",
+                         "-f", f"owner={owner}", "-f", f"name={name}", "-f", f"oid={sha}",
+                         *(["-F", f"number={number}"] if number else [])], arm["tree"])
+    if code != 0:
+        raise Broken(err or (out.strip().splitlines() or [f"gh exited {code}"])[-1])
+    try:
+        repo = json.loads(out)["data"]["repository"]
+    except (ValueError, KeyError, TypeError):
+        repo = None
+    if not isinstance(repo, dict):
+        raise Broken("gh api: the answer names no repository")
+    return repo
+
+
+def checks(arm, commit, what, link, on, t):
+    """A commit's checks, check runs and statuses alike, by GitHub's own roll-up of them. A red
+    carries its failed checks as jobs (id, name, stage, url: an Actions job's id, the workflow as
+    its stage); checks that were cancelled or wait for somebody are a report, as a cancelled
+    pipeline is."""
+    roll = commit.get("statusCheckRollup") if isinstance(commit, dict) else None
+    state = roll.get("state") if isinstance(roll, dict) else None
+    if not state:
+        if t - arm["targeted"] > NO_PIPELINE:
+            return answer("report", f"no checks for {on} after 15 min")
+        return answer("pending", "no checks yet")
+    if state == "SUCCESS":
+        return answer("green", f"{what} green", link=link)
+    if state not in ("FAILURE", "ERROR"):
+        return answer("pending", f"{what} {state.lower()}")
+    newest = {}  # a job run again is listed with its older tries: of one workflow run the newest counts
+    nodes = [n for n in (roll.get("contexts") or {}).get("nodes") or [] if isinstance(n, dict)]
+    for n in sorted(nodes, key=lambda n: n.get("startedAt") or n.get("createdAt") or ""):
+        url = n.get("detailsUrl") or n.get("targetUrl") or ""
+        run, job = re.search(r"/actions/runs/(\d+)", url), re.search(r"/job/(\d+)", url)
+        flow = (((n.get("checkSuite") or {}).get("workflowRun") or {}).get("workflow") or {}).get("name") or ""
+        name = n.get("name") or n.get("context") or ""
+        newest[flow, name, run and run.group(1)] = (n.get("conclusion") or n.get("state") or "", {
+            "id": job.group(1) if job else "", "name": name, "stage": flow, "url": url})
+    jobs = [job for end, job in newest.values() if end in FAILED]
+    stopped = next((end for end in STOPPED if end in {end for end, _ in newest.values()}), "")
+    if stopped and not jobs:
+        return answer("report", f"{what} {stopped.lower().replace('_', ' ')}", link=link)
+    return answer("red", f"{what} red", link=link, jobs=jobs)
+
+
+def checks_of(arm, ref, sha, t):
+    """A ref's checks at a sha: pipeline_of() for GitHub."""
+    commit = gh_api(arm, sha).get("object")
+    return checks(arm, commit, f"{ref} checks", f"https://{arm.get('host') or 'github.com'}/{arm['project']}/commit/{sha}/checks",
+                  f"{sha[:7]} on {ref}", t)
+
+
+def pulling(arm, pr, more):
+    """merging() for a pull request. GitHub does not say whether an auto-merge was cancelled or
+    never set, and many repositories allow none: a green pull request with auto-merge off waits
+    for somebody's merge, with a line, where a merge request's cancelled one ends the watch."""
+    status = pr.get("mergeStateStatus") or ""
+    if pr.get("mergeable") == "CONFLICTING" or status == "DIRTY":
+        why = "merge blocked: conflict"
+        return answer("report" if arm["blocked"] == why else "pending", why, blocked=why, **more)
+    text = "waiting for approval" if pr.get("reviewDecision") == "REVIEW_REQUIRED" else \
+        "waiting for the merge: changes requested" if pr.get("reviewDecision") == "CHANGES_REQUESTED" else \
+        "waiting for the merge: auto-merge is off" if not pr.get("autoMergeRequest") else \
+        "" if status in ("", "CLEAN", "UNSTABLE", "HAS_HOOKS", "UNKNOWN") else f"waiting for the merge: {status.lower()}"
+    return answer("pending", text or "waiting for the merge", note=text, **more)
+
+
+def pull_request(arm, t):
+    """merge_request() for a GitHub pull request, in one ask: its state and the checks of the armed sha."""
+    repo = gh_api(arm, arm["sha"], arm["iid"])
+    pr = repo.get("pullRequest")
+    if not isinstance(pr, dict) or not pr.get("state"):
+        raise Broken("gh api: not a pull request")
+    more = {"target": pr.get("baseRefName") or ""}
+    head = pr.get("headRefOid") or arm["sha"]
+    if pr["state"] == "MERGED":
+        return answer("merged", "PR merged", head=head, **more, merged_sha=(pr.get("mergeCommit") or {}).get("oid") or head)
+    if pr["state"] != "OPEN":
+        return answer("report", f"PR {pr['state'].lower()}", **more)
+    if head != arm["sha"]:  # someone pushed: the armed sha is no longer the head
+        return answer("retarget", f"retarget {head[:7]}", sha=head, **more)
+    if arm["phase"] == "merge":
+        return pulling(arm, pr, more)
+    if arm["check"]:
+        return {**command(arm, arm["check"]), **more}
+    return {**checks(arm, repo.get("object"), "checks", f"{arm['url']}/checks", arm["sha"][:7], t), **more}
+
+
 def ask(arm, t):
     if arm["kind"] == "command":
         return command(arm, arm["command"])
-    if arm["kind"] == "gitlab-ref":
-        return pipeline_of(arm, arm["ref"], arm["sha"], t)
+    of = checks_of if github(arm) else pipeline_of
+    if arm["kind"].endswith("-ref"):
+        return of(arm, arm["ref"], arm["sha"], t)
     if arm["phase"] != "target":
-        return merge_request(arm, t)
+        return (pull_request if github(arm) else merge_request)(arm, t)
     if not arm["target"]:
         raise Broken("the MR named no target branch")
-    found = pipeline_of(arm, arm["target"], arm["merged_sha"], t)
+    found = of(arm, arm["target"], arm["merged_sha"], t)
     if found["is"] == "pending":
         return found
     # a red target is reported, never fixed: a fix there is a new MR
@@ -596,7 +718,7 @@ def settle(arm, found, t):
             if why:
                 note(new, f"merged; {new['tree']} left on {new['branch']}: {why}", t)
             new = commit(new, back=back) or new
-    elif kind == "red" and arm["kind"] == "gitlab-mr" and arm["phase"] == "pipeline":
+    elif kind == "red" and arm["kind"] in REQUESTS and arm["phase"] == "pipeline":
         red(arm, found, keep, t)
         return
     else:
@@ -684,8 +806,10 @@ def finish(arm, t):
     out = arm["outcome"]
     green = out["kind"] == "green"
     if green and arm["ready"] and "ready" not in arm["did"]:
-        code, _, err = sh([arm["glab"], "mr", "update", str(arm["iid"]), "--ready"], arm["tree"], timeout=60)
-        arm = commit(arm, did=arm["did"] + ["ready"], ready_error="" if code == 0 else err or f"glab exited {code}")
+        argv = [arm["gh"], "pr", "ready", arm["url"]] if github(arm) else [arm["glab"], "mr", "update", str(arm["iid"]), "--ready"]
+        code, _, err = sh(argv, arm["tree"], timeout=60)
+        arm = commit(arm, did=arm["did"] + ["ready"],
+                     ready_error="" if code == 0 else err or f"{'gh' if github(arm) else 'glab'} exited {code}")
         if arm is None:
             return
     if green and arm["on_green"]["run"] and "run" not in arm["did"]:
@@ -779,11 +903,12 @@ def section(arm, t):
         out = arm["outcome"]
     if arm["state"] != "fixing" and out["kind"] == "green":
         done.append(out["what"])
+        mr = "PR" if github(arm) else "MR"
         if "ready" in arm["did"] and arm["ready_error"]:
-            done.append("MR still Draft")
-            for_me.append(f"take the MR out of Draft, the watch could not ({arm['ready_error']}): {arm['url']}")
+            done.append(f"{mr} still Draft")
+            for_me.append(f"take the {mr} out of Draft, the watch could not ({arm['ready_error']}): {arm['url']}")
         elif "ready" in arm["did"]:
-            done.append("MR ready")
+            done.append(f"{mr} ready")
         if arm.get("back"):
             done.append(arm["back"])
         on, ran = arm["on_green"], arm.get("ran")
@@ -880,9 +1005,12 @@ def reds(arm):
                and named(ev.get("name"), arm["base"]) for ev in cap.events())
 
 
-def failed(arm, pipeline):
-    """A pipeline's failed jobs (id, name, stage, url); none when they cannot be asked: a
-    repository's own check, glab down."""
+def failed(arm, red):
+    """A red's failed jobs (id, name, stage, url): a pull request's came with its answer, a
+    pipeline's are asked for; none when they cannot be asked: a repository's own check, glab down."""
+    if "jobs" in red:
+        return red["jobs"]
+    pipeline = red.get("pipeline")
     if not pipeline or arm["check"]:
         return []
     try:
@@ -899,11 +1027,12 @@ def red(arm, found, keep, t):
     waits for it (`waiting-base`). A second red is the user's: a section, no slice."""
     link = found.get("link") or ""
     if reds(arm):
-        names = ", ".join(job["name"] for job in failed(arm, found.get("pipeline")))
+        names = ", ".join(job["name"] for job in failed(arm, found))
         close(arm, "red", "red again after one fix" + (f": {names}" if names else ""), t, link=link, **keep)
         return
-    was = {"what": found["text"], "link": link, "pipeline": found.get("pipeline"), "at": t}
-    base = next((a for a in arms() if a["name"] != arm["name"] and a["kind"] == "gitlab-mr" and a["project"] == arm["project"]
+    was = {"what": found["text"], "link": link, "pipeline": found.get("pipeline"), "at": t,
+           **({"jobs": found["jobs"]} if "jobs" in found else {})}
+    base = next((a for a in arms() if a["name"] != arm["name"] and a["kind"] == arm["kind"] and a["project"] == arm["project"]
                  and a["branch"] == keep["target"] and a["state"] in ("fixing", "waiting-base")), None)
     if base:
         new = commit(arm, **keep, state="waiting-base", red=was,
@@ -971,7 +1100,8 @@ def brief(arm, model, effort):
         elif name:
             blocks[name].append(line)
     f, was = arm["fix"], arm["red"]
-    jobs = failed(arm, was.get("pipeline"))
+    jobs = failed(arm, was)
+    hub = github(arm)
     try:
         story = story_file(arm["story"]).read_text(errors="replace")
     except OSError:
@@ -988,7 +1118,11 @@ def brief(arm, model, effort):
         "project": arm["project"], "target": arm["target"] or "the target branch", "branch": arm["branch"],
         "base": f.get("merge") or "", "why": f.get("why") or "",
         "push": f"git push origin HEAD:refs/heads/{arm['branch']}" if f["worktree"] else "git push",
-        "jobs": "\n".join(f"- {j['name']} ({j['stage']}, job {j['id']}): {j['url']}" for j in jobs)
+        "request": "pull request" if hub else "merge request",
+        "log": f"gh run view --job <job id> --log-failed -R {arm['project']}" if hub else f"glab ci trace <job id> -R {arm['project']}",
+        "retry": f"gh run rerun --job <job id> -R {arm['project']}" if hub else f"glab ci retry <job id> -R {arm['project']}",
+        "jobs": "\n".join(f"- {j['name']} ({j['stage']}, job {j['id']}): {j['url']}" if j["id"] else f"- {j['name']}: {j['url']}"
+                          for j in jobs)
                 or (f"- the repository's own check said: {was['what']}" if arm["check"] else f"- not listed: see {was['link'] or arm['url']}"),
         "needs": (f"The slice that pushed held {', '.join(arm['needs'])}: take one only for a step that uses it "
                   "(`flowkit-capacity take <name>`) and give it back after.\n\n") if arm["needs"] else "",
@@ -1189,7 +1323,7 @@ def waiting(arm, t):
 def queued_tests(arm):
     """The test-queue lines that name this arm's MR, as (story, item): its URL or `<repo dir>!<iid>`
     in any story's queue, a bare `!<iid>` in its own story's."""
-    if arm["kind"] != "gitlab-mr":
+    if arm["kind"] not in REQUESTS:
         return []
     own = re.sub(r"[^A-Za-z0-9._+-]", "-", os.path.basename(arm["repo"])) + f"!{arm['iid']}"
     found = []
@@ -1274,10 +1408,21 @@ def take():
         if poller() not in (None, os.getpid()):
             return False
         pidfile().unlink(missing_ok=True)
+        cap.write_json(watches() / "poller.kinds", {"pid": os.getpid(), "kinds": KINDS})  # before the pid: never a pid without them
         fd = os.open(pidfile(), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
         return True
+
+
+def asks(pid):
+    """The kinds of arm the poller that runs can ask: poller.kinds, which it wrote when it took
+    poller.pid; a poller of 0.17.0 or older wrote none and asks GitLab for all that is no command."""
+    try:
+        said = json.loads((watches() / "poller.kinds").read_text())
+        return set(said["kinds"]) if said["pid"] == pid else set(KINDS[:3])
+    except (OSError, ValueError, KeyError, TypeError):
+        return set(KINDS[:3])
 
 
 def start():
@@ -1287,9 +1432,21 @@ def start():
 
 
 def ensure():
-    """The tick, every `handoff.py record` and every flowkit-spawn end call this: a watch that is
-    open with no poller gets one."""
-    if arms() and poller() is None:
+    """The tick, every `handoff.py record`, every flowkit-spawn end and every add call this: a
+    watch that is open with no poller gets one. A poller that cannot ask an open arm's kind (an
+    older flowkit's, still running after an update) is ended first: the one that starts takes over
+    whatever it was in the middle of, as it would a dead poller's."""
+    found, pid = arms(), poller()
+    if pid and not {arm["kind"] for arm in found} <= asks(pid) \
+            and re.search(r"watch\.py run\s*$", sh(["ps", "-o", "command=", "-p", str(pid)], None)[1]):
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+        for _ in range(100):
+            if not cap.pid_alive(pid):
+                break
+            time.sleep(0.1)
+        pid = poller()
+    if found and pid is None:
         start()
 
 
@@ -1352,7 +1509,7 @@ def main(argv=None):
     a = sub.add_parser("add")
     a.add_argument("--story", required=True)
     what = a.add_mutually_exclusive_group(required=True)
-    what.add_argument("--mr")
+    what.add_argument("--mr", "--pr")
     what.add_argument("--ref")
     what.add_argument("--check")
     for flag in ("--name", "--sha", "--project", "--tree", "--left", "--session", "--on-green-run", "--on-green", "--repo",

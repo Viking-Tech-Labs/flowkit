@@ -1160,8 +1160,9 @@ flowkit-watch drop <name>
 ```
 
 **Registering.** `add` runs in the tree that was pushed and arms the sha of `@{u}`, not `HEAD`: a
-close commits its docs after the push. It asks GitLab nothing, so a close never waits for the
-network. It keeps `glab`'s path from the session's PATH, the tree and its branch, the session that
+close commits its docs after the push. It asks the code host nothing, so a close never waits for the
+network. It keeps `glab`'s path (`gh`'s for GitHub) from the session's PATH, the tree and its
+branch, the session that
 registered it with its close's LEFT, and the model, effort and `Needs:` of that session's prompt.
 A watch's name is its own: `<repo dir>!<iid>` for a merge request (`app!12`), `<repo dir>@<branch>`
 for a ref, `--name` for a command, and `…#2` for the next watch of the same target, so a section
@@ -1171,12 +1172,45 @@ repository's `check = <command>` of `capacity.conf`), a ref (a branch's pipeline
 command (exit 0 green, 1 red, 2 still running, anything else an error; its last line of output is
 the summary).
 
+**GitHub.** New in 0.18.0. `--mr` (or `--pr`, the same flag) takes a GitHub pull request's URL as
+well (`https://github.com/o/r/pull/12`), and the host is read from the URL per watch, so one
+machine watches merge requests and pull requests side by side:
+
+```
+flowkit-watch add --story <slug> --pr <pull request URL> [--ready] [--until merged]
+```
+
+It needs `gh` on the PATH, logged in to that host (`gh auth status`); `glab` is not asked. The
+name is the same (`app!12`), and so are `--ready`, the one fix slice of a first red, `--until
+merged`, a head that moved, a red base, `check =`, `--on-green` and the test queue. What differs:
+
+- The answer is the checks of the head commit as GitHub rolls them up, check runs and commit
+  statuses alike, in one `gh api graphql` ask a minute. The sections say `checks green`, `checks
+  red`, `PR ready`, `PR merged` and `no checks for <sha> after 15 min` where a merge request's say
+  `pipeline` and `MR`. Checks that were cancelled, or that wait for somebody (`action required`),
+  are reported, as a cancelled pipeline is.
+- A red's failed checks come with that answer (of a commit's first 100), and the fix slice's brief
+  names `gh run view --job <id> --log-failed` and `gh run rerun --job <id>` in place of `glab ci`.
+- `--until merged`: GitHub does not say whether an auto-merge was cancelled or never set, and a
+  repository has auto-merge only when its settings allow it. A green pull request with auto-merge
+  off gets a line (`waiting for the merge: auto-merge is off`) and the watch goes on until
+  somebody merges it or its six hours end; a conflict is reported as it is for a merge request.
+  After the merge, the checks of the merge commit on the target branch are reported.
+- `--ref <branch>` asks GitHub when the tree's `origin` is on github.com; on GitHub Enterprise a
+  ref is watched with `--check` and a `gh` command.
+- An update while a watch is open leaves the older version's poller running, and that one would
+  ask `glab` for a pull request. The first GitHub watch that is added, like every start of the
+  poller below, ends it and starts one that knows both hosts.
+
 **The poller.** One per machine (`poller.pid`, whose mtime is its heartbeat), started by `add`
 and gone when no watch is open. It asks each watch once a minute, 30 seconds at most per ask,
 under no capacity lock, with `CLAUDE_PID`, `TMUX_PANE` and `CLAUDE_CODE_*` taken out of its
 environment so that nothing it starts passes for a session, and keeps the computer awake
 (`caffeinate`, where there is one) while a watch is pending. The tick, every recorded close and every `flowkit-spawn` that ends start
-it again when it is gone or its heartbeat is older than three minutes.
+it again when it is gone or its heartbeat is older than three minutes. Since 0.18.0 a poller
+writes the kinds of watch it asks into `poller.kinds`; one that cannot ask an open watch (an older
+version's, see GitHub above) is ended by the next `add`, recorded close or `flowkit-spawn`, and the
+poller that starts finishes whatever it was in the middle of.
 
 **What an answer does.** Pending does nothing. Everything that ends a watch is a section of the
 story file under the watch's name, written through `handoff.py record`, so the reporter is rung
@@ -1238,7 +1272,7 @@ moves with it: `building` with an ETA (the repository's median from registering 
 the log has three), `fixing`, `ready to test`.
 
 State lives under `${CLAUDE_CONFIG_DIR:-~/.claude}/flowkit/watches/`: `<name>.json` (one watch;
-the file goes once its last section is recorded), `<name>.lock`, `poller.pid` and
+the file goes once its last section is recorded), `<name>.lock`, `poller.pid`, `poller.kinds` and
 `launched/<session>.log` (the output of a launch the watch made). Events go to capacity's
 `log.jsonl` as `watch` with an `op`: add, arm, retarget, green, red, fix, report, merged, error,
 deadline, done (how it ended, and its minutes).
