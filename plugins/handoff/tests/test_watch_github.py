@@ -3,6 +3,7 @@ which answers hand-written GraphQL per call, so nothing reaches GitHub. Run with
 `python3 -m unittest discover plugins/handoff/tests`."""
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -76,10 +77,9 @@ class GitHub(base.Launches):
         self.assertEqual({k: arm[k] for k in want}, want)
         self.assertEqual(self.add(at=T0 + 60), "repo!12", "--pr is the same flag: the same arm, armed again")
         self.assertEqual((self.calls(), self.ops()), ([], ["add", "arm"]))
-        dirs = [d for d in os.environ["PATH"].split(os.pathsep) if not os.access(os.path.join(d, "gh"), os.X_OK)]
         (self.tmp / "bin" / "gh").unlink()
-        out = self.watch("add", "--story", "st", "--pr", "https://github.com/o/r/pull/13",
-                         env={"PATH": os.pathsep.join([str(self.tmp / "bin"), *dirs])})
+        (self.tmp / "bin" / "git").symlink_to(shutil.which("git"))  # a PATH of the stubs and git alone: gh may live beside git
+        out = self.watch("add", "--story", "st", "--pr", "https://github.com/o/r/pull/13", env={"PATH": str(self.tmp / "bin")})
         self.assertEqual((out.returncode, out.stderr), (1, "gh is not on the PATH: a GitHub watch asks through it\n"))
 
     def test_pending_then_green_is_a_section(self):
