@@ -1565,8 +1565,8 @@ keys. Exit 0, or 4 with the same lines and no place; 3 without a session; 1 when
 flowkit-session read --place <id> [--rows <n>] [--box]
 
 What a session's place shows now: its rows as plain text, top to bottom, without the empty ones at
-the end; --rows <n> gives the last n. Exit 5 and `no screen` when its backend shows none (a
-background session, an outside driver that does not answer `screen`).
+the end; --rows <n> gives the last n (1 to 10000). Exit 5 and `no screen` when its backend shows
+none (a background session, an outside driver that does not answer `screen`).
 
 --box prints one word instead, what `type` would find: `free` (exit 0), or what is in a line's way
 (exit 5): `copy mode`, `no prompt box`, `dialog`, `draft`; `waiting` or `busy` for a background
@@ -1597,18 +1597,19 @@ queued by Claude Code as its next prompt.
 Takes over a session a usage limit stopped: from then on flowkit's own waiter does not continue it,
 and whoever claimed it does what it wants with it (start it again elsewhere, type a line of its
 own). Prints `claimed until <YYYY-MM-DD HH:MM>` (exit 0). The claim holds for --for minutes (15
-without it; claim again under the same name to hold it longer), while the session runs in the same
-process, and until `release`; the session's next clean turn end ends it with the stop's record.
+without it, above 0 and 1440 at most; claim again under the same name to hold it longer), while the
+session runs in the same process, and until `release`; the session's next clean turn end ends it
+with the stop's record.
 The story file gets `> limit <session> · <time> · <name> took it over until <time>: flowkit does
 not continue it meanwhile`.
 
 Exit 5 when it is not yours to take, with one line: `flowkit continued it at <HH:MM>`, `flowkit is
 typing its continue`, or `claimed by <other> until <HH:MM>`. Exit 3 when no usage-limit stop is
 recorded for the session. A StopFailure hook of your own runs beside flowkit's, which writes that
-record: `claim` waits --wait seconds for it (5 without it), and as long before it says that flowkit
-continued the session or is typing, which until then may be said of the stop before this one. Of a
-claim and flowkit's continue that come at the same moment exactly one wins: a claim that printed
-`claimed` means nothing was typed.
+record: `claim` waits --wait seconds for it (5 without it, 86400 at most), and as long before it
+says that flowkit continued the session or is typing, which until then may be said of the stop
+before this one. Of a claim and flowkit's continue that come at the same moment exactly one wins:
+a claim that printed `claimed` means nothing was typed.
 """,
     "release": """flowkit-session release <session> --by <name>
 
@@ -1619,6 +1620,8 @@ would have. Prints `released` (exit 0); exit 3 when <name> holds no claim on it.
 HOWS = {"free": backend.FREE, "line": backend.LINE, "over": backend.OVER, "escape": backend.ESCAPE,
         "command": backend.COMMAND}
 CLAIM = 15  # minutes a claim on a usage-limit stop holds when its claimer names no other time
+CLAIM_MOST = 24 * 60  # the most minutes one claim holds; in seconds, the longest `claim` waits
+ROWS_MOST = 10000  # more rows than a place shows
 CLAIM_WAIT = 5  # seconds `claim` waits for the stop's record: the claimer's hook and flowkit's run side by side
 TYPING = 180  # seconds a waiter's word that it is typing counts: more than its slowest continue takes
 
@@ -1712,12 +1715,14 @@ def session_cmd(argv):
             wrong = True
         else:
             words.append(word)
-    number = lambda key: opts[key].replace(".", "", 1).isdigit() if key in opts else True
+    number = lambda key, whole=False: key not in opts or (  # ASCII digits: others pass isdigit() and break float()
+        opts[key].isascii() and (opts[key] if whole else opts[key].replace(".", "", 1)).isdigit())
     placed = "--place" in opts
     if wrong or len(words) != (verb == "type") + (not placed) or opts.get("--how", "free") not in HOWS \
             or (verb in ("claim", "release") and not SAFE.match(opts.get("--by") or "")) \
-            or not (opts.get("--rows") or "1").isdigit() or not int(opts.get("--rows") or 1) \
-            or not number("--for") or not number("--wait"):
+            or not number("--rows", True) or not 1 <= float(opts.get("--rows", 1)) <= ROWS_MOST \
+            or not number("--for") or not 0 < float(opts.get("--for", CLAIM)) <= CLAIM_MOST \
+            or not number("--wait") or not float(opts.get("--wait", CLAIM_WAIT)) <= CLAIM_MOST * 60:
         print(SESSION_HELP[verb], end="", file=sys.stderr)
         return 2
     at = TMUX

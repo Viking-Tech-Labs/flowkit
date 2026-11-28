@@ -2199,6 +2199,10 @@ esac
         self.assertEqual(self.said("type", str(os.getpid()), "carry on")[0], 4)
         for wrong in (["type", "s4"], ["type", "s4", "a", "--how", "hard"], ["read", "s4", "--rows", "x"], ["locate"],
                       ["type", "s4", "--help"], ["read", "s4", "--box", "-h"],
+                      ["read", "s4", "--rows", "0"], ["read", "s4", "--rows", "\u00b2"], ["read", "s4", "--rows", "9" * 5000],
+                      ["claim", "s4", "--by", "a", "--for", "0"], ["claim", "s4", "--by", "a", "--for", "1441"],
+                      ["claim", "s4", "--by", "a", "--for", "\u0663"], ["claim", "s4", "--by", "a", "--wait", "\u00b2"],
+                      ["claim", "s4", "--by", "a", "--wait", "9" * 400],
                       ["claim", "s4"], ["claim", "s4", "--by", "a b"], ["release", "s4", "--for", "1"], ["locate", "s4", "--no"]):
             out = self.reach(*wrong)
             self.assertEqual((out.returncode, out.stdout, out.stderr.split()[0:2]), (2, "", ["flowkit-session", wrong[0]]), wrong)
@@ -2331,7 +2335,11 @@ esac
         self.assertRegex(text, r"^claimed until \d{4}-\d\d-\d\d \d\d:\d\d$")
         self.assertEqual(self.claim(by="other"), (5, f"claimed by spill until {text[-5:]}"))
         self.assertEqual(self.sent(2.0), "", "claimed: the waiter types nothing, its reset long over")
-        self.assertEqual(self.record()["claim"]["by"], "spill")
+        held = self.record()["claim"]
+        self.assertEqual(held["by"], "spill")
+        for minutes in ("0", "99999999999999999"):  # a claim over as it is made, one that never runs out: neither is written
+            self.assertEqual(self.reach("claim", "s4", "--by", "spill", "--for", minutes).returncode, 2, minutes)
+        self.assertEqual(self.record()["claim"], held)
         took = [l for l in self.log() if "took it over" in l]
         self.assertEqual(len(took), 1, self.log())
         self.assertRegex(took[0], rf"^> limit s4 · \d{{4}}-\d\d-\d\d \d\d:\d\d · spill took it over until {text[-5:]}: flowkit "

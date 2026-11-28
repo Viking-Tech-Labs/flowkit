@@ -179,11 +179,11 @@ flowkit-session release <session> --by <name>
 
 `claim` takes the stop over: flowkit's waiter stands down, types nothing, and the story file says
 `> limit <session> · <time> · <name> took it over until <time>: flowkit does not continue it
-meanwhile`. The claim holds for `--for` minutes (15 without it; claim again under the same name to
-hold it longer), only while the session runs in the same process, and ends with the stop's record
-at the session's next clean turn end. `release` gives the session back, and so does a claim that
-runs out: the waiter plans the stop again and continues the session as it would have, with a line
-saying so. A claimer that dies therefore strands nothing.
+meanwhile`. The claim holds for `--for` minutes (15 without it, above 0 and 1440 at most; claim
+again under the same name to hold it longer), only while the session runs in the same process, and
+ends with the stop's record at the session's next clean turn end. `release` gives the session
+back, and so does a claim that runs out: the waiter plans the stop again and continues the session
+as it would have, with a line saying so. A claimer that dies therefore strands nothing.
 
 Of a claim and the waiter's continue that come at the same moment exactly one wins. `claim` exits
 0 and prints `claimed until <YYYY-MM-DD HH:MM>` only when nothing was typed and nothing will be;
